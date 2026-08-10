@@ -35,6 +35,12 @@ Point VLC, Winamp, Sonos, or any browser at the stream URL and it just plays.
   Piper speaks it. Frequency, length, persona, voice, and speed are all tunable.
 - **Grounded facts** — tags first, then MusicBrainz/Wikipedia. The prompt is
   fact-constrained to keep the DJ from making things up.
+- **Self-repairing metadata** — when a file has no usable tags, the scanner
+  guesses artist/title from the filename and folder, then **confirms the guess
+  on the web** (MusicBrainz + iTunes, fully cached). Tracks that are still
+  unidentifiable, or written in a script the DJ can't read aloud, are skipped
+  from playlists and reported as `unknown:` in the Library panel — so the DJ
+  only ever introduces music it can name correctly.
 - **Web control panel** — live now-playing, library browser/search, genre
   filters, queue editing, presets, and DJ settings. Includes a browser player.
 - **Your library, untouched** — the scanner only ever reads your music files.

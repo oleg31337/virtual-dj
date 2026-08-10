@@ -14,7 +14,9 @@ def _fresh(music_dir):
 def test_refill_pulls_from_library(music_dir, has_ffmpeg):
     sched = _fresh(music_dir)
     assert sched.refill(10) > 0
-    assert len(sched.peek()) == 3
+    # Gamma is untagged and excluded without web confirmation, so the queue holds
+    # the two tagged files.
+    assert len(sched.peek()) == 2
 
 
 def test_pop_next_returns_tracks(music_dir, has_ffmpeg):
@@ -125,7 +127,7 @@ def test_status_reports_counts(music_dir, has_ffmpeg):
     sched = _fresh(music_dir)
     sched.refill(10)
     status = sched.status()
-    assert status["queue_length"] == 3
+    assert status["queue_length"] == 2
     assert status["tracks_played"] == 0
     sched.pop_next()
     assert sched.status()["tracks_played"] == 1

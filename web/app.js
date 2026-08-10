@@ -214,6 +214,28 @@ async function loadHealth() {
   }
 }
 
+async function loadLibraryStats() {
+  try {
+    const s = await api('/api/library');
+    const stats = s.library;
+    const sources = stats.meta_sources || {};
+    const sourceBits = Object.entries(sources)
+      .map(([k, v]) => `${v} from ${k}`).join(', ');
+    let html = `playable <b>${stats.playable}</b> / ${stats.total} total`;
+    if (stats.excluded)
+      html += ` · <span class="warn">${stats.excluded} skipped</span>`;
+    if (sourceBits) html += `<br><span class="dim">guessed: ${esc(sourceBits)}</span>`;
+    if (stats.excluded && stats.unknown_reasons) {
+      const reasons = Object.entries(stats.unknown_reasons || {})
+        .map(([k, v]) => `${esc(stats.reason_labels?.[k] || k)}: ${v}`)
+        .join(', ');
+      if (reasons)
+        html += `<br><span class="warn">unknown: ${reasons}</span>`;
+    }
+    $('library-stats').innerHTML = html;
+  } catch (e) { /* ignore */ }
+}
+
 async function pollScan() {
   const s = await api('/api/library/scan');
   $('scan-status').textContent = s.running
@@ -221,7 +243,7 @@ async function pollScan() {
     : (s.error ? `error: ${s.error}`
        : (s.finished_at ? `last scan: +${s.added} new, ${s.updated} updated` : 'idle'));
   if (s.running) setTimeout(pollScan, 1500);
-  else { loadGenres(); loadHealth(); }
+  else { loadGenres(); loadHealth(); loadLibraryStats(); }
 }
 
 /* ---------- wiring ---------- */

@@ -45,6 +45,10 @@ main {
 .label { font-size: 11px; letter-spacing: 1.5px; color: var(--accent2); }
 .np h2 { margin: 4px 0 2px; font-size: 22px; }
 .meta { color: var(--dim); }
+.stats { line-height: 1.6; margin: 4px 0 2px; font-size: 12px; }
+.stats .warn { color: #ffb454; }
+.stats .dim { color: var(--dim); }
+.stats b { color: var(--fg); }
 .progress { height: 5px; background: #232838; border-radius: 3px;
             margin: 12px 0 6px; overflow: hidden; }
 #np-bar { height: 100%; width: 0; background: var(--accent); transition: width .4s linear; }

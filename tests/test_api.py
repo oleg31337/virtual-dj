@@ -50,14 +50,18 @@ def test_static_assets_served(client):
 
 
 def test_list_tracks_and_search(client):
-    assert len(client.get("/api/library/tracks").json()) == 3
+    # "Band Three - Gamma" is untagged: without web confirmation it is excluded,
+    # so only the two tagged files are playable.
+    tracks = client.get("/api/library/tracks").json()
+    assert len(tracks) == 2
     found = client.get("/api/library/tracks?search=Alpha").json()
     assert [t["title"] for t in found] == ["Alpha"]
 
 
 def test_genres_endpoint(client):
     genres = {g["genre"] for g in client.get("/api/library/genres").json()}
-    assert {"Rock", "Pop", "Unknown"} <= genres
+    assert {"Rock", "Pop"} <= genres
+    assert "Unknown" not in genres
 
 
 def test_artists_endpoint(client):

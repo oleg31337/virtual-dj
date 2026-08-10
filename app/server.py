@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import config, db, dj, library
+from . import config, db, dj, library, websearch
 from .scheduler import SCHEDULER
 from .stream import BROADCASTER
 
@@ -162,6 +162,12 @@ def _get_chunk(listener) -> bytes | None:
 
 # --- status ----------------------------------------------------------------
 
+@app.get("/api/library")
+def api_library():
+    """Library stats consumed by the web UI's Library panel."""
+    return {"library": library.library_stats()}
+
+
 @app.get("/api/status")
 def api_status():
     return {
@@ -177,6 +183,7 @@ def api_health():
     return {
         "llm": dj.llm_health(),
         "tts": dj.tts_health(),
+        "websearch": websearch.health(),
         "library": library.library_stats(),
         "broadcaster": BROADCASTER.state(),
     }
@@ -206,18 +213,28 @@ async def websocket_endpoint(ws: WebSocket):
 class ScanRequest(BaseModel):
     music_dir: str | None = None
     full: bool = False
+    use_web: bool | None = None
 
 
 @app.post("/api/library/scan")
 def api_scan(req: ScanRequest):
     if req.music_dir:
         config.save_config({"music_dir": req.music_dir})
-    return library.scan_in_background(req.music_dir, req.full)
+    return library.scan_in_background(req.music_dir, req.full, req.use_web)
 
 
 @app.get("/api/library/scan")
 def api_scan_status():
     return library.STATUS.snapshot()
+
+
+@app.get("/api/library/excluded")
+def api_excluded(limit: int = 200, offset: int = 0, reason: str = ""):
+    """Tracks skipped as unidentifiable, with the reason for each."""
+    return {
+        "stats": library.library_stats(),
+        "tracks": library.excluded_tracks(limit, offset, reason or None),
+    }
 
 
 @app.get("/api/library/genres")

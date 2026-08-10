@@ -63,6 +63,13 @@ DEFAULTS: dict[str, Any] = {
         ),
         "timeout_s": 15,
     },
+    "websearch": {
+        # Confirm filename-guessed tracks on the web and infer their genre.
+        # Uses keyless public APIs (MusicBrainz, iTunes, DuckDuckGo) and
+        # caches every answer, so a rescan costs nothing for known tracks.
+        "enabled": True,
+        "timeout_s": 12,
+    },
     "playback": {
         "shuffle": True,
         # Active filters applied when auto-filling the queue.

@@ -25,11 +25,24 @@ CREATE TABLE IF NOT EXISTS tracks (
     mtime       REAL,
     size        INTEGER,
     missing     INTEGER NOT NULL DEFAULT 0,
+    -- Tracks we cannot announce (unreadable script, no usable name) are kept
+    -- in the table for the stats panel but excluded from every playlist.
+    excluded    INTEGER NOT NULL DEFAULT 0,
+    exclude_reason TEXT,
+    -- Where title/artist ultimately came from: tags, path, or web.
+    meta_source TEXT,
     added_at    REAL DEFAULT (strftime('%s','now'))
 );
 CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
 CREATE INDEX IF NOT EXISTS idx_tracks_genre  ON tracks(genre);
 CREATE INDEX IF NOT EXISTS idx_tracks_missing ON tracks(missing);
+
+-- Cache of web confirmation lookups, keyed on "artist|title".
+CREATE TABLE IF NOT EXISTS web_lookups (
+    query       TEXT PRIMARY KEY,
+    result      TEXT NOT NULL,
+    fetched_at  REAL DEFAULT (strftime('%s','now'))
+);
 
 CREATE TABLE IF NOT EXISTS enrichment (
     track_id    INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
@@ -82,7 +95,33 @@ def connect() -> sqlite3.Connection:
 def init_db() -> None:
     conn = connect()
     conn.executescript(SCHEMA)
+    _migrate(conn)
     conn.commit()
+
+
+# Columns added after the first release. ``CREATE TABLE IF NOT EXISTS`` is a
+# no-op on an existing database, so new columns must be added explicitly.
+_ADDED_COLUMNS = (
+    ("tracks", "excluded", "INTEGER NOT NULL DEFAULT 0"),
+    ("tracks", "exclude_reason", "TEXT"),
+    ("tracks", "meta_source", "TEXT"),
+)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Bring an older database up to the current schema, in place."""
+    for table, column, decl in _ADDED_COLUMNS:
+        existing = {
+            row["name"] for row in conn.execute(f"PRAGMA table_info({table})")
+        }
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+    # The playable index spans a column added after release; create it here so
+    # it exists for both brand-new and pre-existing databases.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tracks_playable "
+        "ON tracks(missing, excluded)"
+    )
 
 
 def close() -> None:
