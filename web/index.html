@@ -28,6 +28,7 @@
     <div class="nowrow">
       <div class="np">
         <div class="label" id="np-kind">IDLE</div>
+        <div class="program-badge" id="np-program">—</div>
         <h2 id="np-title">—</h2>
         <div class="meta" id="np-artist"></div>
         <div class="meta dim" id="np-album"></div>
@@ -68,6 +69,31 @@
   </section>
 
   <section class="card">
+    <h3>Programs <span class="dim" id="program-strategy"></span></h3>
+    <p class="dim">The DJ groups the queue into themed runs and announces each
+      switch — like a real host. This is what's coming up.</p>
+    <div id="programs" class="programs"></div>
+    <div class="row">
+      <label class="field inline">
+        <input type="checkbox" id="program-enabled" checked /> Group into programs
+      </label>
+    </div>
+    <label class="field">
+      <span>Tracks per program: <b id="program-size-val">6</b></span>
+      <input type="range" id="program-size" min="2" max="20" value="6" />
+    </label>
+    <label class="field">
+      <span>Theme by</span>
+      <select id="program-strategy-sel">
+        <option value="genre">Genre</option>
+        <option value="artist">Artist</option>
+        <option value="decade">Decade</option>
+      </select>
+    </label>
+    <button id="save-program" class="primary">Save programs</button>
+  </section>
+
+  <section class="card">
     <h3>Genres</h3>
     <div class="chips" id="genres"></div>
     <div class="row">
@@ -94,6 +120,7 @@
     <label class="field">
       <span>Voice</span>
       <select id="dj-voice"></select>
+      <div class="dim" id="dj-voice-note"></div>
     </label>
     <label class="field">
       <span>Persona / style</span>

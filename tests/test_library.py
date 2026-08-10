@@ -41,16 +41,20 @@ def test_untagged_file_falls_back_to_filename(music_dir, has_ffmpeg, monkeypatch
     assert rows[0]["title"] == "Gamma"
 
 
-def test_untagged_unconfirmed_file_is_excluded(music_dir, has_ffmpeg, monkeypatch):
-    # When the web cannot confirm a filename guess, the track is skipped so the
-    # DJ never announces an unverified title.
+def test_clean_filename_guess_stays_playable_without_web(music_dir, has_ffmpeg, monkeypatch):
+    # A clean "<Artist> - <Title>" filename guess is trustworthy on its own:
+    # even when the web cannot confirm it, the track stays playable (the DJ can
+    # announce it). Only genuinely corrupt/unusable names are excluded.
     monkeypatch.setattr(library.websearch, "confirm_track",
                         lambda a, t, use_cache=True: {"confirmed": False,
                         "genre": None, "confidence": 0.0, "sources": []})
     library.scan_library(str(music_dir))
-    assert library.library_stats()["excluded"] == 1
-    exc = library.excluded_tracks()
-    assert any(e["title"] == "Gamma" for e in exc)
+    assert library.library_stats()["excluded"] == 0
+    titles = {t["title"] for t in library.query_tracks()}
+    assert "Gamma" in titles
+    # And the genre gets filled by the local AI fallback when web can't supply one.
+    gamma = next(t for t in library.query_tracks() if t["title"] == "Gamma")
+    assert gamma["artist"] == "Band Three"
 
 
 def test_guess_from_filename_variants():
@@ -110,15 +114,16 @@ def test_genre_filter(music_dir, has_ffmpeg):
     assert [t["title"] for t in rock] == ["Alpha"]
 
 
-def test_excluded_tracks_are_not_in_playlist_queries(music_dir, has_ffmpeg, monkeypatch):
-    # Gamma is untagged; with no web confirmation it is excluded and must not
-    # appear in normal playlist queries.
+def test_playable_tracks_appear_in_playlist_queries(music_dir, has_ffmpeg, monkeypatch):
+    # Gamma is untagged but has a clean filename guess, which stays playable
+    # (web confirmation no longer excludes a usable guess), so it appears in
+    # normal playlist queries alongside the two tagged files.
     monkeypatch.setattr(library.websearch, "confirm_track",
                         lambda a, t, use_cache=True: {"confirmed": False,
                         "genre": None, "confidence": 0.0, "sources": []})
     library.scan_library(str(music_dir))
     titles = {t["title"] for t in library.query_tracks()}
-    assert "Gamma" not in titles
+    assert "Gamma" in titles
     assert "Alpha" in titles and "Beta" in titles
 
 

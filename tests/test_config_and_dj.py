@@ -63,7 +63,9 @@ def test_delete_preset():
 
 def test_fallback_script_uses_available_metadata():
     text = dj.fallback_script({"title": "T", "artist": "A", "year": "1999"})
-    assert "T" in text and "A" in text and "1999" in text
+    assert "T" in text and "A" in text
+    # Years are spelled out so TTS reads them as dates, not numerals.
+    assert "nineteen ninety-nine" in text
 
 
 def test_fallback_script_handles_missing_metadata():

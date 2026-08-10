@@ -359,7 +359,11 @@ def api_dj_scripts(limit: int = 20):
 
 @app.get("/api/dj/voices")
 def api_dj_voices():
-    return {"voices": dj.available_voices(), "current": config.get("dj.voice")}
+    return {
+        "voices": dj.available_voices(),
+        "profiles": dj.voice_profiles(),
+        "current": config.get("dj.voice"),
+    }
 
 
 class PreviewRequest(BaseModel):

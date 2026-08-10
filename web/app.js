@@ -51,6 +51,14 @@ function toggleListen() {
 
 function renderState(s) {
   $('np-kind').textContent = (s.kind || 'idle').toUpperCase();
+  const prog = s.program;
+  if (prog && prog.label) {
+    const word = { genre: 'genre', artist: 'artist', decade: 'era' }[prog.kind] || 'set';
+    $('np-program').textContent = `ON AIR · ${prog.label} (${word})`;
+    $('np-program').style.display = '';
+  } else {
+    $('np-program').style.display = 'none';
+  }
   $('listeners').textContent = `${s.listeners} listener${s.listeners === 1 ? '' : 's'}`;
   const t = s.track;
   $('np-title').textContent = t ? (t.title || t.path.split('/').pop()) : '—';
@@ -194,9 +202,22 @@ async function loadConfig() {
   state.activeGenres = new Set(cfg.playback.genres || []);
 
   const voices = await api('/api/dj/voices');
-  $('dj-voice').innerHTML = voices.voices
-    .map((v) => `<option${v === voices.current ? ' selected' : ''}>${esc(v)}</option>`)
-    .join('') || '<option>no voices installed</option>';
+  const profiles = voices.profiles || [];
+  $('dj-voice').innerHTML = profiles.length
+    ? profiles.map((p) =>
+        `<option value="${esc(p.id)}"${p.id === voices.current ? ' selected' : ''}>${esc(p.name)} (${esc(p.gender)})${p.installed ? '' : ' — not installed'}</option>`).join('')
+    : (voices.voices.length
+        ? voices.voices.map((v) => `<option${v === voices.current ? ' selected' : ''}>${esc(v)}</option>`).join('')
+        : '<option>no voices installed</option>');
+  // Show the intonation note for the selected voice.
+  const sel = profiles.find((p) => p.id === $('dj-voice').value) || profiles[0];
+  $('dj-voice-note').textContent = sel && sel.note ? sel.note : '';
+
+  // Program grouping settings.
+  $('program-enabled').checked = !!(cfg.playback?.program?.enabled ?? true);
+  $('program-size').value = cfg.playback?.program?.size ?? 6;
+  $('program-size-val').textContent = $('program-size').value;
+  $('program-strategy-sel').value = cfg.playback?.program?.strategy ?? 'genre';
 }
 
 async function loadHealth() {
@@ -212,6 +233,32 @@ async function loadHealth() {
   } catch (e) {
     $('health-line').textContent = 'backend unreachable';
   }
+}
+
+async function loadPrograms() {
+  try {
+    const p = await api('/api/programs');
+    $('program-strategy').textContent =
+      `(${{ genre: 'by genre', artist: 'by artist', decade: 'by decade' }[p.strategy] || p.strategy})`;
+    const themes = (p.themes || []).slice(0, 12);
+    if (!themes.length) {
+      $('programs').innerHTML = '<div class="dim">No themes available yet.</div>';
+      return;
+    }
+    $('programs').innerHTML = themes.map((t) => {
+      const kind = p.strategy === 'artist' ? 'artist'
+                 : p.strategy === 'decade' ? 'decade' : 'genre';
+      let label;
+      if (p.strategy === 'decade') {
+        label = `${t.decade}s`;
+      } else {
+        label = t.genre || t.artist || t.label || '?';
+      }
+      return `<div class="program-chip" data-kind="${esc(kind)}">`
+        + `<span class="pc-label">${esc(label)}</span>`
+        + `<span class="pc-n">${t.n}</span></div>`;
+    }).join('');
+  } catch (e) { /* ignore */ }
 }
 
 async function loadLibraryStats() {
@@ -331,6 +378,29 @@ function wire() {
   $('dj-speed').oninput = (e) =>
     ($('speed-val').textContent = (e.target.value / 100).toFixed(2));
 
+  $('dj-voice').onchange = async () => {
+    const profiles = (await api('/api/dj/voices')).profiles || [];
+    const sel = profiles.find((p) => p.id === $('dj-voice').value);
+    $('dj-voice-note').textContent = sel && sel.note ? sel.note : '';
+  };
+
+  $('save-program').onclick = async () => {
+    await api('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({
+        playback: {
+          program: {
+            enabled: $('program-enabled').checked,
+            size: Number($('program-size').value),
+            strategy: $('program-strategy-sel').value,
+          },
+        },
+      }),
+    });
+    await loadPrograms();
+  };
+  $('program-size').oninput = (e) =>
+    ($('program-size-val').textContent = e.target.value);
   $('save-dj').onclick = async () => {
     await api('/api/config', {
       method: 'PUT',
@@ -361,7 +431,7 @@ async function init() {
   wire();
   await loadConfig();
   await Promise.all([loadGenres(), loadTracks(''), loadQueue(),
-                     loadPresets(), loadHistory(), loadHealth()]);
+                     loadPresets(), loadHistory(), loadHealth(), loadPrograms()]);
   pollScan();
   connectWS();
   setInterval(loadHistory, 30000);

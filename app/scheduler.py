@@ -226,8 +226,8 @@ class Scheduler:
             return False
         return (self._track_counter + index) % every == 0
 
-    def pop_next(self) -> tuple[dict[str, Any], dict[str, Any] | None] | None:
-        """Return (track, dj_break_or_None) for the next thing to play."""
+    def pop_next(self) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None] | None:
+        """Return (track, dj_break_or_None, program_or_None) for the next thing to play."""
         self.ensure_filled(5)
         with self._lock:
             if not self._queue:
@@ -237,12 +237,13 @@ class Scheduler:
             prepared = self._prepared.pop(item["uid"], None)
             self._track_counter += 1
             self._previous = item["track"]
+            program = item.get("program")
         self._wake.set()
         if due and prepared is None:
             # Look-ahead missed this one (fresh start, slow LLM). Prepare it
             # inline only if it is cheap; otherwise skip the break.
             prepared = None
-        return item["track"], (prepared if due else None)
+        return item["track"], (prepared if due else None), program
 
     def previous_track(self) -> dict[str, Any] | None:
         with self._lock:

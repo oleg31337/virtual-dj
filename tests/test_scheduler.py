@@ -14,15 +14,16 @@ def _fresh(music_dir):
 def test_refill_pulls_from_library(music_dir, has_ffmpeg):
     sched = _fresh(music_dir)
     assert sched.refill(10) > 0
-    # Gamma is untagged and excluded without web confirmation, so the queue holds
-    # the two tagged files.
-    assert len(sched.peek()) == 2
+    # All three are playable: the two tagged files, plus the untagged
+    # "Band Three - Gamma.mp3" whose clean filename guess is kept (web
+    # confirmation no longer excludes a usable guess).
+    assert len(sched.peek()) == 3
 
 
 def test_pop_next_returns_tracks(music_dir, has_ffmpeg):
     sched = _fresh(music_dir)
     sched.refill(10)
-    track, _ = sched.pop_next()
+    track, _, _ = sched.pop_next()
     assert track["path"]
 
 
@@ -127,7 +128,7 @@ def test_status_reports_counts(music_dir, has_ffmpeg):
     sched = _fresh(music_dir)
     sched.refill(10)
     status = sched.status()
-    assert status["queue_length"] == 2
+    assert status["queue_length"] == 3
     assert status["tracks_played"] == 0
     sched.pop_next()
     assert sched.status()["tracks_played"] == 1

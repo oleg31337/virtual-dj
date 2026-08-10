@@ -91,4 +91,23 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
         border: 1px solid var(--border); font-size: 12px; color: var(--dim); }
 .pill.link { text-decoration: none; color: var(--accent2); }
 .ok { color: #6ee7a0; } .bad { color: #ff7b72; }
+.program-badge {
+  display: inline-block; margin: 2px 0 6px; padding: 3px 10px;
+  background: linear-gradient(90deg,#ffb454,#4fc3f7); color: #14110a;
+  border-radius: 12px; font-size: 11px; font-weight: 700; letter-spacing: .5px;
+  text-transform: uppercase;
+}
+.programs { display: flex; flex-wrap: wrap; gap: 7px; margin: 6px 0 12px; }
+.program-chip {
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 12px; border-radius: 16px; background: var(--card2);
+  border: 1px solid var(--border); font-size: 13px;
+}
+.program-chip[data-kind="genre"] { border-left: 3px solid var(--accent); }
+.program-chip[data-kind="artist"] { border-left: 3px solid #b388ff; }
+.program-chip[data-kind="decade"] { border-left: 3px solid #6ee7a0; }
+.pc-label { font-weight: 600; }
+.pc-n { color: var(--dim); font-size: 11px; }
+.field.inline { display: flex; align-items: center; gap: 8px; }
+.field.inline > input { width: auto; }
 audio { height: 34px; }

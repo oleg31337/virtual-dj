@@ -262,6 +262,7 @@ class Broadcaster:
             "kind": kind,
             "track": meta.get("track"),
             "dj_text": meta.get("dj_text"),
+            "program": meta.get("program"),
             "started_at": time.time(),
             "duration": meta.get("duration"),
         }
@@ -369,13 +370,14 @@ class Broadcaster:
                 if nxt is None:
                     self._idle_tone()
                     continue
-                track, dj_break = nxt
+                track, dj_break, program = nxt
 
                 if dj_break and dj_break.get("audio_path"):
                     self._play_file(
                         dj_break["audio_path"], "dj",
                         {"track": track, "dj_text": dj_break.get("text"),
-                         "duration": dj_break.get("duration")},
+                         "duration": dj_break.get("duration"),
+                         "program": program},
                     )
 
                 if self._stop.is_set():
@@ -383,7 +385,8 @@ class Broadcaster:
 
                 played = self._play_file(
                     track["path"], "track",
-                    {"track": track, "duration": track.get("duration")},
+                    {"track": track, "duration": track.get("duration"),
+                     "program": program},
                 )
                 if played:
                     try:

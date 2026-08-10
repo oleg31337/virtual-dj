@@ -29,6 +29,49 @@ log = logging.getLogger(__name__)
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
+# Piper (and most TTS) read bare digits as individual numerals — "1984" comes
+# out as "one nine eight four" instead of a year. Years and numbers the DJ
+# should *speak* are converted to words before synthesis so the voice model
+# reads them as dates/quantities, not digits.
+_YEAR_RE = re.compile(r"\b(19|20)(\d{2})\b")
+_NUM_RE = re.compile(r"\b\d+\b")
+
+_UNITS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+          "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+          "sixteen", "seventeen", "eighteen", "nineteen"]
+_TENS = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy",
+         "eighty", "ninety"]
+
+
+def _int_to_words(n: int) -> str:
+    if n < 20:
+        return _UNITS[n]
+    if n < 100:
+        t, r = divmod(n, 10)
+        return _TENS[t] + (f"-{_UNITS[r]}" if r else "")
+    if n < 1000:
+        h, r = divmod(n, 100)
+        return _UNITS[h] + " hundred" + (f" {_int_to_words(r)}" if r else "")
+    if n < 2000:
+        # 19xx reads as "nineteen" + the two-digit tail (e.g. 1984 -> "nineteen eighty-four").
+        return f"nineteen {_int_to_words(n - 1900)}"
+    if n < 2100:
+        # 20xx reads as "twenty" + the two-digit tail (e.g. 2024 -> "twenty twenty-four").
+        return f"twenty {_int_to_words(n - 2000)}"
+    # Fallback for anything else.
+    return " ".join(_int_to_words(int(d)) for d in str(n))
+
+
+def _spell_dates(text: str) -> str:
+    """Convert bare years in speech text to spoken words.
+
+    ``1984`` -> ``nineteen eighty-four``; ``2023`` -> ``twenty twenty-three``.
+    Keeps the digits out of the TTS input so the voice says the year, not a
+    string of numerals. Numbers that are clearly not years (counts, etc.) are
+    left as-is to avoid mangling things like "top 10".
+    """
+    return _YEAR_RE.sub(lambda m: _int_to_words(int(m.group(0))), text)
+
 SYSTEM_PROMPT = (
     "You are the voice of a radio station. You introduce songs on air. "
     "Write ONLY the words to be spoken aloud: no stage directions, no track "
@@ -76,7 +119,9 @@ def _clean_script(text: str, max_sentences: int) -> str:
     if not text:
         return ""
     sentences = [s for s in _SENT_SPLIT.split(text) if s.strip()]
-    return " ".join(sentences[: max(1, max_sentences)]).strip()
+    text = " ".join(sentences[: max(1, max_sentences)]).strip()
+    # Years must be spelled out so TTS reads them as dates, not numerals.
+    return _spell_dates(text)
 
 
 def fallback_script(track: dict[str, Any],
@@ -95,12 +140,12 @@ def fallback_script(track: dict[str, Any],
         label = program.get("label") or "the next set"
         kind = program.get("kind")
         if kind == "genre":
-            return f"Next up, a run of {label}. {base}"
+            return _spell_dates(f"Next up, a run of {label}. {base}")
         if kind == "artist":
-            return f"A spotlight on {label} now. {base}"
+            return _spell_dates(f"A spotlight on {label} now. {base}")
         if kind == "decade":
-            return f"Traveling back to the {label}. {base}"
-    return base
+            return _spell_dates(f"Traveling back to the {label}. {base}")
+    return _spell_dates(base)
 
 
 def _facts_block(track: dict[str, Any], facts: dict[str, Any]) -> str:
@@ -231,6 +276,9 @@ def synthesize(text: str, voice: str | None = None,
     text = (text or "").strip()
     if not text:
         return None
+    # Final guard: years must be spoken as words, not read as numerals, so the
+    # voice says "nineteen seventy-seven" and not "one nine seven seven".
+    text = _spell_dates(text)
 
     voice = voice or config.get("dj.voice", "en_US-amy-medium")
     speed = float(speed if speed is not None else config.get("dj.speed", 1.0))
@@ -363,6 +411,64 @@ def tts_health() -> dict[str, Any]:
 
 __all__ = [
     "generate_script", "synthesize", "prepare_break", "fallback_script",
-    "available_voices", "llm_health", "tts_health", "recent_scripts",
-    "audio_duration", "json",
+    "available_voices", "voice_profiles", "llm_health", "tts_health",
+    "recent_scripts", "audio_duration", "json", "_spell_dates",
 ]
+
+# Human-readable descriptions of the bundled voices, with notes from community
+# feedback about which read most naturally. The DJ picker in the web UI shows
+# these so you can pick a voice by character, not just by a model filename.
+VOICE_PROFILES: list[dict[str, str]] = [
+    {
+        "id": "en_US-amy-medium",
+        "name": "Amy",
+        "gender": "female",
+        "note": "Default. Clear and neutral; good all-rounder but the most "
+                "'robotic' of the set on long intros.",
+    },
+    {
+        "id": "en_US-lessac-medium",
+        "name": "Lessac",
+        "gender": "female",
+        "note": "Warmest, most natural intonation per community feedback — the "
+                "usual upgrade pick. Occasionally over-pauses between phrases.",
+    },
+    {
+        "id": "en_US-libritts_r-medium",
+        "name": "LibriTTS-R",
+        "gender": "female",
+        "note": "Broadest tonal range and most expressive prosody of the "
+                "English set; great for lively, varied delivery.",
+    },
+    {
+        "id": "en_US-ryan-medium",
+        "name": "Ryan",
+        "gender": "male",
+        "note": "Natural male voice, slightly bright/fresh; the go-to male "
+                "option when you want a different timbre from the women.",
+    },
+    {
+        "id": "en_US-bryce-medium",
+        "name": "Bryce",
+        "gender": "male",
+        "note": "Deeper male voice; pairs well with a late-night radio persona.",
+    },
+]
+
+
+def voice_profiles() -> list[dict[str, str]]:
+    """Voice catalogue (id, name, gender, intonation note) for the UI."""
+    installed = set(available_voices())
+    profiles = []
+    for p in VOICE_PROFILES:
+        entry = dict(p)
+        entry["installed"] = p["id"] in installed
+        profiles.append(entry)
+    # Include any installed voice not in the curated list (e.g. user-added).
+    known = {p["id"] for p in VOICE_PROFILES}
+    for v in available_voices():
+        if v not in known:
+            profiles.append({
+                "id": v, "name": v, "gender": "?", "note": "", "installed": True,
+            })
+    return profiles
