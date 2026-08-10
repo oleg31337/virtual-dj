@@ -2,9 +2,11 @@
 
 Two jobs:
 
-1. Decide whether a piece of metadata is *usable for an English-speaking DJ* —
-   readable Latin script, not mojibake, not a placeholder like "01" or "track
-   03". Anything else is excluded from playlists rather than mumbled over.
+1. Decide whether a piece of metadata is *usable* — present, not mojibake, not
+   a placeholder like "01" or "track 03". We deliberately do **not** reject
+   non-Latin scripts: Cyrillic, Greek, Japanese etc. are valid track names and
+   the DJ can still announce a romanised form. Only *corrupt* text (wrong-codec
+   mojibake, decoration, placeholders) is unusable.
 2. Guess artist / title / album from the file path when tags are missing,
    using the conventions real collections actually follow
    ("Artist - Title.mp3", "Artist/Album/01 Title.mp3", ...).
@@ -86,7 +88,11 @@ def strip_decorations(text: str) -> str:
 
 
 def has_non_latin_script(text: str) -> bool:
-    """True if any letter belongs to a script we cannot read on air."""
+    """True if any letter belongs to a script other than Latin.
+
+    Used for *reporting* (e.g. "this track is in Cyrillic"), NOT for rejecting —
+    non-Latin names are valid, just announced in romanised form.
+    """
     for char in text or "":
         if not char.isalpha():
             continue
@@ -131,27 +137,40 @@ def is_placeholder(text: str) -> bool:
     return len(_LETTERS.findall(cleaned)) < 2
 
 
+def is_corrupt(text: str | None) -> bool:
+    """True when a name is unusable because it is mojibake or a placeholder.
+
+    Non-Latin scripts (Cyrillic, Greek, ...) are NOT corrupt — they are valid
+    names the DJ will announce in romanised form.
+    """
+    if not text or not text.strip():
+        return True
+    return looks_like_mojibake(text) or is_placeholder(text)
+
+
 def is_usable(text: str | None) -> bool:
-    """A name is usable when it is present, readable Latin, and meaningful."""
+    """A name is usable when it is present and not corrupt.
+
+    Non-Latin scripts are accepted — only mojibake and placeholders are
+    rejected, because the DJ can still announce a romanised version of a
+    Cyrillic or Japanese title.
+    """
     if not text or not text.strip():
         return False
-    if has_non_latin_script(text) or looks_like_mojibake(text):
-        return False
-    return not is_placeholder(text)
+    return not is_corrupt(text)
 
 
 def rejection_reason(artist: str | None, title: str | None) -> str | None:
     """Why this track cannot be announced, or None when it is fine.
 
     Reasons are stable identifiers so the UI can group them:
-    ``no_title``/``no_artist`` (nothing usable found), ``non_latin``
-    (unreadable script), ``mojibake`` (wrong-codec text).
+    ``no_title``/``no_artist`` (nothing usable found), ``corrupt``
+    (mojibake or placeholder text), ``unconfirmed`` (web couldn't verify).
+    Non-Latin scripts are intentionally NOT a rejection reason.
     """
     for value in (title, artist):
-        if value and has_non_latin_script(value):
-            return "non_latin"
-        if value and looks_like_mojibake(value):
-            return "mojibake"
+        if value and is_corrupt(value):
+            return "corrupt"
     if not is_usable(title):
         return "no_title"
     if not is_usable(artist):
@@ -321,6 +340,6 @@ def guess_from_path(path: Path, root: Path | None = None) -> dict[str, str | Non
 
 __all__ = [
     "clean_name", "strip_decorations", "guess_from_path", "is_usable",
-    "is_placeholder", "has_non_latin_script", "looks_like_mojibake",
-    "rejection_reason",
+    "is_corrupt", "is_placeholder", "has_non_latin_script",
+    "looks_like_mojibake", "rejection_reason",
 ]

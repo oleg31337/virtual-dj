@@ -48,8 +48,10 @@ def test_mojibake_detected():
 
 
 def test_rejection_reason_priority():
-    # Cyrillic wins over missing title.
-    assert textq.rejection_reason("Синагогальная", None) == "non_latin"
+    # A full Cyrillic pair is usable now (no longer a rejection reason).
+    assert textq.rejection_reason("Синагогальная", "Музыка") is None
+    # Mojibake is rejected as corrupt.
+    assert textq.rejection_reason("Ñèíàãîãàëüíàÿ", None) == "corrupt"
     assert textq.rejection_reason("Metallica", None) == "no_title"
     assert textq.rejection_reason(None, "Fade To Black") == "no_artist"
     assert textq.rejection_reason("Metallica", "Fade To Black") is None
@@ -95,10 +97,12 @@ def test_guess_underscore_separator(tmp_path):
     assert g["title"] == "Do You See The Light"
 
 
-def test_guess_cyrillic_folder_not_usable(tmp_path):
+def test_guess_cyrillic_folder_usable(tmp_path):
     p = _touch(tmp_path, "Russian/Игорек - Подождем.mp3")
     g = textq.guess_from_path(p, tmp_path)
-    # Path has a usable title but a non-Latin artist -> reportable, not a guess.
+    # Non-Latin names are now kept (the DJ romanises them), so both halves are
+    # recovered from the filename split.
+    assert g["artist"] == "Игорек"
     assert g["title"] == "Подождем"
 
 

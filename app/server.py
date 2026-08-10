@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import config, db, dj, library, websearch
+from . import config, db, dj, library, websearch, ai_meta
 from .scheduler import SCHEDULER
 from .stream import BROADCASTER
 
@@ -184,9 +184,17 @@ def api_health():
         "llm": dj.llm_health(),
         "tts": dj.tts_health(),
         "websearch": websearch.health(),
+        "ai": ai_meta.health(),
         "library": library.library_stats(),
         "broadcaster": BROADCASTER.state(),
     }
+
+
+@app.get("/api/programs")
+def api_programs():
+    """Candidate themes for program grouping (genres/artists/decades)."""
+    strategy = str(config.get("playback.program.strategy", "genre"))
+    return {"strategy": strategy, "themes": library.program_themes(strategy)}
 
 
 @app.websocket("/ws")

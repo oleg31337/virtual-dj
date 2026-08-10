@@ -44,6 +44,14 @@ CREATE TABLE IF NOT EXISTS web_lookups (
     fetched_at  REAL DEFAULT (strftime('%s','now'))
 );
 
+-- Cache of local-LLM metadata resolutions (genre + corrupt-tag name recovery),
+-- keyed on the inputs. Same idea as web_lookups: a rescan costs nothing.
+CREATE TABLE IF NOT EXISTS ai_lookups (
+    query       TEXT PRIMARY KEY,
+    result      TEXT NOT NULL,
+    fetched_at  REAL DEFAULT (strftime('%s','now'))
+);
+
 CREATE TABLE IF NOT EXISTS enrichment (
     track_id    INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
     facts       TEXT,
@@ -105,6 +113,8 @@ _ADDED_COLUMNS = (
     ("tracks", "excluded", "INTEGER NOT NULL DEFAULT 0"),
     ("tracks", "exclude_reason", "TEXT"),
     ("tracks", "meta_source", "TEXT"),
+    ("tracks", "ai_resolved", "INTEGER NOT NULL DEFAULT 0"),
+    ("tracks", "ai_genre", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 
@@ -121,6 +131,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_tracks_playable "
         "ON tracks(missing, excluded)"
+    )
+    # ai_lookups may not exist on databases created before this release.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS ai_lookups ("
+        "query TEXT PRIMARY KEY, result TEXT NOT NULL, "
+        "fetched_at REAL DEFAULT (strftime('%s','now')))"
     )
 
 

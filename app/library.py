@@ -3,14 +3,18 @@
 Metadata is resolved in three escalating stages, stopping as soon as the track
 is announceable:
 
-1. **Tags** — whatever mutagen can read from the file.
-2. **Path** — "Artist - Title.mp3" and folder conventions, when tags are
-   missing or useless.
-3. **Web** — a search that confirms the guess really is a real recording and
-   brings back a genre (see :mod:`app.websearch`).
+1. **Tags** — whatever mutagen can read from the file. Corrupt tags (mojibake,
+   placeholders) are recovered from the filename/folder, then — if the filename
+   is also messy — by the local LLM, which can split and romanise names so the
+   DJ can still announce a Cyrillic or Japanese track.
+2. **Web** — a search that confirms a path-guessed track really is a real
+   recording and brings back a genre (see :mod:`app.websearch`).
+3. **Local AI** — the second opinion for genre (see :mod:`app.ai_meta`). Web
+   search is the first source of a genre; when it comes up empty the local
+   model fills it in, so no playable track is left with an unknown genre.
 
-Anything still unidentifiable, or written in a script the DJ cannot read, is
-marked ``excluded``: it stays in the database so the scan report can account
+Anything still unidentifiable, or too corrupt to trust even after AI recovery,
+is marked ``excluded``: it stays in the database so the scan report can account
 for it, but no playlist will ever select it.
 """
 
@@ -27,7 +31,7 @@ from typing import Any, Iterator
 
 from mutagen import File as MutagenFile
 
-from . import config, db, textq, websearch
+from . import config, db, textq, websearch, ai_meta
 
 log = logging.getLogger(__name__)
 
@@ -45,8 +49,7 @@ _TAG_KEYS = {
 REJECTION_LABELS = {
     "no_title": "no usable title",
     "no_artist": "no usable artist",
-    "non_latin": "non-Latin script",
-    "mojibake": "garbled text encoding",
+    "corrupt": "corrupt/mojibake text",
     "unconfirmed": "could not confirm on the web",
 }
 
@@ -63,9 +66,12 @@ class ScanStatus:
     from_tags: int = 0
     from_path: int = 0
     from_web: int = 0
+    from_ai: int = 0
     excluded: int = 0
     web_lookups: int = 0
     genres_found: int = 0
+    ai_genres: int = 0
+    ai_resolved_count: int = 0
     reasons: dict[str, int] = field(default_factory=dict)
     started_at: float | None = None
     finished_at: float | None = None
@@ -86,9 +92,12 @@ class ScanStatus:
                 "from_tags": self.from_tags,
                 "from_path": self.from_path,
                 "from_web": self.from_web,
+                "from_ai": self.from_ai,
                 "excluded": self.excluded,
                 "web_lookups": self.web_lookups,
                 "genres_found": self.genres_found,
+                "ai_genres": self.ai_genres,
+                "ai_resolved": self.ai_resolved_count,
                 "reasons": dict(self.reasons),
                 "reason_labels": {
                     key: REJECTION_LABELS.get(key, key)
@@ -143,7 +152,7 @@ def read_metadata(path: Path, root: Path | None = None,
         "title": None, "artist": None, "album": None,
         "genre": None, "year": None, "duration": None,
         "meta_source": None, "excluded": 0, "exclude_reason": None,
-        "web_checked": False,
+        "web_checked": False, "ai_resolved": 0, "ai_genre": 0,
     }
     try:
         audio = MutagenFile(path, easy=True)
@@ -173,14 +182,43 @@ def read_metadata(path: Path, root: Path | None = None,
             meta[field_name] = value.split("(", 1)[0].strip() or None
 
     tags_usable = textq.is_usable(meta["title"]) and textq.is_usable(meta["artist"])
+    tags_corrupt = (
+        (meta["title"] and textq.is_corrupt(meta["title"]))
+        or (meta["artist"] and textq.is_corrupt(meta["artist"]))
+    )
     if tags_usable:
         meta["meta_source"] = "tags"
 
-    # --- stage 2: guess from the path ------------------------------------
-    # Record whether the *guess* was unreadable, so the exclusion reason can
-    # say "non_latin" rather than the misleading "no_title" when the only
-    # guess available was in a script we cannot announce.
-    guess_non_latin = False
+    # --- stage 2a: recover from a corrupt tag using the path + local AI -----
+    # If the ID3 tags are mojibake/placeholder but the *filename* is clean, the
+    # path guess is trustworthy; a non-Latin (Cyrillic, ...) filename is kept.
+    # When even the path guess is messy, the local LLM splits/normalises it and
+    # supplies a romanised form for the DJ.
+    if not tags_usable and tags_corrupt:
+        guess = textq.guess_from_path(path, root)
+        recovered_artist = guess.get("artist")
+        recovered_title = guess.get("title")
+        recovered_album = guess.get("album")
+        if not textq.is_usable(recovered_title) or not textq.is_usable(recovered_artist):
+            # Filename was also messy — ask the local model to recover names.
+            recovered = ai_meta.recover_names(
+                recovered_artist, recovered_title, recovered_album,
+                path=str(path),
+            )
+            if recovered.get("confident"):
+                recovered_artist = recovered["artist"] or recovered_artist
+                recovered_title = recovered["title"] or recovered_title
+                recovered_album = recovered["album"] or recovered_album
+        if textq.is_usable(recovered_title) and textq.is_usable(recovered_artist):
+            meta["title"] = recovered_title
+            meta["artist"] = recovered_artist
+            if recovered_album:
+                meta["album"] = recovered_album
+            meta["meta_source"] = "ai"
+            meta["ai_resolved"] = 1
+            tags_usable = True
+
+    # --- stage 2b: guess from the path (tags missing, not necessarily corrupt)
     if not tags_usable:
         guess = textq.guess_from_path(path, root)
         used_guess = False
@@ -189,8 +227,6 @@ def read_metadata(path: Path, root: Path | None = None,
                 if textq.is_usable(guess[field_name]):
                     meta[field_name] = guess[field_name]
                     used_guess = True
-                elif textq.has_non_latin_script(guess[field_name]):
-                    guess_non_latin = True
         if used_guess:
             meta["meta_source"] = "path"
 
@@ -203,14 +239,10 @@ def read_metadata(path: Path, root: Path | None = None,
     # --- stage 3: confirm on the web -------------------------------------
     # Only for path guesses: confirmed tags are already trustworthy, and a
     # 13k-file library must not make thousands of network calls per scan.
-    # Genre for tag-identified tracks that lack one is filled lazily during
-    # DJ preparation (see enrich.py), not here.
+    # Genre for tag-identified tracks that lack one is filled by the local AI
+    # (stage 4) so no playable track is left without a genre.
     reason = textq.rejection_reason(meta.get("artist"), meta.get("title"))
-    # If the only metadata we could recover was in an unreadable script, label
-    # it non_latin even though the field ended up empty after filtering.
-    if guess_non_latin and reason in (None, "no_title", "no_artist"):
-        reason = "non_latin"
-    if allow_web and meta.get("meta_source") == "path" and reason is None:
+    if allow_web and meta.get("meta_source") in ("path", "ai") and reason is None:
         meta["web_checked"] = True
         result = websearch.confirm_track(meta.get("artist"), meta.get("title"))
         if result.get("confirmed"):
@@ -223,11 +255,27 @@ def read_metadata(path: Path, root: Path | None = None,
                 meta["album"] = result["album"]
             if result.get("year") and not meta.get("year"):
                 meta["year"] = result["year"]
-            meta["meta_source"] = "web"
+            if meta.get("meta_source") != "ai":
+                meta["meta_source"] = "web"
         else:
             reason = "unconfirmed"
         if result.get("genre") and not meta.get("genre"):
             meta["genre"] = result["genre"]
+
+    # --- stage 4: local AI genre inference --------------------------------
+    # "unknown genre is not acceptable": when web could not supply a genre,
+    # the local LLM is the second opinion. This runs for every playable track
+    # that still lacks a genre (tag-identified or recovered), so no themeable
+    # track ends up without a bucket.
+    if reason is None and not meta.get("genre"):
+        if config.get("ai.free_text_genre", True):
+            genre = ai_meta.infer_genre(
+                meta.get("artist"), meta.get("title"), meta.get("album"),
+                path=str(path),
+            )
+            if genre:
+                meta["genre"] = genre
+                meta["ai_genre"] = 1
 
     if reason is not None:
         meta["excluded"] = 1
@@ -264,8 +312,9 @@ def scan_library(music_dir: str | None = None, full: bool = False,
         STATUS.running = True
         STATUS.scanned = STATUS.added = STATUS.updated = STATUS.removed = 0
         STATUS.total_seen = 0
-        STATUS.from_tags = STATUS.from_path = STATUS.from_web = 0
+        STATUS.from_tags = STATUS.from_path = STATUS.from_web = STATUS.from_ai = 0
         STATUS.excluded = STATUS.web_lookups = STATUS.genres_found = 0
+        STATUS.ai_genres = STATUS.ai_resolved_count = 0
         STATUS.reasons = {}
         STATUS.started_at = time.time()
         STATUS.finished_at = None
@@ -316,10 +365,16 @@ def scan_library(music_dir: str | None = None, full: bool = False,
                     STATUS.from_path += 1
                 elif source == "web":
                     STATUS.from_web += 1
+                elif source == "ai":
+                    STATUS.from_ai += 1
                 if meta.get("web_checked"):
                     STATUS.web_lookups += 1
                 if meta.get("genre"):
                     STATUS.genres_found += 1
+                if meta.get("ai_genre"):
+                    STATUS.ai_genres += 1
+                if meta.get("ai_resolved"):
+                    STATUS.ai_resolved_count += 1
                 if meta.get("excluded"):
                     STATUS.excluded += 1
                     reason = meta.get("exclude_reason") or "unknown"
@@ -328,23 +383,26 @@ def scan_library(music_dir: str | None = None, full: bool = False,
             if prior is None:
                 conn.execute(
                     "INSERT INTO tracks(path,title,artist,album,genre,year,duration,"
-                    "mtime,size,missing,excluded,exclude_reason,meta_source) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,0,?,?,?)",
+                    "mtime,size,missing,excluded,exclude_reason,meta_source,"
+                    "ai_resolved,ai_genre) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,0,?,?,?,?,?)",
                     (spath, meta["title"], meta["artist"], meta["album"],
                      meta["genre"], meta["year"], meta["duration"],
                      stat.st_mtime, stat.st_size,
-                     meta["excluded"], meta["exclude_reason"], meta["meta_source"]),
+                     meta["excluded"], meta["exclude_reason"], meta["meta_source"],
+                     meta["ai_resolved"], meta["ai_genre"]),
                 )
                 STATUS.added += 1
             else:
                 conn.execute(
                     "UPDATE tracks SET title=?,artist=?,album=?,genre=?,year=?,"
                     "duration=?,mtime=?,size=?,missing=0,excluded=?,"
-                    "exclude_reason=?,meta_source=? WHERE id=?",
+                    "exclude_reason=?,meta_source=?,ai_resolved=?,ai_genre=? "
+                    "WHERE id=?",
                     (meta["title"], meta["artist"], meta["album"], meta["genre"],
                      meta["year"], meta["duration"], stat.st_mtime, stat.st_size,
                      meta["excluded"], meta["exclude_reason"], meta["meta_source"],
-                     prior[0]),
+                     meta["ai_resolved"], meta["ai_genre"], prior[0]),
                 )
                 STATUS.updated += 1
 
@@ -476,10 +534,34 @@ def list_artists(limit: int = 500) -> list[dict[str, Any]]:
     return db.rows_to_dicts(rows)
 
 
+def list_decades() -> list[dict[str, Any]]:
+    """Distinct release decades with track counts, for program theming."""
+    rows = db.connect().execute(
+        "SELECT (CAST(year AS INTEGER) / 10) * 10 AS decade, COUNT(*) AS n "
+        "FROM tracks WHERE missing=0 AND excluded=0 "
+        "AND year IS NOT NULL AND TRIM(year) <> '' "
+        "GROUP BY decade ORDER BY n DESC"
+    ).fetchall()
+    return [
+        {"decade": int(r["decade"]), "n": r["n"]}
+        for r in rows if r["decade"] is not None
+    ]
+
+
+def program_themes(strategy: str = "genre") -> list[dict[str, Any]]:
+    """Candidate themes for program grouping, by the chosen strategy."""
+    if strategy == "artist":
+        return list_artists(limit=200)
+    if strategy == "decade":
+        return list_decades()
+    return list_genres()
+
+
 def query_tracks(
     search: str = "",
     genres: list[str] | None = None,
     artists: list[str] | None = None,
+    decade: int | None = None,
     limit: int = 200,
     offset: int = 0,
     random_order: bool = False,
@@ -513,6 +595,12 @@ def query_tracks(
         placeholders = ",".join("?" * len(artists))
         where.append(f"artist IN ({placeholders})")
         params += artists
+
+    if decade:
+        lo = int(decade)
+        hi = lo + 9
+        where.append("(year IS NOT NULL AND CAST(year AS INTEGER) BETWEEN ? AND ?)")
+        params += [lo, hi]
 
     order = "RANDOM()" if random_order else "artist COLLATE NOCASE, album, title"
     sql = (

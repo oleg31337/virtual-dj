@@ -9,6 +9,11 @@
     "model": "qwen3.5:9b"
   },
 
+  "ai": {
+    "free_text_genre": true,
+    "name_recovery": true
+  },
+
   "dj": {
     "enabled": true,
     "every_n_tracks": 3,
@@ -25,5 +30,17 @@
 
   "enrich": {
     "enabled": true
+  },
+
+  "playback": {
+    "shuffle": true,
+    "genres": [],
+    "artists": [],
+    "search": "",
+    "program": {
+      "enabled": true,
+      "size": 6,
+      "strategy": "genre"
+    }
   }
 }

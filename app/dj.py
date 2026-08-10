@@ -79,15 +79,28 @@ def _clean_script(text: str, max_sentences: int) -> str:
     return " ".join(sentences[: max(1, max_sentences)]).strip()
 
 
-def fallback_script(track: dict[str, Any]) -> str:
+def fallback_script(track: dict[str, Any],
+                    program: dict[str, Any] | None = None) -> str:
     artist = (track.get("artist") or "").strip()
     title = (track.get("title") or "").strip() or "this next one"
     year = (track.get("year") or "").strip()
+    base = ""
     if artist and year:
-        return f"Coming up next: {title}, by {artist}, from {year}."
-    if artist:
-        return f"Here's {title}, by {artist}."
-    return f"Up next, {title}."
+        base = f"Coming up next: {title}, by {artist}, from {year}."
+    elif artist:
+        base = f"Here's {title}, by {artist}."
+    else:
+        base = f"Up next, {title}."
+    if program:
+        label = program.get("label") or "the next set"
+        kind = program.get("kind")
+        if kind == "genre":
+            return f"Next up, a run of {label}. {base}"
+        if kind == "artist":
+            return f"A spotlight on {label} now. {base}"
+        if kind == "decade":
+            return f"Traveling back to the {label}. {base}"
+    return base
 
 
 def _facts_block(track: dict[str, Any], facts: dict[str, Any]) -> str:
@@ -118,7 +131,8 @@ def _facts_block(track: dict[str, Any], facts: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = None) -> str:
+def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = None,
+                    program: dict[str, Any] | None = None) -> str:
     """Ask the local LLM for an on-air intro; fall back to a template."""
     max_sentences = int(config.get("dj.max_sentences", 3))
     facts: dict[str, Any] = {}
@@ -128,7 +142,7 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
         log.debug("enrichment failed: %s", exc)
 
     if not config.get("llm.enabled", True):
-        return fallback_script(track)
+        return fallback_script(track, program=program)
 
     style = config.get("dj.style", "warm, witty late-night radio host")
     prev_line = ""
@@ -139,12 +153,34 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
             f"{previous.get('artist') or 'unknown'}. You may briefly reference it."
         )
 
+    # When this track opens a new themed program, tell the DJ to announce the
+    # vibe switch — this is how a real DJ frames the transition.
+    program_line = ""
+    if program:
+        label = program.get("label") or "the next set"
+        kind = program.get("kind")
+        if kind == "genre":
+            program_line = (
+                f"\nThis song opens a new program of {label} music. Welcome the "
+                f"listeners into that vibe before introducing the track."
+            )
+        elif kind == "artist":
+            program_line = (
+                f"\nThis song opens a spotlight on {label}. Frame the transition "
+                f"into this artist's music before the intro."
+            )
+        elif kind == "decade":
+            program_line = (
+                f"\nThis song opens a trip back to the {label}. Set the era before "
+                f"the intro."
+            )
+
     user_prompt = (
         f"Persona: {style}.\n"
         f"Write at most {max_sentences} sentences introducing the next song.\n"
         f"Mention one genuinely interesting fact ONLY if the information block "
         f"below directly supports it. Do NOT state any release date or year "
-        f"that is not listed below.{prev_line}\n\n"
+        f"that is not listed below.{prev_line}{program_line}\n\n"
         f"Information about the next song:\n"
         f"{_facts_block(track, facts)}\n"
     )
@@ -265,9 +301,14 @@ def audio_duration(path: Path) -> float:
 
 
 def prepare_break(track: dict[str, Any],
-                  previous: dict[str, Any] | None = None) -> dict[str, Any] | None:
-    """Generate script + audio for one DJ break. Returns None if unavailable."""
-    script = generate_script(track, previous)
+                  previous: dict[str, Any] | None = None,
+                  program: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Generate script + audio for one DJ break. Returns None if unavailable.
+
+    ``program`` (optional) describes the themed program this track opens, so the
+    DJ announces the vibe switch ("Next up, a run of Rock...") like a real host.
+    """
+    script = generate_script(track, previous, program=program)
     if not script:
         return None
     audio = synthesize(script)

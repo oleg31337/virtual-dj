@@ -36,16 +36,96 @@ class Scheduler:
         self._uid += 1
         return self._uid
 
-    def _wrap(self, track: dict[str, Any], with_dj: bool | None = None) -> dict[str, Any]:
+    def _wrap(self, track: dict[str, Any], with_dj: bool | None = None,
+              program: dict[str, Any] | None = None) -> dict[str, Any]:
         return {
             "uid": self._next_uid(),
             "track": track,
             "dj_requested": with_dj,
+            "program": program,
         }
 
-    def refill(self, count: int = 20) -> int:
-        """Top the queue up from the library using the active filters."""
+    def _build_programs(self, count: int) -> list[dict[str, Any]]:
+        """Build ``count`` themed program items, ordering the queue into runs.
+
+        Each program is a contiguous block of tracks sharing a theme (genre,
+        artist, or decade, per ``playback.program.strategy``). The first track
+        of every program after the first carries a ``program`` theme and
+        ``dj_requested=True`` so the DJ announces the vibe switch before it.
+        """
         playback = config.get("playback", {}) or {}
+        prog = playback.get("program", {}) or {}
+        size = max(2, int(prog.get("size", 6)))
+        strategy = str(prog.get("strategy", "genre"))
+        search = playback.get("search", "") or ""
+        genres_filter = playback.get("genres") or None
+        artists_filter = playback.get("artists") or None
+
+        themes = library.program_themes(strategy)
+        themes = [t for t in themes if t.get("n", 0) >= size]
+        # Respect global genre/artist filters: only theme on buckets that the
+        # active filter allows.
+        if genres_filter:
+            themes = [t for t in themes if t.get("genre") in genres_filter]
+        if artists_filter:
+            themes = [t for t in themes if t.get("artist") in artists_filter]
+        if not themes:
+            return []
+
+        random.shuffle(themes)
+        items: list[dict[str, Any]] = []
+        programs_made = 0
+        # Round-robin themes so consecutive programs differ, like a real DJ
+        # alternating vibes rather than repeating one.
+        for theme in themes:
+            if programs_made >= count:
+                break
+            if strategy == "genre":
+                kwargs = {"genres": [theme["genre"]], "search": search}
+            elif strategy == "artist":
+                kwargs = {"artists": [theme["artist"]], "search": search}
+            else:  # decade
+                kwargs = {"decade": int(theme["decade"]), "search": search}
+            tracks = library.query_tracks(limit=size, random_order=True, **kwargs)
+            if len(tracks) < 2:
+                continue
+            program = {
+                "kind": strategy,
+                "label": theme.get("genre") or theme.get("artist")
+                or f"{theme['decade']}s",
+            }
+            first = True
+            for track in tracks:
+                if first and items:
+                    # Announce the switch into this new program.
+                    items.append(self._wrap(
+                        track, with_dj=True, program=program))
+                else:
+                    items.append(self._wrap(track, with_dj=None, program=program))
+                first = False
+            programs_made += 1
+        return items
+
+    def refill(self, count: int = 20) -> int:
+        """Top the queue up from the library using the active filters.
+
+        When ``playback.program.enabled`` the queue is filled in themed runs
+        (programs) with a DJ break announcing each vibe switch; otherwise it is
+        a flat shuffle.
+        """
+        playback = config.get("playback", {}) or {}
+        program_enabled = bool((playback.get("program") or {}).get("enabled", False))
+        if program_enabled:
+            size = max(2, int((playback.get("program") or {}).get("size", 6)))
+            n_programs = max(1, count // size)
+            items = self._build_programs(n_programs)
+            if items:
+                with self._lock:
+                    self._queue.extend(items)
+                self._wake.set()
+                return len(items)
+            # No theme had enough tracks (tiny library) — fall through to flat.
+
         tracks = library.query_tracks(
             search=playback.get("search", "") or "",
             genres=playback.get("genres") or None,
@@ -83,6 +163,7 @@ class Scheduler:
                 {
                     "uid": item["uid"],
                     "track": item["track"],
+                    "program": item.get("program"),
                     "dj_ready": item["uid"] in self._prepared,
                     "dj_text": (self._prepared.get(item["uid"]) or {}).get("text"),
                 }
@@ -217,7 +298,8 @@ class Scheduler:
                 continue
             prior = upcoming[index - 1]["track"] if index else previous
             started = time.monotonic()
-            prepared = dj.prepare_break(item["track"], prior)
+            prepared = dj.prepare_break(
+                item["track"], prior, program=item.get("program"))
             if prepared:
                 with self._lock:
                     self._prepared[uid] = prepared

@@ -1,21 +1,19 @@
 """Integration test: scanning a small temp library applies the three-stage
-metadata resolution and excludes unidentifiable / non-Latin tracks.
+metadata resolution, keeps non-Latin tracks (Cyrillic is now playable), and
+excludes only corrupt / unidentifiable ones.
 
-The web-confirmation stage is stubbed so the test never touches the network.
+The web-confirmation and local-AI stages are stubbed so the test never
+touches the network or the real model.
 """
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 
 from tests.conftest import make_mp3
-from app import db, library, websearch
+from app import db, library, websearch, ai_meta
 
-# A stubbed web search: confirms anything with a plausible artist+title, and
-# invents a genre so we can assert the genre plumbing end-to-end.
+
 def _stub_confirm(artist, title, use_cache=True):
     if artist and title and title != "Garbage":
         return {"confirmed": True, "genre": "Rock", "confidence": 0.9,
@@ -23,9 +21,16 @@ def _stub_confirm(artist, title, use_cache=True):
     return {"confirmed": False, "genre": None, "confidence": 0.0, "sources": []}
 
 
+def _stub_infer_genre(artist, title, album=None, path=None, use_cache=True):
+    # The AI is the guaranteed last resort for genre; in tests it just tags
+    # anything the web left empty as "Rock" so we can assert the plumbing.
+    return "Rock"
+
+
 @pytest.fixture
 def temp_lib(tmp_path, monkeypatch):
     monkeypatch.setattr(websearch, "confirm_track", _stub_confirm)
+    monkeypatch.setattr(ai_meta, "infer_genre", _stub_infer_genre)
     music = tmp_path / "mp3"
     music.mkdir()
 
@@ -40,7 +45,7 @@ def temp_lib(tmp_path, monkeypatch):
     (music / "Just A Folder").mkdir()
     (music / "Just A Folder" / "Track 03.mp3").write_bytes(b"x")
 
-    # Non-Latin artist -> excluded (non_latin), never even looked up.
+    # Non-Latin (Cyrillic) artist -> now KEPT and playable, web-confirmed.
     (music / "Russian").mkdir()
     (music / "Russian" / "Игорек - Подождем.mp3").write_bytes(b"x")
 
@@ -56,7 +61,6 @@ def temp_lib(tmp_path, monkeypatch):
     monkeypatch.setenv("VDJ_DB_PATH", str(tmp_path / "lib.db"))
     db.DB_PATH = str(tmp_path / "lib.db")
     db.init_db()
-    # Fresh, isolated DB. Drop any rows from a prior run.
     db.connect().executescript("DELETE FROM tracks; DELETE FROM web_lookups;")
     return music
 
@@ -67,22 +71,29 @@ def test_scan_classifies_and_excludes(temp_lib, monkeypatch):
     assert snap["scanned"] == 6
 
     stats = library.library_stats()
-    # playable: tagged(1) + path-guess confirmed(1) + folder layout(1) = 3
-    assert stats["playable"] == 3, stats
-    assert stats["excluded"] == 3, stats
-    assert stats["unknown_reasons"].get("non_latin") == 1
+    # playable: tagged(1) + path-guess confirmed(1) + Cyrillic kept(1)
+    #           + folder layout(1) = 4
+    assert stats["playable"] == 4, stats
+    assert stats["excluded"] == 2, stats
+    # Cyrillic is no longer excluded; only no_title + unconfirmed remain.
+    assert "non_latin" not in stats["unknown_reasons"], stats
+    assert stats["unknown_reasons"].get("no_title") == 1
     assert stats["unknown_reasons"].get("unconfirmed") == 1
 
     # The web-confirmed path-guess got its genre from the stub.
     rows = library.query_tracks(genres=["Rock"])
     titles = {r["title"] for r in rows}
     assert "Guess Song" in titles
+    # The Cyrillic track is also playable and genre-tagged.
+    cyr = library.query_tracks(search="Подождем")
+    assert cyr, "Cyrillic track should be playable"
+    assert cyr[0]["artist"] == "Игорек"
 
     # Excluded tracks are reachable only via excluded_tracks().
     exc = library.excluded_tracks()
-    assert len(exc) == 3
+    assert len(exc) == 2
     reasons = {e["exclude_reason"] for e in exc}
-    assert {"no_title", "non_latin", "unconfirmed"} <= reasons
+    assert reasons == {"no_title", "unconfirmed"}
 
     # And never enter a normal playlist query.
     ids_exc = {e["id"] for e in exc}

@@ -54,6 +54,13 @@ DEFAULTS: dict[str, Any] = {
         "timeout_s": 120,
         "temperature": 0.7,
     },
+    "ai": {
+        # Use the local LLM to fill genres web search couldn't, and to recover
+        # artist/title from corrupt tags. "unknown genre" is never acceptable
+        # for a playable track, so the AI is the guaranteed last resort.
+        "free_text_genre": True,
+        "name_recovery": True,
+    },
     "enrich": {
         # Look up extra facts on MusicBrainz / Wikipedia.
         "enabled": True,
@@ -76,6 +83,17 @@ DEFAULTS: dict[str, Any] = {
         "genres": [],
         "artists": [],
         "search": "",
+        "program": {
+            # Group tracks into themed "programs" the way a real DJ would: a run
+            # of tracks that share a genre/era/mood, announced together, then a
+            # DJ break before the next program switches the vibe. Adjustable.
+            "enabled": True,
+            # Tracks per program before a DJ break announces the switch.
+            "size": 6,
+            # How programs are themed: "genre" (same genre), "artist" (same
+            # artist run), or "decade" (same era).
+            "strategy": "genre",
+        },
     },
 }
 
