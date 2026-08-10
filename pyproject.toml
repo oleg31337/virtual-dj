@@ -1,0 +1,23 @@
+[project]
+name = "virtual-dj"
+version = "1.0.0"
+description = "Always-on LAN MP3 radio station with an AI DJ (Ollama script + Piper voice)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+# Keep in sync with requirements.txt (pip path). This file is the uv path
+# and the source of truth for `uv sync` / `hermes verify`.
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.30,<1",
+    "mutagen>=1.47,<2",
+    "httpx>=0.28,<1",
+    "piper-tts>=1.2,<2",
+]
+
+[dependency-groups]
+# uv installs the "dev" group by default, so `uv sync` gets pytest too.
+dev = [
+    "pytest>=8,<9",
+    "pytest-asyncio>=0.24,<2",
+]

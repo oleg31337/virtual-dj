@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Virtual DJ</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+<header>
+  <div class="brand">
+    <div class="logo">◉</div>
+    <div>
+      <h1 id="station-name">Virtual DJ</h1>
+      <div class="sub" id="health-line">connecting…</div>
+    </div>
+  </div>
+  <div class="player">
+    <button id="listen" class="primary">▶ Listen</button>
+    <input type="range" id="volume" min="0" max="100" value="80" title="Volume" />
+    <span class="pill" id="listeners">0 listeners</span>
+    <a class="pill link" id="stream-link" href="/stream.mp3" target="_blank">stream URL</a>
+  </div>
+</header>
+
+<main>
+  <section class="card wide">
+    <div class="nowrow">
+      <div class="np">
+        <div class="label" id="np-kind">IDLE</div>
+        <h2 id="np-title">—</h2>
+        <div class="meta" id="np-artist"></div>
+        <div class="meta dim" id="np-album"></div>
+        <div class="progress"><div id="np-bar"></div></div>
+        <div class="meta dim" id="np-time">0:00</div>
+      </div>
+      <div class="djbox">
+        <div class="label">DJ SAID</div>
+        <p id="np-dj">—</p>
+      </div>
+    </div>
+    <div class="controls">
+      <button id="skip">⏭ Skip</button>
+      <button id="pauseresume">⏸ Pause broadcast</button>
+      <button id="preview">🎙 Preview DJ line</button>
+      <audio id="preview-audio" controls hidden></audio>
+    </div>
+  </section>
+
+  <section class="card">
+    <h3>Library</h3>
+    <div class="row">
+      <input type="text" id="music-dir" placeholder="/mnt/mp3" />
+      <button id="save-dir">Save</button>
+      <button id="scan">Rescan</button>
+    </div>
+    <div class="meta dim" id="scan-status">—</div>
+    <div class="row">
+      <input type="text" id="search" placeholder="search title / artist / album" />
+      <button id="do-search">Search</button>
+    </div>
+    <div class="list" id="tracks"></div>
+    <div class="row">
+      <button id="queue-selected">Add selected to queue</button>
+      <button id="play-selected" class="primary">Play these now</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h3>Genres</h3>
+    <div class="chips" id="genres"></div>
+    <div class="row">
+      <label><input type="checkbox" id="shuffle" checked /> Shuffle</label>
+      <button id="apply-filters" class="primary">Apply</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h3>DJ settings</h3>
+    <label class="field">
+      <span>Talk before every <b id="freq-val">3</b> tracks</span>
+      <input type="range" id="dj-freq" min="0" max="12" value="3" />
+      <small class="dim">0 = never talk, 1 = before every track</small>
+    </label>
+    <label class="field">
+      <span>Max sentences: <b id="sent-val">3</b></span>
+      <input type="range" id="dj-sentences" min="1" max="6" value="3" />
+    </label>
+    <label class="field">
+      <span>Speaking speed: <b id="speed-val">1.0</b>×</span>
+      <input type="range" id="dj-speed" min="70" max="140" value="100" />
+    </label>
+    <label class="field">
+      <span>Voice</span>
+      <select id="dj-voice"></select>
+    </label>
+    <label class="field">
+      <span>Persona / style</span>
+      <textarea id="dj-style" rows="2"></textarea>
+    </label>
+    <label class="field">
+      <span><input type="checkbox" id="dj-enabled" checked /> DJ enabled</span>
+    </label>
+    <label class="field">
+      <span><input type="checkbox" id="enrich-enabled" checked /> Look up facts online</span>
+    </label>
+    <button id="save-dj" class="primary">Save DJ settings</button>
+  </section>
+
+  <section class="card">
+    <h3>Up next</h3>
+    <div class="list" id="queue"></div>
+    <button id="clear-queue">Clear queue</button>
+  </section>
+
+  <section class="card">
+    <h3>Presets</h3>
+    <div class="row">
+      <input type="text" id="preset-name" placeholder="preset name" />
+      <button id="save-preset" class="primary">Save current</button>
+    </div>
+    <div class="list" id="presets"></div>
+  </section>
+
+  <section class="card">
+    <h3>Recently played</h3>
+    <div class="list" id="history"></div>
+  </section>
+</main>
+<script src="/static/app.js"></script>
+</body>
+</html>

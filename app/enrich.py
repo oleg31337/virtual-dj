@@ -1,0 +1,152 @@
+"""Fetch extra facts about a track from MusicBrainz and Wikipedia.
+
+Everything here is best-effort: the network may be absent (the app is designed
+to run on a LAN appliance) and the DJ must keep talking regardless. Results are
+cached in SQLite so we hit the public APIs at most once per track.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from typing import Any
+
+import httpx
+
+from . import config, db
+
+log = logging.getLogger(__name__)
+
+MB_ROOT = "https://musicbrainz.org/ws/2"
+WIKI_ROOT = "https://en.wikipedia.org/api/rest_v1/page/summary"
+
+# MusicBrainz asks for max 1 request/second from anonymous clients.
+_MIN_INTERVAL = 1.1
+_last_call = 0.0
+
+
+def _throttle() -> None:
+    global _last_call
+    delta = time.monotonic() - _last_call
+    if delta < _MIN_INTERVAL:
+        time.sleep(_MIN_INTERVAL - delta)
+    _last_call = time.monotonic()
+
+
+def cached_facts(track_id: int) -> dict[str, Any] | None:
+    row = db.connect().execute(
+        "SELECT facts, source FROM enrichment WHERE track_id = ?", (track_id,)
+    ).fetchone()
+    if not row:
+        return None
+    try:
+        return {"facts": json.loads(row["facts"]), "source": row["source"]}
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+
+def store_facts(track_id: int, facts: dict[str, Any], source: str) -> None:
+    conn = db.connect()
+    conn.execute(
+        "INSERT INTO enrichment(track_id, facts, source) VALUES(?,?,?) "
+        "ON CONFLICT(track_id) DO UPDATE SET facts=excluded.facts, "
+        "source=excluded.source, fetched_at=strftime('%s','now')",
+        (track_id, json.dumps(facts), source),
+    )
+    conn.commit()
+
+
+def _musicbrainz(client: httpx.Client, artist: str, title: str) -> dict[str, Any]:
+    query = f'recording:"{title}" AND artist:"{artist}"'
+    _throttle()
+    resp = client.get(
+        f"{MB_ROOT}/recording",
+        params={"query": query, "fmt": "json", "limit": 1},
+    )
+    resp.raise_for_status()
+    recordings = resp.json().get("recordings") or []
+    if not recordings:
+        return {}
+    rec = recordings[0]
+    out: dict[str, Any] = {}
+    if rec.get("first-release-date"):
+        out["first_release_date"] = rec["first-release-date"]
+    releases = rec.get("releases") or []
+    if releases:
+        first = releases[0]
+        if first.get("title"):
+            out["release_title"] = first["title"]
+        group = first.get("release-group") or {}
+        if group.get("primary-type"):
+            out["release_type"] = group["primary-type"]
+    tags = [t.get("name") for t in (rec.get("tags") or []) if t.get("name")]
+    if tags:
+        out["tags"] = tags[:8]
+    credits = rec.get("artist-credit") or []
+    names = [c.get("name") for c in credits if isinstance(c, dict) and c.get("name")]
+    if len(names) > 1:
+        out["credited_artists"] = names
+    return out
+
+
+def _wikipedia(client: httpx.Client, term: str) -> dict[str, Any]:
+    from urllib.parse import quote
+
+    resp = client.get(f"{WIKI_ROOT}/{quote(term, safe='')}")
+    if resp.status_code != 200:
+        return {}
+    data = resp.json()
+    if data.get("type", "").endswith("disambiguation"):
+        return {}
+    extract = (data.get("extract") or "").strip()
+    if not extract:
+        return {}
+    return {"summary": extract[:1200], "wikipedia_title": data.get("title")}
+
+
+def enrich_track(track: dict[str, Any], force: bool = False) -> dict[str, Any]:
+    """Return a dict of facts about ``track``, using the cache when possible."""
+    track_id = track.get("id")
+    if track_id and not force:
+        cached = cached_facts(track_id)
+        if cached is not None:
+            return cached["facts"]
+
+    if not config.get("enrich.enabled", True):
+        return {}
+
+    artist = (track.get("artist") or "").strip()
+    title = (track.get("title") or "").strip()
+    if not artist or not title:
+        return {}
+
+    facts: dict[str, Any] = {}
+    sources: list[str] = []
+    headers = {"User-Agent": config.get("enrich.user_agent", "VirtualDJ/1.0")}
+    timeout = float(config.get("enrich.timeout_s", 15))
+
+    try:
+        with httpx.Client(timeout=timeout, headers=headers,
+                          follow_redirects=True) as client:
+            try:
+                mb = _musicbrainz(client, artist, title)
+                if mb:
+                    facts.update(mb)
+                    sources.append("musicbrainz")
+            except Exception as exc:
+                log.debug("musicbrainz lookup failed for %s - %s: %s",
+                          artist, title, exc)
+            try:
+                wiki = _wikipedia(client, artist.replace(" ", "_"))
+                if wiki:
+                    facts["artist_summary"] = wiki["summary"]
+                    sources.append("wikipedia")
+            except Exception as exc:
+                log.debug("wikipedia lookup failed for %s: %s", artist, exc)
+    except Exception as exc:
+        log.debug("enrichment client error: %s", exc)
+
+    if track_id:
+        store_facts(track_id, facts, ",".join(sources) or "none")
+    return facts

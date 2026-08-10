@@ -1,0 +1,162 @@
+"""SQLite storage for the music library, DJ scripts, presets and history."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+from pathlib import Path
+from typing import Any, Iterable
+
+from . import config
+
+_LOCAL = threading.local()
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS tracks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    path        TEXT NOT NULL UNIQUE,
+    title       TEXT,
+    artist      TEXT,
+    album       TEXT,
+    genre       TEXT,
+    year        TEXT,
+    duration    REAL,
+    mtime       REAL,
+    size        INTEGER,
+    missing     INTEGER NOT NULL DEFAULT 0,
+    added_at    REAL DEFAULT (strftime('%s','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist);
+CREATE INDEX IF NOT EXISTS idx_tracks_genre  ON tracks(genre);
+CREATE INDEX IF NOT EXISTS idx_tracks_missing ON tracks(missing);
+
+CREATE TABLE IF NOT EXISTS enrichment (
+    track_id    INTEGER PRIMARY KEY REFERENCES tracks(id) ON DELETE CASCADE,
+    facts       TEXT,
+    source      TEXT,
+    fetched_at  REAL DEFAULT (strftime('%s','now'))
+);
+
+CREATE TABLE IF NOT EXISTS dj_scripts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    track_id    INTEGER REFERENCES tracks(id) ON DELETE CASCADE,
+    text        TEXT NOT NULL,
+    audio_path  TEXT,
+    duration    REAL,
+    created_at  REAL DEFAULT (strftime('%s','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_dj_track ON dj_scripts(track_id);
+
+CREATE TABLE IF NOT EXISTS presets (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT NOT NULL UNIQUE,
+    payload     TEXT NOT NULL,
+    created_at  REAL DEFAULT (strftime('%s','now'))
+);
+
+CREATE TABLE IF NOT EXISTS history (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    track_id    INTEGER,
+    played_at   REAL DEFAULT (strftime('%s','now'))
+);
+CREATE INDEX IF NOT EXISTS idx_history_played ON history(played_at);
+"""
+
+
+def connect() -> sqlite3.Connection:
+    """Return a thread-local connection (SQLite objects are not thread-safe)."""
+    conn = getattr(_LOCAL, "conn", None)
+    if conn is None:
+        config.ensure_dirs()
+        Path(config.DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(config.DB_PATH, timeout=30, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA foreign_keys=ON")
+        _LOCAL.conn = conn
+    return conn
+
+
+def init_db() -> None:
+    conn = connect()
+    conn.executescript(SCHEMA)
+    conn.commit()
+
+
+def close() -> None:
+    conn = getattr(_LOCAL, "conn", None)
+    if conn is not None:
+        conn.close()
+        _LOCAL.conn = None
+
+
+def rows_to_dicts(rows: Iterable[sqlite3.Row]) -> list[dict[str, Any]]:
+    return [dict(row) for row in rows]
+
+
+# --- presets ---------------------------------------------------------------
+
+def save_preset(name: str, payload: dict[str, Any]) -> None:
+    conn = connect()
+    conn.execute(
+        "INSERT INTO presets(name, payload) VALUES(?, ?) "
+        "ON CONFLICT(name) DO UPDATE SET payload=excluded.payload",
+        (name, json.dumps(payload)),
+    )
+    conn.commit()
+
+
+def list_presets() -> list[dict[str, Any]]:
+    rows = connect().execute(
+        "SELECT id, name, payload, created_at FROM presets ORDER BY name"
+    ).fetchall()
+    out = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["payload"] = json.loads(item["payload"])
+        except (TypeError, json.JSONDecodeError):
+            item["payload"] = {}
+        out.append(item)
+    return out
+
+
+def get_preset(name: str) -> dict[str, Any] | None:
+    row = connect().execute(
+        "SELECT payload FROM presets WHERE name = ?", (name,)
+    ).fetchone()
+    if row is None:
+        return None
+    try:
+        return json.loads(row["payload"])
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+
+def delete_preset(name: str) -> bool:
+    conn = connect()
+    cur = conn.execute("DELETE FROM presets WHERE name = ?", (name,))
+    conn.commit()
+    return cur.rowcount > 0
+
+
+# --- history ---------------------------------------------------------------
+
+def record_play(track_id: int | None) -> None:
+    if track_id is None:
+        return
+    conn = connect()
+    conn.execute("INSERT INTO history(track_id) VALUES(?)", (track_id,))
+    conn.commit()
+
+
+def recent_history(limit: int = 50) -> list[dict[str, Any]]:
+    rows = connect().execute(
+        "SELECT h.played_at, t.id, t.title, t.artist, t.album "
+        "FROM history h LEFT JOIN tracks t ON t.id = h.track_id "
+        "ORDER BY h.played_at DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return rows_to_dicts(rows)

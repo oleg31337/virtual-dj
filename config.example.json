@@ -1,0 +1,29 @@
+{
+  "_comment": "Copy to data/config.json and edit. Everything here is also editable from the web UI; the UI writes this same file. All keys are optional — anything omitted falls back to the defaults in app/config.py.",
+
+  "music_dir": "/path/to/your/mp3s",
+
+  "llm": {
+    "enabled": true,
+    "base_url": "http://127.0.0.1:11434",
+    "model": "qwen3.5:9b"
+  },
+
+  "dj": {
+    "enabled": true,
+    "every_n_tracks": 3,
+    "max_sentences": 3,
+    "style": "warm, witty late-night radio host",
+    "voice": "en_US-amy-medium",
+    "speed": 1.0
+  },
+
+  "stream": {
+    "bitrate_kbps": 128,
+    "station_name": "Virtual DJ"
+  },
+
+  "enrich": {
+    "enabled": true
+  }
+}
