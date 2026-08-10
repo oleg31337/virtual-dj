@@ -50,7 +50,7 @@ REJECTION_LABELS = {
     "no_title": "no usable title",
     "no_artist": "no usable artist",
     "corrupt": "corrupt/mojibake text",
-    "unconfirmed": "could not confirm on the web",
+    "mojibake": "garbled text encoding",
 }
 
 
@@ -257,8 +257,10 @@ def read_metadata(path: Path, root: Path | None = None,
                 meta["year"] = result["year"]
             if meta.get("meta_source") != "ai":
                 meta["meta_source"] = "web"
-        else:
-            reason = "unconfirmed"
+        # A clean filename guess is trustworthy on its own — web confirmation
+        # only *upgrades* it (spelling/genre), it never gates playability. We do
+        # NOT exclude on "unconfirmed": a Cyrillic "Би-2 - Зажигать" whose
+        # artist isn't on MusicBrainz is still a perfectly valid track to play.
         if result.get("genre") and not meta.get("genre"):
             meta["genre"] = result["genre"]
 

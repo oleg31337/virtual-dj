@@ -45,12 +45,13 @@ def temp_lib(tmp_path, monkeypatch):
     (music / "Just A Folder").mkdir()
     (music / "Just A Folder" / "Track 03.mp3").write_bytes(b"x")
 
-    # Non-Latin (Cyrillic) artist -> now KEPT and playable, web-confirmed.
+    # Non-Latin (Cyrillic) artist -> now KEPT and playable, web-confirmed (or
+    # kept as a clean filename guess even if the web can't verify it).
     (music / "Russian").mkdir()
     (music / "Russian" / "Игорек - Подождем.mp3").write_bytes(b"x")
 
-    # "Bad Band - Garbage.mp3" -> path guess with a title the stub web rejects
-    # -> excluded as unconfirmed.
+    # "Bad Band - Garbage.mp3" -> a clean filename guess; web can't confirm the
+    # title "Garbage" but the guess is still trustworthy, so it stays playable.
     (music / "Bad Band - Garbage.mp3").write_bytes(b"x")
 
     # MusicBrainz-ish folder layout.
@@ -71,14 +72,14 @@ def test_scan_classifies_and_excludes(temp_lib, monkeypatch):
     assert snap["scanned"] == 6
 
     stats = library.library_stats()
-    # playable: tagged(1) + path-guess confirmed(1) + Cyrillic kept(1)
-    #           + folder layout(1) = 4
-    assert stats["playable"] == 4, stats
-    assert stats["excluded"] == 2, stats
-    # Cyrillic is no longer excluded; only no_title + unconfirmed remain.
+    # playable: tagged(1) + path-guess kept(1) + Cyrillic kept(1)
+    #           + "Garbage" kept as clean guess(1) + folder layout(1) = 5
+    assert stats["playable"] == 5, stats
+    assert stats["excluded"] == 1, stats
+    # Cyrillic and unconfirmed-but-clean guesses are no longer excluded.
     assert "non_latin" not in stats["unknown_reasons"], stats
+    assert "unconfirmed" not in stats["unknown_reasons"], stats
     assert stats["unknown_reasons"].get("no_title") == 1
-    assert stats["unknown_reasons"].get("unconfirmed") == 1
 
     # The web-confirmed path-guess got its genre from the stub.
     rows = library.query_tracks(genres=["Rock"])
@@ -88,12 +89,16 @@ def test_scan_classifies_and_excludes(temp_lib, monkeypatch):
     cyr = library.query_tracks(search="Подождем")
     assert cyr, "Cyrillic track should be playable"
     assert cyr[0]["artist"] == "Игорек"
+    # The clean filename guess is playable even though web rejected "Garbage".
+    garb = library.query_tracks(search="Garbage")
+    assert garb, "clean filename guess should remain playable"
+    assert garb[0]["artist"] == "Bad Band"
 
     # Excluded tracks are reachable only via excluded_tracks().
     exc = library.excluded_tracks()
-    assert len(exc) == 2
+    assert len(exc) == 1
     reasons = {e["exclude_reason"] for e in exc}
-    assert reasons == {"no_title", "unconfirmed"}
+    assert reasons == {"no_title"}
 
     # And never enter a normal playlist query.
     ids_exc = {e["id"] for e in exc}
