@@ -8,8 +8,19 @@ venv/
 
 # Runtime state — per-install, never committed.
 # Holds your config (music dir, Ollama URL), the scanned library DB,
-# generated DJ audio, and the ~61MB Piper voice model.
+# generated DJ audio, and the ~320MB of Piper voice models.
 data/
+
+# Real per-install config (LAN Ollama URL etc.) — keep out even if moved.
+config.json
+*.sqlite3
+*.db
+
+# Models / large binaries
+*.onnx
+*.onnx.json
+*.mp3
+*.wav
 
 # Editors / OS
 .idea/
