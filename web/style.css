@@ -59,6 +59,9 @@ button {
 button:hover { border-color: var(--accent); }
 button.primary { background: var(--accent); color: #1a1206; border-color: var(--accent);
                  font-weight: 600; }
+button.ghost { background: transparent; color: var(--accent2);
+              border: 1px solid var(--border); margin-top: 6px; }
+button.ghost:hover { border-color: var(--accent2); }
 input[type=text], select, textarea {
   background: #10141d; color: var(--fg); border: 1px solid var(--border);
   border-radius: 6px; padding: 7px 10px; font-size: 13px; width: 100%;

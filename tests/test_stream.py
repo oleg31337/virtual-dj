@@ -180,24 +180,31 @@ def test_state_shape_is_stable():
         assert key in state
 
 
-def test_dj_text_persists_across_following_track(music_dir, has_ffmpeg):
-    """The 'DJ SAID' panel must keep the last phrase while the next track
-    plays, not blank out the moment the music starts."""
+def test_dj_text_shows_for_announced_track_then_clears(music_dir, has_ffmpeg):
+    """Per requirement: the 'DJ SAID' panel shows the phrase for the track it
+    introduced, and clears when that song ends (the next track starts)."""
+    from tests.conftest import make_mp3
+    make_mp3(music_dir / "a.mp3", seconds=2)   # DJ break source (any audio)
+    announced = make_mp3(music_dir / "b.mp3", seconds=2)
+    next_one = make_mp3(music_dir / "c.mp3", seconds=2)
+    dj_track = {"path": str(music_dir / "a.mp3"), "title": "Alpha",
+                "artist": "Band One", "id": 101}
+    announced = {"path": str(announced), "title": "Beta",
+                  "artist": "Band Two", "id": 102}
+    next_one = {"path": str(next_one), "title": "Gamma",
+                "artist": "Band Three", "id": 103}
+
     b = Broadcaster()
     b.add_listener()
-    dj_track = {"path": str(music_dir / "a.mp3"), "title": "Alpha",
-                "artist": "Band One"}
-    music_track = {"path": str(music_dir / "b.mp3"), "title": "Beta",
-                   "artist": "Band Two"}
 
     def play(path, kind, meta):
         b._play_file(path, kind, meta)
 
-    # 1) A DJ break speaks a phrase.
+    # 1) DJ break introducing track id 102.
     threading.Thread(
         target=play,
         args=(dj_track["path"], "dj",
-              {"track": dj_track, "dj_text": "Next up, a run of Rock.",
+              {"track": announced, "dj_text": "Next up, a run of Rock.",
                "duration": 1.0}),
         daemon=True,
     ).start()
@@ -206,16 +213,23 @@ def test_dj_text_persists_across_following_track(music_dir, has_ffmpeg):
         time.sleep(0.1)
     assert b.state()["dj_text"] == "Next up, a run of Rock."
 
-    # 2) The following music track carries no dj_text...
+    # 2) The announced track (id 102) plays -> phrase still shown.
     threading.Thread(
-        target=play,
-        args=(music_track["path"], "track",
-              {"track": music_track, "duration": 1.0}),
+        target=play, args=(announced["path"], "track", {"track": announced}),
         daemon=True,
     ).start()
     deadline = time.time() + 10
     while time.time() < deadline and b.state()["kind"] != "track":
         time.sleep(0.1)
-    # ...yet the panel still shows the previous DJ phrase.
     assert b.state()["dj_text"] == "Next up, a run of Rock."
+
+    # 3) The next track (id 103) starts -> the song has ended, panel clears.
+    threading.Thread(
+        target=play, args=(next_one["path"], "track", {"track": next_one}),
+        daemon=True,
+    ).start()
+    deadline = time.time() + 10
+    while time.time() < deadline and (b.state().get("track") or {}).get("id") != 103:
+        time.sleep(0.1)
+    assert b.state()["dj_text"] is None
     b.stop()

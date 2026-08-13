@@ -40,6 +40,10 @@ DEFAULTS: dict[str, Any] = {
         "style": "warm, witty late-night radio host",
         "voice": "en_US-amy-medium",
         "speed": 1.0,
+        # Piper prosody: noise_scale controls expressive variation. Lower is
+        # more monotone/robotic; higher is more lively/wobbly. The real lever
+        # for "natural intonation" — no cloud service required.
+        "noise_scale": 0.667,
         # Gain applied to the DJ voice segment, in dB.
         "gain_db": 0.0,
         "intro_music_duck_db": -8.0,

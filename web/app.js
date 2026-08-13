@@ -218,6 +218,12 @@ async function loadConfig() {
   $('program-size').value = cfg.playback?.program?.size ?? 6;
   $('program-size-val').textContent = $('program-size').value;
   $('program-strategy-sel').value = cfg.playback?.program?.strategy ?? 'genre';
+  // Voice + prosody controls.
+  $('dj-speed').value = Math.round((cfg.dj?.speed ?? 1.0) * 100);
+  $('speed-val').textContent = ((cfg.dj?.speed ?? 1.0)).toFixed(2);
+  const ns = cfg.dj?.noise_scale ?? 0.667;
+  $('dj-noise').value = Math.round(ns * 100);
+  $('expr-val').textContent = ns.toFixed(2);
 }
 
 async function loadHealth() {
@@ -410,6 +416,7 @@ function wire() {
           every_n_tracks: Number($('dj-freq').value),
           max_sentences: Number($('dj-sentences').value),
           speed: Number($('dj-speed').value) / 100,
+          noise_scale: Number($('dj-noise').value) / 100,
           voice: $('dj-voice').value,
           style: $('dj-style').value.trim(),
         },
@@ -417,6 +424,37 @@ function wire() {
       }),
     });
     loadConfig();
+  };
+  $('dj-noise').oninput = (e) =>
+    ($('expr-val').textContent = (e.target.value / 100).toFixed(2));
+  $('test-voice').onclick = async () => {
+    const voice = $('dj-voice').value;
+    const speed = Number($('dj-speed').value) / 100;
+    const noise = Number($('dj-noise').value) / 100;
+    const btn = $('test-voice');
+    btn.disabled = true;
+    btn.textContent = '⏳ synthesizing…';
+    try {
+      const r = await api('/api/dj/preview', {
+        method: 'POST',
+        body: JSON.stringify({
+          text: 'Hey listeners, this is your Virtual DJ — let\'s keep the '
+                + 'vibes flowing through the night.',
+          voice, speed, noise_scale: noise,
+        }),
+      });
+      if (r && r.audio_url) {
+        const a = $('preview-audio');
+        a.hidden = false;
+        a.src = r.audio_url;
+        a.play().catch(() => {});
+      }
+    } catch (e) {
+      alert('Voice test failed: ' + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '▶ Test this voice';
+    }
   };
 
   $('save-preset').onclick = async () => {

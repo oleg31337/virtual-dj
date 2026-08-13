@@ -147,11 +147,13 @@ class Broadcaster:
             "kind": "idle", "track": None, "dj_text": None,
             "started_at": None, "duration": None,
         }
-        # The last DJ phrase spoken, kept across track plays so the "DJ SAID"
-        # panel shows what was just said until the next break is generated.
-        # (A track item carries no dj_text, so without this the panel would
-        # blank out the moment the music starts after a break.)
+        # The last DJ phrase spoken, and the id of the track it announced.
+        # The "DJ SAID" panel shows the phrase only while that announced track
+        # is playing; when the next track starts (the relevant song has ended)
+        # the panel clears. Without the id binding the phrase would either
+        # vanish the instant the music began, or linger forever.
         self._last_dj_text: str | None = None
+        self._dj_for_track_id: int | None = None
         self._listeners_changed: list[Callable[[], None]] = []
         self._on_change: list[Callable[[dict[str, Any]], None]] = []
         self._started_stream_at: float | None = None
@@ -271,10 +273,14 @@ class Broadcaster:
             "started_at": time.time(),
             "duration": meta.get("duration"),
         }
-        # Remember the most recent DJ phrase so the UI keeps showing it while
-        # the following track(s) play. Only actual DJ breaks set dj_text.
-        if meta.get("dj_text"):
+        # A DJ break carries the spoken phrase and the id of the track it
+        # introduces; remember both so the UI can show the phrase for exactly
+        # the duration of that track. The binding is overwritten by the next
+        # DJ break, and a non-matching track id simply stops showing it
+        # (handled in state()), so we never need to clear it explicitly.
+        if meta.get("dj_text") and meta.get("track"):
             self._last_dj_text = meta["dj_text"]
+            self._dj_for_track_id = meta["track"].get("id")
         self._notify_change()
 
         bps = self._bytes_per_second()
@@ -440,9 +446,14 @@ class Broadcaster:
         elapsed = None
         if now.get("started_at"):
             elapsed = round(time.time() - now["started_at"], 1)
-        # Fall back to the last spoken DJ phrase so the panel doesn't blank out
-        # the moment the music starts after a break.
-        dj_text = now.get("dj_text") or self._last_dj_text
+        # Show the remembered DJ phrase only for the track it introduced. Once
+        # the next track starts (the announced song has ended) it clears.
+        now_track = now.get("track") or {}
+        show_dj = (self._last_dj_text is not None
+                   and self._dj_for_track_id is not None
+                   and now_track.get("id") == self._dj_for_track_id
+                   and now.get("kind") in ("dj", "track"))
+        dj_text = self._last_dj_text if show_dj else None
         return {
             "kind": now.get("kind"),
             "track": now.get("track"),

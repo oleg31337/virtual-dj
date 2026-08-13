@@ -263,15 +263,16 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
     return fallback_script(track)
 
 
-def _cache_path(text: str, voice: str, speed: float) -> Path:
+def _cache_path(text: str, voice: str, speed: float, noise_scale: float) -> Path:
     digest = hashlib.sha256(
-        f"{voice}|{speed}|{text}".encode("utf-8")
+        f"{voice}|{speed}|{noise_scale}|{text}".encode("utf-8")
     ).hexdigest()[:32]
     return config.DJ_CACHE_DIR / f"{digest}.mp3"
 
 
 def synthesize(text: str, voice: str | None = None,
-               speed: float | None = None) -> Path | None:
+               speed: float | None = None,
+               noise_scale: float | None = None) -> Path | None:
     """Render ``text`` to an mp3 with Piper. Returns None on failure."""
     text = (text or "").strip()
     if not text:
@@ -283,7 +284,10 @@ def synthesize(text: str, voice: str | None = None,
     voice = voice or config.get("dj.voice", "en_US-amy-medium")
     speed = float(speed if speed is not None else config.get("dj.speed", 1.0))
     speed = max(0.5, min(speed, 2.0))
-    out_path = _cache_path(text, voice, speed)
+    noise_scale = float(noise_scale if noise_scale is not None
+                        else config.get("dj.noise_scale", 0.667))
+    noise_scale = max(0.1, min(noise_scale, 2.0))
+    out_path = _cache_path(text, voice, speed, noise_scale)
     if out_path.exists() and out_path.stat().st_size > 0:
         return out_path
 
@@ -299,7 +303,9 @@ def synthesize(text: str, voice: str | None = None,
         # Piper's length_scale is inverse to speed.
         length_scale = round(1.0 / speed, 4)
         cmd = [binary, "-m", str(model), "-f", str(wav_path),
-               "--length_scale", str(length_scale)]
+               "--length_scale", str(length_scale),
+               "--noise_scale", str(round(noise_scale, 4))]
+
         try:
             proc = subprocess.run(
                 cmd, input=text.encode("utf-8"),

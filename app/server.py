@@ -375,6 +375,9 @@ def api_dj_voices():
 class PreviewRequest(BaseModel):
     text: str | None = None
     track_id: int | None = None
+    voice: str | None = None
+    speed: float | None = None
+    noise_scale: float | None = None
 
 
 @app.post("/api/dj/preview")
@@ -391,7 +394,12 @@ def api_dj_preview(req: PreviewRequest):
         if track is None:
             raise HTTPException(400, "library is empty")
         text = dj.generate_script(track)
-    audio = dj.synthesize(text)
+    audio = dj.synthesize(
+        text,
+        voice=req.voice,
+        speed=req.speed,
+        noise_scale=req.noise_scale,
+    )
     return {
         "text": text,
         "track": track,

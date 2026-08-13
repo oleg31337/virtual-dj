@@ -114,13 +114,19 @@
       <input type="range" id="dj-sentences" min="1" max="6" value="3" />
     </label>
     <label class="field">
+      <span>Voice</span>
+      <select id="dj-voice"></select>
+      <button id="test-voice" type="button" class="ghost">▶ Test this voice</button>
+      <div class="dim" id="dj-voice-note"></div>
+    </label>
+    <label class="field">
       <span>Speaking speed: <b id="speed-val">1.0</b>×</span>
       <input type="range" id="dj-speed" min="70" max="140" value="100" />
     </label>
     <label class="field">
-      <span>Voice</span>
-      <select id="dj-voice"></select>
-      <div class="dim" id="dj-voice-note"></div>
+      <span>Expression: <b id="expr-val">0.67</b>
+        <span class="dim">(lower = calm/monotone, higher = lively)</span></span>
+      <input type="range" id="dj-noise" min="10" max="150" value="67" />
     </label>
     <label class="field">
       <span>Persona / style</span>
