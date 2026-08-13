@@ -344,9 +344,15 @@ async def api_put_config(request: Request):
     if not isinstance(patch, dict):
         raise HTTPException(400, "config patch must be an object")
     updated = config.save_config(patch)
-    # Filter changes should take effect on the next refill.
+    # Filter changes should take effect on the next refill. When the program
+    # grouping settings change, rebuild the upcoming queue right away so the
+    # new theme strategy (genre/artist/decade) is reflected immediately
+    # rather than only after the old queue drains.
     if "playback" in patch:
-        SCHEDULER.ensure_filled(5)
+        prog_patch = (patch["playback"] or {}).get("program")
+        if prog_patch is not None:
+            SCHEDULER.clear()
+        SCHEDULER.ensure_filled(10)
     return updated
 
 

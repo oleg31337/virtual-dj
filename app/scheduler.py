@@ -63,12 +63,12 @@ class Scheduler:
 
         themes = library.program_themes(strategy)
         themes = [t for t in themes if t.get("n", 0) >= size]
-        # Respect global genre/artist filters: only theme on buckets that the
-        # active filter allows.
-        if genres_filter:
-            themes = [t for t in themes if t.get("genre") in genres_filter]
-        if artists_filter:
-            themes = [t for t in themes if t.get("artist") in artists_filter]
+        # NOTE: the global genre/artist filters do NOT pre-filter this theme
+        # list. A theme carries only its own dimension (genre themes have no
+        # `artist` key, etc.), so filtering the list by the wrong dimension
+        # empties it and silently falls back to a flat shuffle. Instead we
+        # carry the filters into each theme's track query below, where they
+        # are AND-ed correctly.
         if not themes:
             return []
 
@@ -86,6 +86,13 @@ class Scheduler:
                 kwargs = {"artists": [theme["artist"]], "search": search}
             else:  # decade
                 kwargs = {"decade": int(theme["decade"]), "search": search}
+            # Apply global genre/artist filters to the track pool for this
+            # theme. AND-ing here means e.g. "Artist" theme + genre filter
+            # yields that artist's tracks in that genre (skipped if none).
+            if genres_filter:
+                kwargs["genres"] = (kwargs.get("genres") or []) + list(genres_filter)
+            if artists_filter:
+                kwargs["artists"] = (kwargs.get("artists") or []) + list(artists_filter)
             tracks = library.query_tracks(limit=size, random_order=True, **kwargs)
             if len(tracks) < 2:
                 continue

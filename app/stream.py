@@ -147,6 +147,11 @@ class Broadcaster:
             "kind": "idle", "track": None, "dj_text": None,
             "started_at": None, "duration": None,
         }
+        # The last DJ phrase spoken, kept across track plays so the "DJ SAID"
+        # panel shows what was just said until the next break is generated.
+        # (A track item carries no dj_text, so without this the panel would
+        # blank out the moment the music starts after a break.)
+        self._last_dj_text: str | None = None
         self._listeners_changed: list[Callable[[], None]] = []
         self._on_change: list[Callable[[dict[str, Any]], None]] = []
         self._started_stream_at: float | None = None
@@ -266,6 +271,10 @@ class Broadcaster:
             "started_at": time.time(),
             "duration": meta.get("duration"),
         }
+        # Remember the most recent DJ phrase so the UI keeps showing it while
+        # the following track(s) play. Only actual DJ breaks set dj_text.
+        if meta.get("dj_text"):
+            self._last_dj_text = meta["dj_text"]
         self._notify_change()
 
         bps = self._bytes_per_second()
@@ -431,10 +440,13 @@ class Broadcaster:
         elapsed = None
         if now.get("started_at"):
             elapsed = round(time.time() - now["started_at"], 1)
+        # Fall back to the last spoken DJ phrase so the panel doesn't blank out
+        # the moment the music starts after a break.
+        dj_text = now.get("dj_text") or self._last_dj_text
         return {
             "kind": now.get("kind"),
             "track": now.get("track"),
-            "dj_text": now.get("dj_text"),
+            "dj_text": dj_text,
             "elapsed": elapsed,
             "duration": now.get("duration"),
             "paused": self.paused,

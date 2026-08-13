@@ -178,3 +178,44 @@ def test_state_shape_is_stable():
     for key in ("kind", "track", "dj_text", "elapsed", "duration",
                 "paused", "listeners", "scheduler"):
         assert key in state
+
+
+def test_dj_text_persists_across_following_track(music_dir, has_ffmpeg):
+    """The 'DJ SAID' panel must keep the last phrase while the next track
+    plays, not blank out the moment the music starts."""
+    b = Broadcaster()
+    b.add_listener()
+    dj_track = {"path": str(music_dir / "a.mp3"), "title": "Alpha",
+                "artist": "Band One"}
+    music_track = {"path": str(music_dir / "b.mp3"), "title": "Beta",
+                   "artist": "Band Two"}
+
+    def play(path, kind, meta):
+        b._play_file(path, kind, meta)
+
+    # 1) A DJ break speaks a phrase.
+    threading.Thread(
+        target=play,
+        args=(dj_track["path"], "dj",
+              {"track": dj_track, "dj_text": "Next up, a run of Rock.",
+               "duration": 1.0}),
+        daemon=True,
+    ).start()
+    deadline = time.time() + 10
+    while time.time() < deadline and b.state().get("dj_text") is None:
+        time.sleep(0.1)
+    assert b.state()["dj_text"] == "Next up, a run of Rock."
+
+    # 2) The following music track carries no dj_text...
+    threading.Thread(
+        target=play,
+        args=(music_track["path"], "track",
+              {"track": music_track, "duration": 1.0}),
+        daemon=True,
+    ).start()
+    deadline = time.time() + 10
+    while time.time() < deadline and b.state()["kind"] != "track":
+        time.sleep(0.1)
+    # ...yet the panel still shows the previous DJ phrase.
+    assert b.state()["dj_text"] == "Next up, a run of Rock."
+    b.stop()

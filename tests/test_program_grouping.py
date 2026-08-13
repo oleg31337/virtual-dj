@@ -97,3 +97,46 @@ def test_programs_too_small_library_returns_empty(tiny_library, monkeypatch):
     _set_program(monkeypatch, size=99)  # no theme has 99 tracks
     sched = scheduler.Scheduler()
     assert sched._build_programs(2) == []
+
+
+def test_artist_strategy_not_killed_by_genre_filter(tiny_library, monkeypatch):
+    # Regression: a global genre filter used to pre-filter the artist theme
+    # list (which has no `genre` key) and silently fall back to a flat
+    # shuffle. Now the filter is AND-ed into each theme's track query, so an
+    # "Artist" program still builds (using only Rock tracks of that artist).
+    prog = {"enabled": True, "size": 2, "strategy": "artist"}
+    monkeypatch.setattr(config, "_CACHE", {
+        "music_dir": "/m", "playback": {"shuffle": True,
+                                         "genres": ["Rock"], "artists": [],
+                                         "search": "", "program": prog},
+        "dj": {"enabled": True, "every_n_tracks": 3},
+        "llm": {"enabled": True}, "ai": {"free_text_genre": True},
+        "websearch": {"enabled": True},
+    })
+    sched = scheduler.Scheduler()
+    items = sched._build_programs(4)
+    # Rock A (3 tracks, all Rock) qualifies; Pop B is excluded by the genre
+    # filter, so we should still get a real artist-themed program, not empty.
+    assert items, "artist strategy with a genre filter must still build programs"
+    for it in items:
+        assert it["program"]["kind"] == "artist"
+        # Every queued track is Rock (genre filter respected).
+        assert it["track"]["genre"] == "Rock"
+
+
+def test_decade_strategy_with_genre_filter(tiny_library, monkeypatch):
+    prog = {"enabled": True, "size": 2, "strategy": "decade"}
+    monkeypatch.setattr(config, "_CACHE", {
+        "music_dir": "/m", "playback": {"shuffle": True,
+                                         "genres": ["Rock"], "artists": [],
+                                         "search": "", "program": prog},
+        "dj": {"enabled": True, "every_n_tracks": 3},
+        "llm": {"enabled": True}, "ai": {"free_text_genre": True},
+        "websearch": {"enabled": True},
+    })
+    sched = scheduler.Scheduler()
+    items = sched._build_programs(4)
+    assert items, "decade strategy with a genre filter must still build programs"
+    for it in items:
+        assert it["track"]["genre"] == "Rock"
+        assert it["program"]["kind"] == "decade"
