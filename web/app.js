@@ -382,9 +382,6 @@ function wire() {
     loadTracks($('search').value.trim()); loadQueue();
   };
 
-  $('dj-freq').oninput = (e) =>
-    ($('freq-val').textContent = e.target.value === '0' ? 'never' : e.target.value);
-  $('dj-sentences').oninput = (e) => ($('sent-val').textContent = e.target.value);
   $('dj-speed').oninput = (e) =>
     ($('speed-val').textContent = (e.target.value / 100).toFixed(2));
 
