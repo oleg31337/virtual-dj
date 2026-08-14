@@ -72,6 +72,48 @@ def _spell_dates(text: str) -> str:
     """
     return _YEAR_RE.sub(lambda m: _int_to_words(int(m.group(0))), text)
 
+
+# ---------------------------------------------------------------------------
+# Russian (Cyrillic) transliteration for TTS.
+#
+# The bundled voices are English (en_US-*). Piper cannot pronounce Cyrillic
+# glyphs, so a Russian artist/song name fed to it verbatim comes out as
+# garbled noise. Transliterating to a Latin spelling that an English voice
+# reads with roughly Russian pronunciation lets the DJ say "Zemfira" /
+# "Zemfira" instead of mangling the characters.
+#
+# This is applied ONLY on the audio path (synthesize), so the on-screen DJ
+# text keeps the original, readable Cyrillic. The map is the standard
+# library/scientific transliteration (per-letter; soft/hard signs are silent
+# and dropped). It is deliberately simple — no dictionary, but good enough for
+# intelligible speech.
+_CYR_TO_LAT = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "yo",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "kh", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "shch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+    "А": "A", "Б": "B", "В": "V", "Г": "G", "Д": "D", "Е": "E", "Ё": "Yo",
+    "Ж": "Zh", "З": "Z", "И": "I", "Й": "Y", "К": "K", "Л": "L", "М": "M",
+    "Н": "N", "О": "O", "П": "P", "Р": "R", "С": "S", "Т": "T", "У": "U",
+    "Ф": "F", "Х": "Kh", "Ц": "Ts", "Ч": "Ch", "Ш": "Sh", "Щ": "Shch",
+    "Ъ": "", "Ы": "Y", "Ь": "", "Э": "E", "Ю": "Yu", "Я": "Ya",
+}
+_CYR_RE = re.compile(r"[А-Яа-яЁё]")
+
+
+def _transliterate_cyrillic(text: str) -> str:
+    """Transliterate any Cyrillic in ``text`` to a Latin, TTS-readable spelling.
+
+    Non-Cyrillic characters (Latin words, digits, punctuation, spaces) pass
+    through unchanged, so an English intro containing a Russian name keeps its
+    English and only the name is converted. The result contains only ASCII,
+    which Piper handles cleanly.
+    """
+    if not _CYR_RE.search(text):
+        return text
+    return "".join(_CYR_TO_LAT.get(ch, ch) for ch in text)
+
 SYSTEM_PROMPT = (
     "You are the voice of a radio station. You introduce songs on air. "
     "Write ONLY the words to be spoken aloud: no stage directions, no track "
@@ -282,6 +324,10 @@ def synthesize(text: str, voice: str | None = None,
     # Final guard: years must be spoken as words, not read as numerals, so the
     # voice says "nineteen seventy-seven" and not "one nine seven seven".
     text = _spell_dates(text)
+    # Russian (Cyrillic) names cannot be spoken by the English voices — render
+    # them as a Latin spelling the voice reads with roughly Russian pronunciation
+    # (on-screen dj_text stays Cyrillic; this only affects the audio).
+    text = _transliterate_cyrillic(text)
 
     voice = voice or config.get("dj.voice", "en_US-amy-medium")
     speed = float(speed if speed is not None else config.get("dj.speed", 1.0))
