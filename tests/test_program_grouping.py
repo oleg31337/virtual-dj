@@ -59,10 +59,14 @@ def test_programs_group_by_genre(tiny_library, monkeypatch):
     items = sched._build_programs(2)
     # 2 programs x 3 tracks = 6 items.
     assert len(items) == 6
-    # The first item of the second program carries a DJ-requested flag + theme.
-    dj_items = [it for it in items if it.get("dj_requested")]
-    assert len(dj_items) == 1
-    theme = dj_items[0]["program"]
+    # The first track of the SECOND program always carries a DJ-requested flag
+    # (the vibe-switch announce). Programs are shuffled, so find the boundary
+    # dynamically rather than assuming a fixed index. Periodic cadence talks
+    # may also land mid-program; we assert the boundary announce specifically.
+    genres = [it["track"]["genre"] for it in items]
+    switch_index = next(i for i in range(1, len(genres)) if genres[i] != genres[i - 1])
+    assert items[switch_index]["dj_requested"] is True
+    theme = items[switch_index]["program"]
     assert theme["kind"] == "genre"
     # Contiguous blocks: all Rock first or all Pop first within a run.
     genres_in_order = [it["track"]["genre"] for it in items]
