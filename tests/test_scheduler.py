@@ -81,31 +81,50 @@ def test_replace_swaps_the_whole_queue(music_dir, has_ffmpeg):
     assert len(sched.peek()) == 1
 
 
-def test_dj_cadence_every_track():
-    config.save_config({"dj": {"enabled": True, "every_n_tracks": 1}})
+def test_dj_cadence_fixed_when_min_equals_max():
+    # When talk_min == talk_max the interval is deterministic (no randomness).
+    config.save_config({"dj": {"enabled": True, "talk_min": 3, "talk_max": 3}})
     sched = Scheduler()
-    item = sched._wrap({"id": 1})
-    assert all(sched._dj_due(item, i) for i in range(4))
-
-
-def test_dj_cadence_every_third():
-    config.save_config({"dj": {"enabled": True, "every_n_tracks": 3}})
-    sched = Scheduler()
-    item = sched._wrap({"id": 1})
-    due = [sched._dj_due(item, i) for i in range(6)]
-    assert due == [True, False, False, True, False, False]
+    # Simulate filling the queue: each wrap stamps a dj_requested decision.
+    items = [sched._wrap({"id": i}) for i in range(9)]
+    due = [bool(it["dj_requested"]) for it in items]
+    # First talk lands on index 3, then every 3 tracks -> indices 3 and 6.
+    assert due == [False, False, False, True, False, False, True, False, False]
 
 
 def test_dj_cadence_zero_means_never():
-    config.save_config({"dj": {"enabled": True, "every_n_tracks": 0}})
+    config.save_config({"dj": {"enabled": True, "talk_min": 0, "talk_max": 0}})
     sched = Scheduler()
-    assert not sched._dj_due(sched._wrap({"id": 1}), 0)
+    items = [sched._wrap({"id": i}) for i in range(6)]
+    assert not any(it["dj_requested"] for it in items)
 
 
 def test_dj_disabled_overrides_cadence():
-    config.save_config({"dj": {"enabled": False, "every_n_tracks": 1}})
+    config.save_config({"dj": {"enabled": False, "talk_min": 1, "talk_max": 1}})
     sched = Scheduler()
-    assert not sched._dj_due(sched._wrap({"id": 1}), 0)
+    items = [sched._wrap({"id": i}) for i in range(4)]
+    assert not any(it["dj_requested"] for it in items)
+
+
+def test_dj_random_interval_stays_in_range():
+    # Over many rolls the stamped gaps should all fall inside [talk_min, talk_max].
+    config.save_config({"dj": {"enabled": True, "talk_min": 2, "talk_max": 5}})
+    sched = Scheduler()
+    items = [sched._wrap({"id": i}) for i in range(600)]
+    talks = [i for i, it in enumerate(items) if it["dj_requested"]]
+    gaps = [talks[i + 1] - talks[i] for i in range(len(talks) - 1)]
+    assert gaps, "expected some talks to occur"
+    assert all(2 <= g <= 5 for g in gaps)
+
+
+def test_prefetch_and_consumer_agree_on_dj_decision():
+    # Both paths read the same stamped dj_requested flag, so they can never
+    # disagree (no double-talk, no missed gap).
+    config.save_config({"dj": {"enabled": True, "talk_min": 1, "talk_max": 2}})
+    sched = Scheduler()
+    items = [sched._wrap({"id": i}) for i in range(50)]
+    for it in items:
+        assert sched._dj_due(it, 0) == bool(it["dj_requested"])
 
 
 def test_genre_filter_applies_to_refill(music_dir, has_ffmpeg):

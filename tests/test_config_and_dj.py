@@ -8,14 +8,16 @@ from app import config, db, dj
 def test_defaults_present():
     cfg = config.load_config()
     assert cfg["music_dir"]
-    assert cfg["dj"]["every_n_tracks"] >= 0
+    assert cfg["dj"]["talk_min"] >= 0
+    assert cfg["dj"]["talk_max"] >= cfg["dj"]["talk_min"]
     assert cfg["stream"]["bitrate_kbps"] > 0
 
 
 def test_save_config_deep_merges_and_persists():
-    config.save_config({"dj": {"every_n_tracks": 7}})
+    config.save_config({"dj": {"talk_min": 1, "talk_max": 9}})
     cfg = config.load_config(force=True)
-    assert cfg["dj"]["every_n_tracks"] == 7
+    assert cfg["dj"]["talk_min"] == 1
+    assert cfg["dj"]["talk_max"] == 9
     # Sibling keys inside the same section survive the patch.
     assert "style" in cfg["dj"]
     assert cfg["stream"]["bitrate_kbps"] == config.DEFAULTS["stream"]["bitrate_kbps"]
@@ -34,7 +36,7 @@ def test_corrupt_config_falls_back_to_defaults():
 
 
 def test_get_dotpath():
-    assert config.get("dj.max_sentences") == config.DEFAULTS["dj"]["max_sentences"]
+    assert config.get("dj.sent_max") == config.DEFAULTS["dj"]["sent_max"]
     assert config.get("nope.nothing", "fallback") == "fallback"
 
 

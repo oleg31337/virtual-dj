@@ -25,6 +25,13 @@ class Scheduler:
         self._prepared: dict[int, dict[str, Any]] = {}   # queue item uid -> break
         self._uid = 0
         self._track_counter = 0
+        # Tracks remaining until the next DJ break. When it reaches 0 the next
+        # wrapped-track is flagged for a talk, and a fresh random interval is
+        # rolled from dj.talk_min..talk_max. Stamping the decision at enqueue
+        # time (under the lock) keeps the consumer and the prefetch worker in
+        # perfect agreement, so we never double-talk or skip a gap. None means
+        # "not yet initialized" — set on first wrap.
+        self._tracks_until_talk: int | None = None
         self._previous: dict[str, Any] | None = None
         self._stop = threading.Event()
         self._worker: threading.Thread | None = None
@@ -36,8 +43,36 @@ class Scheduler:
         self._uid += 1
         return self._uid
 
+    def _roll_interval(self) -> int:
+        """Pick a random number of tracks before the next talk (0 = never)."""
+        return config.randint_range(
+            "dj.talk_min", "dj.talk_max",
+            config.DEFAULTS["dj"]["talk_min"], config.DEFAULTS["dj"]["talk_max"])
+
+    def _schedule_next(self) -> None:
+        """Begin a fresh countdown to the next talk from config."""
+        self._tracks_until_talk = self._roll_interval()
+
     def _wrap(self, track: dict[str, Any], with_dj: bool | None = None,
               program: dict[str, Any] | None = None) -> dict[str, Any]:
+        # Decide whether THIS track gets a DJ break. The decision is stamped
+        # here, at enqueue time, so the consumer and prefetch worker agree.
+        if with_dj is None:
+            with_dj = False
+            if config.get("dj.enabled", True):
+                if self._tracks_until_talk is None:
+                    # First track is never a talk; begin the countdown.
+                    self._schedule_next()
+                elif self._tracks_until_talk:
+                    self._tracks_until_talk -= 1
+                    if self._tracks_until_talk == 0:
+                        with_dj = True
+                        self._schedule_next()
+        else:
+            # Explicit decision (e.g. a forced program-start talk). A real talk
+            # here starts a fresh random interval for whatever follows.
+            if with_dj and config.get("dj.enabled", True):
+                self._schedule_next()
         return {
             "uid": self._next_uid(),
             "track": track,
@@ -171,6 +206,7 @@ class Scheduler:
                     "uid": item["uid"],
                     "track": item["track"],
                     "program": item.get("program"),
+                    "dj_requested": bool(item.get("dj_requested")),
                     "dj_ready": item["uid"] in self._prepared,
                     "dj_text": (self._prepared.get(item["uid"]) or {}).get("text"),
                 }
@@ -223,15 +259,14 @@ class Scheduler:
     # --- consumption ------------------------------------------------------
 
     def _dj_due(self, item: dict[str, Any], index: int) -> bool:
-        """Should a DJ break precede this item?"""
-        if item.get("dj_requested") is not None:
-            return bool(item["dj_requested"])
-        if not config.get("dj.enabled", True):
-            return False
-        every = int(config.get("dj.every_n_tracks", 3) or 0)
-        if every <= 0:
-            return False
-        return (self._track_counter + index) % every == 0
+        """Should a DJ break precede this item?
+
+        The decision is stamped onto each item at enqueue time (see
+        ``_wrap``), so this just reads it. ``index`` is accepted for call
+        compatibility but the stored decision is authoritative — both the
+        consumer and the prefetch worker see the same flag.
+        """
+        return bool(item.get("dj_requested"))
 
     def pop_next(self) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any] | None] | None:
         """Return (track, dj_break_or_None, program_or_None) for the next thing to play."""
@@ -287,7 +322,6 @@ class Scheduler:
         depth = max(1, int(config.get("dj.prefetch_depth", 3)))
         with self._lock:
             upcoming = list(self._queue[:depth])
-            counter = self._track_counter
             previous = self._previous
 
         for index, item in enumerate(upcoming):
@@ -297,12 +331,11 @@ class Scheduler:
             with self._lock:
                 if uid in self._prepared:
                     continue
+            # The talk decision is already stamped on the item at enqueue time
+            # (see _wrap); just read it. A forced program-start (dj_requested
+            # explicitly True) or a rolled-interval hit both count.
             explicit = item.get("dj_requested")
-            every = int(config.get("dj.every_n_tracks", 3) or 0)
-            due = bool(explicit) if explicit is not None else (
-                every > 0 and (counter + index) % every == 0
-            )
-            if not due:
+            if not explicit:
                 continue
             prior = upcoming[index - 1]["track"] if index else previous
             started = time.monotonic()

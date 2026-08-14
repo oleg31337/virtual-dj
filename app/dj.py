@@ -179,7 +179,9 @@ def _facts_block(track: dict[str, Any], facts: dict[str, Any]) -> str:
 def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = None,
                     program: dict[str, Any] | None = None) -> str:
     """Ask the local LLM for an on-air intro; fall back to a template."""
-    max_sentences = int(config.get("dj.max_sentences", 3))
+    max_sentences = config.randint_range(
+        "dj.sent_min", "dj.sent_max",
+        config.DEFAULTS["dj"]["sent_min"], config.DEFAULTS["dj"]["sent_max"])
     facts: dict[str, Any] = {}
     try:
         facts = enrich.enrich_track(track)

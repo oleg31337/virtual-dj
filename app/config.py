@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import threading
 from copy import deepcopy
 from pathlib import Path
@@ -44,6 +45,15 @@ DEFAULTS: dict[str, Any] = {
         # more monotone/robotic; higher is more lively/wobbly. The real lever
         # for "natural intonation" — no cloud service required.
         "noise_scale": 0.667,
+        # Talk cadence: the DJ speaks after a random number of tracks between
+        # talk_min and talk_max (inclusive). Equal values give a fixed cadence.
+        # 0 means the DJ never talks (regardless of max).
+        "talk_min": 2,
+        "talk_max": 4,
+        # Number of sentences per DJ line: randomized within sent_min..sent_max
+        # (inclusive) so the breaks feel less mechanical. Equal values fix it.
+        "sent_min": 1,
+        "sent_max": 3,
         # Gain applied to the DJ voice segment, in dB.
         "gain_db": 0.0,
         "intro_music_duck_db": -8.0,
@@ -157,3 +167,19 @@ def get(dotpath: str, default: Any = None) -> Any:
             return default
         node = node[part]
     return node
+
+
+def randint_range(dot_min: str, dot_max: str, default_min: int,
+                  default_max: int) -> int:
+    """Return a random int in [min, max] read from config dotpaths.
+
+    Used for randomized DJ cadence (tracks between talks) and randomized
+    sentence counts. If the configured max < min the values are swapped, and
+    negatives are clamped to 0, so a mis-set config can never raise here.
+    """
+    lo = int(get(dot_min, default_min) or 0)
+    hi = int(get(dot_max, default_max) or 0)
+    lo, hi = max(0, min(lo, hi)), max(0, max(lo, hi))
+    if lo == hi:
+        return lo
+    return random.randint(lo, hi)

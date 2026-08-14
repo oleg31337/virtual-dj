@@ -47,7 +47,7 @@ def _set_program(monkeypatch, **overrides):
         "music_dir": "/m", "playback": {"shuffle": True, "genres": [],
                                          "artists": [], "search": "",
                                          "program": prog},
-        "dj": {"enabled": True, "every_n_tracks": 3},
+        "dj": {"enabled": True, "talk_min": 2, "talk_max": 4},
         "llm": {"enabled": True}, "ai": {"free_text_genre": True},
         "websearch": {"enabled": True},
     })
@@ -109,7 +109,7 @@ def test_artist_strategy_not_killed_by_genre_filter(tiny_library, monkeypatch):
         "music_dir": "/m", "playback": {"shuffle": True,
                                          "genres": ["Rock"], "artists": [],
                                          "search": "", "program": prog},
-        "dj": {"enabled": True, "every_n_tracks": 3},
+        "dj": {"enabled": True, "talk_min": 2, "talk_max": 4},
         "llm": {"enabled": True}, "ai": {"free_text_genre": True},
         "websearch": {"enabled": True},
     })
@@ -130,7 +130,7 @@ def test_decade_strategy_with_genre_filter(tiny_library, monkeypatch):
         "music_dir": "/m", "playback": {"shuffle": True,
                                          "genres": ["Rock"], "artists": [],
                                          "search": "", "program": prog},
-        "dj": {"enabled": True, "every_n_tracks": 3},
+        "dj": {"enabled": True, "talk_min": 2, "talk_max": 4},
         "llm": {"enabled": True}, "ai": {"free_text_genre": True},
         "websearch": {"enabled": True},
     })

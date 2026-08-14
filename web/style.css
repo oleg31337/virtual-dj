@@ -65,8 +65,11 @@ button.ghost:hover { border-color: var(--accent2); }
 input[type=text], select, textarea {
   background: #10141d; color: var(--fg); border: 1px solid var(--border);
   border-radius: 6px; padding: 7px 10px; font-size: 13px; width: 100%;
-  font-family: inherit;
+  box-sizing: border-box;
 }
+.field .dual { display: flex; gap: 18px; margin-top: 6px; }
+.field .dual > span { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.field .dual input[type=range] { width: 110px; }
 input[type=range] { width: 100%; accent-color: var(--accent); }
 .row { display: flex; gap: 8px; align-items: center; margin: 8px 0; flex-wrap: wrap; }
 .row > input[type=text] { flex: 1; min-width: 130px; }

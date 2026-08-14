@@ -71,9 +71,10 @@ def test_artists_endpoint(client):
 
 def test_config_get_and_patch(client):
     assert client.get("/api/config").json()["dj"]["enabled"] is True
-    updated = client.put("/api/config", json={"dj": {"every_n_tracks": 5}}).json()
-    assert updated["dj"]["every_n_tracks"] == 5
-    assert client.get("/api/config").json()["dj"]["every_n_tracks"] == 5
+    updated = client.put("/api/config", json={"dj": {"talk_min": 1, "talk_max": 6}}).json()
+    assert updated["dj"]["talk_min"] == 1
+    assert updated["dj"]["talk_max"] == 6
+    assert client.get("/api/config").json()["dj"]["talk_min"] == 1
 
 
 def test_config_rejects_non_object(client):

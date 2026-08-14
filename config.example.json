@@ -16,8 +16,10 @@
 
   "dj": {
     "enabled": true,
-    "every_n_tracks": 3,
-    "max_sentences": 3,
+    "talk_min": 2,
+    "talk_max": 4,
+    "sent_min": 1,
+    "sent_max": 3,
     "style": "warm, witty late-night radio host",
     "voice": "en_US-amy-medium",
     "speed": 1.0

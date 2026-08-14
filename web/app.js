@@ -189,10 +189,14 @@ async function loadConfig() {
   state.config = cfg;
   $('station-name').textContent = cfg.stream.station_name;
   $('music-dir').value = cfg.music_dir;
-  $('dj-freq').value = cfg.dj.every_n_tracks;
-  $('freq-val').textContent = cfg.dj.every_n_tracks || 'never';
-  $('dj-sentences').value = cfg.dj.max_sentences;
-  $('sent-val').textContent = cfg.dj.max_sentences;
+  const tmin = cfg.dj.talk_min ?? 2, tmax = cfg.dj.talk_max ?? 4;
+  $('dj-talk-min').value = tmin;
+  $('dj-talk-max').value = tmax;
+  $('talk-val').textContent = (tmax === 0) ? 'never' : `${tmin}–${tmax}`;
+  const smin = cfg.dj.sent_min ?? 1, smax = cfg.dj.sent_max ?? 3;
+  $('dj-sent-min').value = smin;
+  $('dj-sent-max').value = smax;
+  $('sent-val').textContent = `${smin}–${smax}`;
   $('dj-speed').value = Math.round(cfg.dj.speed * 100);
   $('speed-val').textContent = cfg.dj.speed.toFixed(2);
   $('dj-style').value = cfg.dj.style;
@@ -408,13 +412,19 @@ function wire() {
   $('program-size').oninput = (e) =>
     ($('program-size-val').textContent = e.target.value);
   $('save-dj').onclick = async () => {
+    let tmin = Number($('dj-talk-min').value), tmax = Number($('dj-talk-max').value);
+    if (tmax < tmin) [tmin, tmax] = [tmax, tmin];
+    let smin = Number($('dj-sent-min').value), smax = Number($('dj-sent-max').value);
+    if (smax < smin) [smin, smax] = [smax, smin];
     await api('/api/config', {
       method: 'PUT',
       body: JSON.stringify({
         dj: {
           enabled: $('dj-enabled').checked,
-          every_n_tracks: Number($('dj-freq').value),
-          max_sentences: Number($('dj-sentences').value),
+          talk_min: tmin,
+          talk_max: tmax,
+          sent_min: smin,
+          sent_max: smax,
           speed: Number($('dj-speed').value) / 100,
           noise_scale: Number($('dj-noise').value) / 100,
           voice: $('dj-voice').value,
@@ -425,6 +435,19 @@ function wire() {
     });
     loadConfig();
   };
+  const refreshTalkLabel = () => {
+    const tmin = Number($('dj-talk-min').value), tmax = Number($('dj-talk-max').value);
+    $('talk-val').textContent = (tmax === 0 && tmin === 0) ? 'never'
+      : `${Math.min(tmin, tmax)}–${Math.max(tmin, tmax)}`;
+  };
+  const refreshSentLabel = () => {
+    const smin = Number($('dj-sent-min').value), smax = Number($('dj-sent-max').value);
+    $('sent-val').textContent = `${Math.min(smin, smax)}–${Math.max(smin, smax)}`;
+  };
+  $('dj-talk-min').oninput = refreshTalkLabel;
+  $('dj-talk-max').oninput = refreshTalkLabel;
+  $('dj-sent-min').oninput = refreshSentLabel;
+  $('dj-sent-max').oninput = refreshSentLabel;
   $('dj-noise').oninput = (e) =>
     ($('expr-val').textContent = (e.target.value / 100).toFixed(2));
   $('test-voice').onclick = async () => {
