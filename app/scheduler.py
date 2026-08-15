@@ -95,6 +95,7 @@ class Scheduler:
         search = playback.get("search", "") or ""
         genres_filter = playback.get("genres") or None
         artists_filter = playback.get("artists") or None
+        languages_filter = playback.get("languages") or None
 
         themes = library.program_themes(strategy)
         themes = [t for t in themes if t.get("n", 0) >= size]
@@ -130,6 +131,8 @@ class Scheduler:
                 kwargs["genres"] = (kwargs.get("genres") or []) + list(genres_filter)
             if artists_filter:
                 kwargs["artists"] = (kwargs.get("artists") or []) + list(artists_filter)
+            if languages_filter:
+                kwargs["languages"] = (kwargs.get("languages") or []) + list(languages_filter)
             tracks = library.query_tracks(limit=size, random_order=True, **kwargs)
             if len(tracks) < 2:
                 continue
@@ -174,6 +177,7 @@ class Scheduler:
             search=playback.get("search", "") or "",
             genres=playback.get("genres") or None,
             artists=playback.get("artists") or None,
+            languages=playback.get("languages") or None,
             limit=count,
             random_order=bool(playback.get("shuffle", True)),
         )

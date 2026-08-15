@@ -15,6 +15,7 @@ const state = {
   config: null,
   selected: new Set(),
   activeGenres: new Set(),
+  activeLanguages: new Set(),
   tracks: [],
   playing: false,
 };
@@ -89,6 +90,7 @@ async function loadTracks(search) {
   const q = new URLSearchParams({ limit: '300' });
   if (search) q.set('search', search);
   if (state.activeGenres.size) q.set('genre', [...state.activeGenres].join(','));
+  if (state.activeLanguages.size) q.set('language', [...state.activeLanguages].join(','));
   state.tracks = await api(`/api/library/tracks?${q}`);
   const box = $('tracks');
   box.innerHTML = '';
@@ -122,6 +124,23 @@ async function loadGenres() {
     chip.onclick = () => {
       if (state.activeGenres.has(g.genre)) state.activeGenres.delete(g.genre);
       else state.activeGenres.add(g.genre);
+      chip.classList.toggle('on');
+    };
+    box.appendChild(chip);
+  }
+}
+
+async function loadLanguages() {
+  const languages = await api('/api/library/languages');
+  const box = $('languages');
+  box.innerHTML = '';
+  for (const l of languages.slice(0, 50)) {
+    const chip = document.createElement('div');
+    chip.className = 'chip' + (state.activeLanguages.has(l.language) ? ' on' : '');
+    chip.textContent = `${l.language} (${l.n})`;
+    chip.onclick = () => {
+      if (state.activeLanguages.has(l.language)) state.activeLanguages.delete(l.language);
+      else state.activeLanguages.add(l.language);
       chip.classList.toggle('on');
     };
     box.appendChild(chip);
@@ -204,6 +223,7 @@ async function loadConfig() {
   $('enrich-enabled').checked = cfg.enrich.enabled;
   $('shuffle').checked = cfg.playback.shuffle;
   state.activeGenres = new Set(cfg.playback.genres || []);
+  state.activeLanguages = new Set(cfg.playback.languages || []);
 
   const voices = await api('/api/dj/voices');
   const profiles = voices.profiles || [];
@@ -303,7 +323,7 @@ async function pollScan() {
     : (s.error ? `error: ${s.error}`
        : (s.finished_at ? `last scan: +${s.added} new, ${s.updated} updated` : 'idle'));
   if (s.running) setTimeout(pollScan, 1500);
-  else { loadGenres(); loadHealth(); loadLibraryStats(); }
+  else { loadGenres(); loadLanguages(); loadHealth(); loadLibraryStats(); }
 }
 
 /* ---------- wiring ---------- */
@@ -379,6 +399,17 @@ function wire() {
           shuffle: $('shuffle').checked,
           search: $('search').value.trim(),
         },
+      }),
+    });
+    await api('/api/queue/clear', { method: 'POST' });
+    loadTracks($('search').value.trim()); loadQueue();
+  };
+
+  $('apply-language-filters').onclick = async () => {
+    await api('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({
+        playback: { languages: [...state.activeLanguages] },
       }),
     });
     await api('/api/queue/clear', { method: 'POST' });
@@ -491,7 +522,7 @@ function wire() {
 async function init() {
   wire();
   await loadConfig();
-  await Promise.all([loadGenres(), loadTracks(''), loadQueue(),
+  await Promise.all([loadGenres(), loadLanguages(), loadTracks(''), loadQueue(),
                      loadPresets(), loadHistory(), loadHealth(), loadPrograms()]);
   pollScan();
   connectWS();

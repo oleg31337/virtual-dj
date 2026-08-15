@@ -629,7 +629,8 @@ def query_tracks(
 
     order = "RANDOM()" if random_order else "artist COLLATE NOCASE, album, title"
     sql = (
-        "SELECT id, path, title, artist, album, genre, year, duration FROM tracks "
+        "SELECT id, path, title, artist, album, genre, year, duration, language "
+        "FROM tracks "
         f"WHERE {' AND '.join(where)} ORDER BY {order} LIMIT ? OFFSET ?"
     )
     params += [max(1, min(limit, 2000)), max(0, offset)]

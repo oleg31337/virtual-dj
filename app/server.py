@@ -250,6 +250,11 @@ def api_genres():
     return library.list_genres()
 
 
+@app.get("/api/library/languages")
+def api_languages():
+    return library.list_languages()
+
+
 @app.get("/api/library/artists")
 def api_artists(limit: int = 300):
     return library.list_artists(limit)
@@ -257,11 +262,12 @@ def api_artists(limit: int = 300):
 
 @app.get("/api/library/tracks")
 def api_tracks(search: str = "", genre: str = "", artist: str = "",
-               limit: int = 200, offset: int = 0):
+               language: str = "", limit: int = 200, offset: int = 0):
     return library.query_tracks(
         search=search,
         genres=[g for g in genre.split(",") if g] or None,
         artists=[a for a in artist.split(",") if a] or None,
+        languages=[l for l in language.split(",") if l] or None,
         limit=limit, offset=offset,
     )
 
