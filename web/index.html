@@ -95,6 +95,14 @@
   </section>
 
   <section class="card">
+    <h3>Languages</h3>
+    <div class="chips" id="languages"></div>
+    <div class="row">
+      <button id="apply-language-filters" class="primary">Apply languages</button>
+    </div>
+  </section>
+
+  <section class="card">
     <h3>Genres</h3>
     <div class="chips" id="genres"></div>
     <div class="row">
@@ -104,11 +112,23 @@
   </section>
 
   <section class="card">
-    <h3>Languages</h3>
-    <div class="chips" id="languages"></div>
+    <h3>Presets</h3>
     <div class="row">
-      <button id="apply-language-filters" class="primary">Apply languages</button>
+      <input type="text" id="preset-name" placeholder="preset name" />
+      <button id="save-preset" class="primary">Save current</button>
     </div>
+    <div class="list" id="presets"></div>
+  </section>
+
+  <section class="card">
+    <h3>Up next</h3>
+    <div class="list" id="queue"></div>
+    <button id="clear-queue">Clear queue</button>
+  </section>
+
+  <section class="card">
+    <h3>Recently played</h3>
+    <div class="list" id="history"></div>
   </section>
 
   <section class="card">
@@ -161,26 +181,6 @@
       <span><input type="checkbox" id="enrich-enabled" checked /> Look up facts online</span>
     </label>
     <button id="save-dj" class="primary">Save DJ settings</button>
-  </section>
-
-  <section class="card">
-    <h3>Up next</h3>
-    <div class="list" id="queue"></div>
-    <button id="clear-queue">Clear queue</button>
-  </section>
-
-  <section class="card">
-    <h3>Presets</h3>
-    <div class="row">
-      <input type="text" id="preset-name" placeholder="preset name" />
-      <button id="save-preset" class="primary">Save current</button>
-    </div>
-    <div class="list" id="presets"></div>
-  </section>
-
-  <section class="card">
-    <h3>Recently played</h3>
-    <div class="list" id="history"></div>
   </section>
 </main>
 <script src="/static/app.js"></script>
