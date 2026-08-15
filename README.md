@@ -63,26 +63,59 @@ Point VLC, Winamp, Sonos, or any browser at the stream URL and it just plays.
 - Linux, Python 3.11+
 - `ffmpeg` and `ffprobe` on PATH (`sudo apt install ffmpeg`)
 - [Ollama](https://ollama.com) reachable on your network, for DJ scripts
-  (optional — the station plays music fine without it)
+  (optional — the station plays music fine without it; the DJ just stays
+  silent until an Ollama endpoint is configured)
+- internet access on first run, to auto-download the Piper voice models
+  (~190 MB for the two default voices)
 
 ## Install
 
 ```bash
 git clone <your-repo-url> virtual-dj
 cd virtual-dj
-./run.sh                      # creates .venv, installs deps, starts on :8420
+./run.sh                      # creates .venv, installs deps, downloads the
+                              # default voices, starts on :8420
 ```
 
-Then open **http://localhost:8420** and set your music folder in the Library
-panel, or pre-seed it:
+`run.sh` is the canonical launcher. It:
+
+1. creates a Python venv (`.venv`) if missing and installs `requirements.txt`;
+2. downloads the two default Piper voices the app needs (English + Russian)
+   into `data/voices/` — so the DJ can speak on a clean clone;
+3. launches the server on `0.0.0.0:8420` (override with `--host`/`--port`).
+
+To run the server directly instead: `python -m app.main --host 0.0.0.0 --port 8420`.
+
+> No network at install time? The app still starts — voice download is
+> best-effort and retries at runtime. You can fetch voices any time from the
+> web UI (DJ Settings → any voice picker → **Test**), or with
+> `python -m app.voices [--all]` (or `python -m app.voices en_US-amy-medium`).
+
+Then open **http://localhost:8420**, set your music folder in the Library
+panel (or pre-seed it, see below), and hit **Rescan**.
+
+### Pre-seeding the config
+
+Copy the example and edit it before first run:
 
 ```bash
-cp config.example.json data/config.json   # then edit
+cp config.example.json data/config.json   # then edit music_dir / llm / etc.
 ```
+
+All keys are optional — anything omitted falls back to the defaults in
+`app/config.py`. The web UI writes this same `data/config.json` file, so you
+rarely need to edit it by hand.
 
 ### The DJ voice
 
-The Piper voice model is downloaded once into `data/voices/`:
+The Piper voice models are large binary files (git-ignored) stored in
+`data/voices/`. On a **fresh install they are downloaded automatically** — the
+English default (`en_US-amy-medium`) and the Russian default
+(`ru_RU-irina-medium`, used for Russian-language tracks) are fetched on first
+run, and the web UI can download any other curated voice on demand.
+
+Any Piper voice works — drop the `.onnx` + `.onnx.json` pair in `data/voices/`
+and pick it in the DJ Settings panel. To grab them manually:
 
 ```bash
 mkdir -p data/voices && cd data/voices
@@ -90,8 +123,10 @@ curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/m
 curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json
 ```
 
-Any Piper voice works — drop the `.onnx` + `.onnx.json` pair in the same folder
-and pick it in the DJ Settings panel.
+The full catalogue (Amy, Lessac, LibriTTS-R, Ryan, Bryce, plus the Russian
+Irina/Denis/Dmitri/Ruslan) is listed in `app/dj.py` (`VOICE_PROFILES`); every
+one is downloadable from the same HuggingFace repo via the web UI or
+`python -m app.voices --all`.
 
 ## Listening
 
@@ -115,8 +150,11 @@ A few env vars override the defaults at first boot, useful for containers:
 | `VDJ_MUSIC_DIR` | `~/Music` | Initial music folder |
 | `VDJ_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama endpoint |
 | `VDJ_OLLAMA_MODEL` | `qwen3.5:9b` | Model used for DJ scripts |
-| `VDJ_DATA_DIR` | `./data` | Where state is kept |
+| `VDJ_DATA_DIR` | `./data` | Where state is kept (config, DB, voices) |
+| `VDJ_PORT` | `8420` | Listen port |
+| `VDJ_HOST` | `0.0.0.0` | Bind address |
 | `VDJ_LOG_LEVEL` | `info` | Log verbosity |
+| `VDJ_NO_VOICE_DOWNLOAD` | `0` | Set to `1` to skip the first-run voice download |
 
 ## Running as a service
 
@@ -158,13 +196,13 @@ The stream endpoint is a raw ASGI response on purpose — Starlette's
 ## Development
 
 ```bash
-.venv/bin/python -m pytest tests/ -q     # 89 tests
+.venv/bin/python -m pytest tests/ -q
 ```
 
-The suite covers tag parsing, DJ prompt/fact grounding, scheduler cadence, and
-end-to-end streaming against a real server — including decoding the live stream
-with ffmpeg across forced track switches to assert zero decode errors. Tests use
-temp directories and never touch your library.
+The suite covers tag parsing, DJ prompt/fact grounding, scheduler cadence,
+voice downloading, and end-to-end streaming against a real server — including
+decoding the live stream with ffmpeg across forced track switches to assert
+zero decode errors. Tests use temp directories and never touch your library.
 
 > Note for `hermes verify` / `uv` users: activate the venv first
 > (`source .venv/bin/activate`), since the detected recipe invokes bare

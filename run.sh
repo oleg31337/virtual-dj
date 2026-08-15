@@ -10,4 +10,12 @@ if [ ! -d .venv ]; then
   .venv/bin/pip install -r requirements.txt
 fi
 
+# First-run voice setup: fetch the default Piper models so the DJ can speak
+# out of the box. Best-effort -- if there is no network here, the server still
+# starts and can download voices later from the web UI.
+if [ "${VDJ_NO_VOICE_DOWNLOAD:-}" != "1" ]; then
+  echo "ensuring default voice models are present…"
+  .venv/bin/python -m app.voices || echo "  (voice download skipped -- will retry at runtime)"
+fi
+
 exec .venv/bin/python -m app.main "$@"

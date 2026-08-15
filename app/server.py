@@ -380,6 +380,45 @@ def api_dj_voices():
     }
 
 
+class VoiceDownloadRequest(BaseModel):
+    voice: str | None = None
+    # "default" (config voices), "all" (every curated voice), or a list of ids.
+    voices: list[str] | None = None
+
+
+@app.post("/api/dj/voices/download")
+def api_dj_voices_download(req: VoiceDownloadRequest):
+    """Download Piper voice model(s) on demand.
+
+    Without arguments, fetches the two default voices the app needs. Returns
+    the ids that succeeded and any that failed (e.g. no network).
+    """
+    from . import voices as voice_mgr
+
+    if req.voice:
+        targets = [req.voice]
+    elif req.voices:
+        targets = list(req.voices)
+    else:
+        targets = [config.get("dj.voice"), config.get("dj.russian_voice")]
+    targets = [t for t in targets if t]
+    done = voice_mgr.download_voices(targets)
+    return {
+        "downloaded": done,
+        "failed": [t for t in targets if t not in done],
+        "available": dj.available_voices(),
+    }
+
+
+@app.get("/api/dj/voices/ensure")
+def api_dj_voices_ensure():
+    """Best-effort fetch of the default voices if missing (used at startup)."""
+    from . import voices as voice_mgr
+
+    done = voice_mgr.ensure_default_voices()
+    return {"downloaded": done, "available": dj.available_voices()}
+
+
 class PreviewRequest(BaseModel):
     text: str | None = None
     track_id: int | None = None

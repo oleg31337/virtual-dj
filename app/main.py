@@ -4,9 +4,23 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 
 import uvicorn
+
+log = logging.getLogger("virtual_dj")
+
+
+def _ensure_voices() -> None:
+    """Best-effort first-run voice download (never fatal)."""
+    try:
+        from . import voices
+        got = voices.ensure_default_voices()
+        if got:
+            log.info("first-run voice setup fetched: %s", ", ".join(got))
+    except Exception as exc:  # noqa: BLE001 - a missing network must not crash boot
+        log.warning("voice auto-download skipped (%s)", exc)
 
 
 def main() -> None:
@@ -17,7 +31,12 @@ def main() -> None:
                         default=int(os.environ.get("VDJ_PORT", "8420")))
     parser.add_argument("--reload", action="store_true")
     parser.add_argument("--log-level", default=os.environ.get("VDJ_LOG_LEVEL", "info"))
+    parser.add_argument("--no-voice-download", action="store_true",
+                        help="skip the first-run voice auto-download")
     args = parser.parse_args()
+
+    if not args.no_voice_download:
+        _ensure_voices()
 
     uvicorn.run(
         "app.server:app",
