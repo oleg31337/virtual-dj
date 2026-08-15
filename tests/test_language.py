@@ -38,6 +38,20 @@ def test_mojibake_cyrillic_is_not_russian():
     assert L.classify("Life Burns (feat. lauri ylцnen)", "Apocalyptica") == "english"
 
 
+def test_cyrillic_album_on_latin_song_is_not_russian():
+    # A Cyrillic ALBUM next to a Latin title is a Russian-label compilation,
+    # not a Russian song. The title is what matters for language origin.
+    assert L.classify("How You Remind Me", "Nickelback", "Открытое Радио") == "english"
+
+
+def test_proper_noun_umlauts_in_artist_are_not_german():
+    # Umlauts in the ARTIST name (Icelandic/Finnish/Swedish proper nouns like
+    # "Björk", "Mötley Crüe", "Ylönen") must not classify an English song as
+    # German. Diacritic evidence comes from the TITLE only.
+    assert L.classify("Play Dead", "Björk & David Arnold") == "english"
+    assert L.classify("You're All I Need", "Mötley Crüe") == "english"
+
+
 def test_mojibake_diacritic_is_not_french():
     # CP1252 mojibake with a stray circumflex must not read as French.
     assert L.classify("WHAT ABOUT ME", "HADDAWAY",

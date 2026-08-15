@@ -99,81 +99,110 @@ _GERMAN_WORDS = {
 _WORD_RE = re.compile(r"[A-Za-zÀ-ÿ¿¡]+")
 
 
-def _token_scores(text: str) -> dict[str, int]:
-    """Return per-language word-hit scores for the given Latin text.
+def _token_scores(text: str) -> dict[str, tuple[int, int]]:
+    """Score Latin ``text`` per language.
 
-    Longer, more distinctive words (>=4 letters) count double so that a couple
-    of tiny ambiguous syllables (``me``, ``la``) in an otherwise-English title
-    don't flip the classification, while a real French/Spanish sentence still
-    accumulates a clear lead.
+    Returns ``{lang: (points, distinct_words)}``. ``points`` weights longer,
+    more distinctive words (>=4 letters) double so a real FR/ES/DE sentence
+    accumulates a clear lead; ``distinct_words`` is the count of *different*
+    vocabulary items matched (a single ambiguous word like ``pour`` must never
+    decide on its own -- we require >=2 distinct matches).
+
+    Words are scanned across title + artist + album. Proper-noun *diacritics*
+    in the artist/album (e.g. the umlaut in "Mötley Crüe" or "Björk") are
+    explicitly NOT counted -- that signal is handled separately, from the
+    *title* only, by ``classify``.
     """
     low = text.lower()
     tokens = set(_WORD_RE.findall(low))
-    scores = {"french": 0, "spanish": 0, "german": 0}
+    out = {lang: [0, 0] for lang in ("french", "spanish", "german")}
     for tok in tokens:
         for lang, words in (("french", _FRENCH_WORDS), ("spanish", _SPANISH_WORDS),
                             ("german", _GERMAN_WORDS)):
             if tok in words:
-                scores[lang] += 2 if len(tok) >= 4 else 1
-    return scores
+                out[lang][0] += 2 if len(tok) >= 4 else 1
+                out[lang][1] += 1
+    return {k: tuple(v) for k, v in out.items()}
+
+
+def _title_diacritics(title: str) -> dict[str, dict[str, int]]:
+    """Count title-only diacritics per language (strong vs weak)."""
+    res = {
+        "french": {"strong": 0, "weak": 0},
+        "spanish": {"strong": 0, "weak": 0},
+        "german": {"strong": 0, "weak": 0},
+    }
+    for ch in title or "":
+        if ch in _FRENCH_STRONG:
+            res["french"]["strong"] += 1
+        elif ch in _FRENCH_WEAK:
+            res["french"]["weak"] += 1
+        if ch in _SPANISH_STRONG:
+            res["spanish"]["strong"] += 1
+        if ch in _GERMAN_STRONG:
+            res["german"]["strong"] += 1
+    return res
 
 
 def classify(title: str = "", artist: str = "", album: str = "") -> str:
     """Classify a track's language into one of ``LANGUAGES``.
 
-    Cyrillic anywhere in the text => Russian -- UNLESS the text is mostly Latin,
-    which means the Cyrillic is almost certainly mojibake (a corrupt accented
-    Latin name like "Cortйge" for "Cortège"), not a Russian song. In that case
-    the stray Cyrillic is ignored and the Latin heuristics decide.
-
-    Otherwise Latin text is scored by distinctive diacritics and function words;
-    the highest-scoring language wins only if it clears a threshold AND leads
-    the runner-up, else English (the default).
+    Decision order:
+      1. **Russian** -- Cyrillic in the *song title* (the title is almost
+         always in the song's own language), OR Cyrillic making up >=40% of all
+         alphabetic characters (a fully Cyrillic album+artist with a short
+         Latin title still counts). A Cyrillic *album* next to a Latin title
+         (e.g. an English track on a Russian radio sampler) is NOT Russian.
+      2. **Latin FR/ES/DE** -- scored by distinctive *title* diacritics plus
+         vocabulary from title+artist+album. A language wins only if it leads
+         the runner-up AND has supporting evidence: a strong (unambiguous)
+         title diacritic, >=2 distinct vocabulary matches, or >=2 weak
+         diacritics. Everything else (including mojibake stray accents) is
+         English, the safe default.
     """
-    parts = [title or "", artist or "", album or ""]
-    joined = " ".join(p for p in parts if p)
+    title = title or ""
+    joined = " ".join(p for p in (title, artist or "", album or "") if p)
 
+    # --- 1. Russian via Cyrillic -------------------------------------------------
     cyr = _CYRILLIC_RE.findall(joined)
     if cyr:
-        # Treat as Russian only when Cyrillic is a substantial part of the text;
-        # a lone stray glyph in an otherwise-Latin string is mojibake noise.
-        latin = re.findall(r"[A-Za-zÀ-ÿ¿¡]", joined)
-        if len(cyr) >= max(2, len(latin) * 0.25):
-            return "russian"
-        # else: fall through to Latin heuristics (ignore the mojibake glyph)
+        title_cyr = _CYRILLIC_RE.findall(title)
+        if title_cyr:
+            # Cyrillic in the title is Russian -- UNLESS it is a single stray
+            # glyph inside an otherwise-Latin title, which is mojibake (a
+            # corrupt "Cortège" rendered as "Cortйge"). Require >=2 Cyrillic
+            # glyphs, or Cyrillic making up >=40% of the title's letters.
+            title_alpha = [c for c in title if c.isalpha()]
+            if len(title_cyr) >= 2 or len(title_cyr) >= 0.4 * len(title_alpha):
+                return "russian"
+            # else: lone mojibake glyph in the title -> fall through to Latin.
+        else:
+            # No Cyrillic in the title: only Russian if Cyrillic dominates the
+            # whole string (otherwise it's a Cyrillic album/artist on a Latin
+            # song).
+            alpha = [c for c in joined if c.isalpha()]
+            if alpha and len(cyr) >= 0.4 * len(alpha):
+                return "russian"
+        # else fall through to Latin heuristics (ignore the stray glyph)
 
-    diac = {"french": 0, "spanish": 0, "german": 0}
-    strong = {"french": 0, "spanish": 0, "german": 0}
-    weak = {"french": 0, "spanish": 0, "german": 0}
-    for ch in joined:
-        if ch in _FRENCH_STRONG:
-            diac["french"] += 1; strong["french"] += 1
-        elif ch in _FRENCH_WEAK:
-            diac["french"] += 1; weak["french"] += 1
-        if ch in _SPANISH_STRONG:
-            diac["spanish"] += 1; strong["spanish"] += 1
-        if ch in _GERMAN_STRONG:
-            diac["german"] += 1; strong["german"] += 1
-
+    # --- 2. Latin FR/ES/DE ------------------------------------------------------
+    dia = _title_diacritics(title)
     words = _token_scores(joined)
-    # Weight diacritics heavily (they are near-unambiguous) and words by length.
     scores = {
-        "french": diac["french"] * 3 + words["french"],
-        "spanish": diac["spanish"] * 3 + words["spanish"],
-        "german": diac["german"] * 3 + words["german"],
+        "french": dia["french"]["strong"] * 3 + dia["french"]["weak"] * 0
+                  + words["french"][0],
+        "spanish": dia["spanish"]["strong"] * 3 + words["spanish"][0],
+        "german": dia["german"]["strong"] * 3 + words["german"][0],
     }
     best = max(scores, key=lambda k: scores[k])
-    # A language wins only with a real lead (>=3 and strictly above every other
-    # language) AND with supporting evidence:
-    #   * a strong (unambiguous) diacritic of that language, OR
-    #   * >=2 word-points (so short function words like "ne", "por" still count), OR
-    #   * >=2 weak diacritics of that language (mojibake rarely repeats one cleanly).
-    # This keeps a single mojibake circumflex ("Ê" in "Dance Trax ... ×ÓÊ") from
-    # being read as French when the text has no other French signal. English is
-    # the fallback.
-    if scores[best] >= 2 and scores[best] > max(
-        v for k, v in scores.items() if k != best
-    ) and (strong[best] >= 1 or words[best] >= 2 or weak[best] >= 2):
+    others = max(v for k, v in scores.items() if k != best)
+    strong = dia[best]["strong"]
+    distinct = words[best][1]
+    weak = dia[best]["weak"]
+    # Win requires a real lead AND evidence (a strong title diacritic, >=2
+    # distinct words, or >=2 weak diacritics). A single shared word or a lone
+    # mojibake accent can never decide.
+    if scores[best] > others and (strong >= 1 or distinct >= 2 or weak >= 2):
         return best
     return DEFAULT_LANGUAGE
 
