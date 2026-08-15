@@ -78,16 +78,27 @@ def _spell_dates(text: str) -> str:
 #
 # The bundled voices are English (en_US-*). Piper cannot pronounce Cyrillic
 # glyphs, so a Russian artist/song name fed to it verbatim comes out as
-# garbled noise. Transliterating to a Latin spelling that an English voice
-# reads with roughly Russian pronunciation lets the DJ say "Zemfira" /
-# "Zemfira" instead of mangling the characters.
+# garbled noise. We transliterate to a Latin spelling that an ENGLISH voice
+# reads with roughly Russian pronunciation, so the DJ says something like
+# "Agata Kristi" / "Zemfira" instead of mangling the characters.
 #
 # This is applied ONLY on the audio path (synthesize), so the on-screen DJ
-# text keeps the original, readable Cyrillic. The map is the standard
-# library/scientific transliteration (per-letter; soft/hard signs are silent
-# and dropped). It is deliberately simple — no dictionary, but good enough for
-# intelligible speech.
+# text keeps the original, readable Cyrillic.
+#
+# WHY THIS MAP (and not scholarly/ISO-9 transliteration):
+#   Scholarly transliteration (ISO 9 / Library of Congress) is built for
+#   *reversible* one-letter-to-one-letter mapping for linguists and catalogues.
+#   Fed to an English TTS engine it is actively misread -- "Zhukov" comes out
+#   with an English J (/dʒ/), "Lermontov" with an English R, and "sch" (from
+#   the combo сщ) is voiced as /sk/ ("school"). The romanization explicitly
+#   designed to be "intuitive for Anglophones to read and pronounce" is
+#   BGN/PCGN, so this map follows BGN/PCGN for the single letters and then adds
+#   a handful of multi-letter COMBINATION rules that are the difference
+#   between an English voice saying "shch" vs "s-ch" or "sk". No dictionary,
+#   no network -- just deterministic rules good enough for intelligible,
+#   Russian-flavoured speech.
 _CYR_TO_LAT = {
+    # single letters (BGN/PCGN style)
     "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "yo",
     "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
     "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
@@ -99,6 +110,17 @@ _CYR_TO_LAT = {
     "Ф": "F", "Х": "Kh", "Ц": "Ts", "Ч": "Ch", "Ш": "Sh", "Щ": "Shch",
     "Ъ": "", "Ы": "Y", "Ь": "", "Э": "E", "Ю": "Yu", "Я": "Ya",
 }
+
+# Multi-letter clusters an English TTS otherwise mangles. Applied BEFORE the
+# single-letter pass so e.g. "сч" becomes "sch" (read like "school") rather
+# than "s-ch", and "зж" becomes a single "zh" rather than "z-zh".
+_COMBOS = [
+    ("сч", "sch"), ("зч", "shch"), ("жч", "shch"),
+    ("сш", "ssh"), ("зш", "ssh"),
+    ("зж", "zh"), ("тс", "ts"),
+]
+
+_CYR_VOWELS = set("аеёиоуыэюяъь")
 _CYR_RE = re.compile(r"[А-Яа-яЁё]")
 
 
@@ -109,10 +131,25 @@ def _transliterate_cyrillic(text: str) -> str:
     through unchanged, so an English intro containing a Russian name keeps its
     English and only the name is converted. The result contains only ASCII,
     which Piper handles cleanly.
+
+    ``е`` is rendered ``ye`` at the start of a word or after a vowel / soft or
+    hard sign (its Russian "y+e" onset); elsewhere it is a plain ``e``.
     """
     if not _CYR_RE.search(text):
         return text
-    return "".join(_CYR_TO_LAT.get(ch, ch) for ch in text)
+    # 1) collapse multi-letter clusters an English voice would mispronounce.
+    for cyr, lat in _COMBOS:
+        text = text.replace(cyr, lat).replace(cyr.upper(), lat.capitalize())
+    # 2) single-letter pass, with the е/Е -> ye rule.
+    out = []
+    for i, ch in enumerate(text):
+        if ch in ("е", "Е"):
+            prev = text[i - 1].lower() if i > 0 else ""
+            if i == 0 or prev in _CYR_VOWELS:
+                out.append("Ye" if ch == "Е" else "ye")
+                continue
+        out.append(_CYR_TO_LAT.get(ch, ch))
+    return "".join(out)
 
 SYSTEM_PROMPT = (
     "You are the voice of a radio station. You introduce songs on air. "

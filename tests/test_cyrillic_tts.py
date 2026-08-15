@@ -17,6 +17,20 @@ def test_transliteration_maps_known_names():
     assert dj._transliterate_cyrillic("Тёмная ночь") == "Tyomnaya noch"
 
 
+def test_transliteration_tts_tuning():
+    # Combination clusters an English voice would otherwise mangle:
+    #   сч -> sch (read like "school"), not "s-ch".
+    assert dj._transliterate_cyrillic("Счастье") == "Schastye"
+    # Initial е / medial е: "y+e" onset only at word start or after a vowel.
+    assert dj._transliterate_cyrillic("Ельцин") == "Yeltsin"
+    assert dj._transliterate_cyrillic("Конец фильма") == "Konets filma"
+    # Hard consonant clusters stay readable (Борщ -> Borshch, not "Borshch"
+    # with an extra syllable an English voice can't place).
+    assert dj._transliterate_cyrillic("Борщ") == "Borshch"
+    # Latin text mixed in is left untouched.
+    assert dj._transliterate_cyrillic("Лermонтов") == "Lermontov"
+
+
 def test_transliteration_keeps_latin_and_punctuation():
     # English and numbers must pass through untouched; only Cyrillic converts.
     out = dj._transliterate_cyrillic("Here's Сказочная тайга by Агата Кристи, 1984.")
