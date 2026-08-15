@@ -8,6 +8,9 @@ from app import dj
 def test_year_spelled_out_as_words():
     assert dj._spell_dates("From 1984 by the band.") == "From nineteen eighty-four by the band."
     assert dj._spell_dates("Hits from 2023 and 1999.") == "Hits from twenty twenty-three and nineteen ninety-nine."
+    # Years 2000-2009 must not read as "twenty seven" (sounds like 27).
+    assert dj._spell_dates("A track from 2007.") == "A track from two thousand seven."
+    assert dj._spell_dates("From 2000.") == "From two thousand."
 
 
 def test_non_year_numbers_left_alone():

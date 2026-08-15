@@ -56,8 +56,15 @@ def _int_to_words(n: int) -> str:
         # 19xx reads as "nineteen" + the two-digit tail (e.g. 1984 -> "nineteen eighty-four").
         return f"nineteen {_int_to_words(n - 1900)}"
     if n < 2100:
-        # 20xx reads as "twenty" + the two-digit tail (e.g. 2024 -> "twenty twenty-four").
-        return f"twenty {_int_to_words(n - 2000)}"
+        # 20xx: colloquial "twenty twenty-three" (2023), but tails below ten
+        # would read as "twenty seven" (sounding like 27) — say "two thousand
+        # seven" for those so the year is unambiguous.
+        tail = n - 2000
+        if tail == 0:
+            return "two thousand"
+        if tail < 10:
+            return f"two thousand {_int_to_words(tail)}"
+        return f"twenty {_int_to_words(tail)}"
     # Fallback for anything else.
     return " ".join(_int_to_words(int(d)) for d in str(n))
 
@@ -73,40 +80,10 @@ def _spell_dates(text: str) -> str:
     return _YEAR_RE.sub(lambda m: _int_to_words(int(m.group(0))), text)
 
 
-def _int_to_words_ru(n: int) -> str:
-    """Spoken Russian for a year, e.g. 1984 -> 'тысяча девятьсот восемьдесят четыре'."""
-    ones = ["ноль", "один", "два", "три", "четыре", "пять", "шесть", "семь",
-            "восемь", "девять", "десять", "одиннадцать", "двенадцать",
-            "тринадцать", "четырнадцать", "пятнадцать", "шестнадцать",
-            "семнадцать", "восемнадцать", "девятнадцать"]
-    tens = ["", "", "двадцать", "тридцать", "сорок", "пятьдесят", "шестьдесят",
-            "семьдесят", "восемьдесят", "девяносто"]
-    hundreds = ["", "сто", "двести", "триста", "четыреста", "пятьсот",
-                "шестьсот", "семьсот", "восемьсот", "девятьсот"]
-    if n < 20:
-        return ones[n]
-    if n < 100:
-        t, r = divmod(n, 10)
-        return tens[t] + (f" {ones[r]}" if r else "")
-    if n < 1000:
-        h, r = divmod(n, 100)
-        return hundreds[h] + (f" {_int_to_words_ru(r)}" if r else "")
-    if n < 2000:
-        # 19xx -> "тысяча девятьсот <tail>"
-        return "тысяча девятьсот " + _int_to_words_ru(n - 1900)
-    if n < 2100:
-        # 20xx -> "две тысячи <tail>"
-        return "две тысячи " + _int_to_words_ru(n - 2000)
-    return " ".join(_int_to_words_ru(int(d)) for d in str(n))
-
-
 # Years in a Russian-language DJ break must be spelled in Russian words so the
 # Russian voice reads them as a year, not a string of numerals.
-_YEAR_RU_RE = re.compile(r"\b(19|20)(\d{2})\b")
-
-
-def _spell_dates_ru(text: str) -> str:
-    return _YEAR_RU_RE.sub(lambda m: _int_to_words_ru(int(m.group(0))), text)
+# (Removed: the Russian Piper voice reads year numerals natively, so dates are
+# left exactly as written in the script and are NOT converted to words.)
 
 
 # ---------------------------------------------------------------------------
@@ -226,7 +203,8 @@ def available_voices() -> list[str]:
     return sorted(p.stem for p in voices_dir.glob("*.onnx"))
 
 
-def _clean_script(text: str, max_sentences: int) -> str:
+def _clean_script(text: str, max_sentences: int,
+                  language: str | None = None) -> str:
     text = _THINK_RE.sub("", text or "")
     text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
     text = re.sub(r"[*_#`>\[\]]", " ", text)
@@ -235,8 +213,12 @@ def _clean_script(text: str, max_sentences: int) -> str:
         return ""
     sentences = [s for s in _SENT_SPLIT.split(text) if s.strip()]
     text = " ".join(sentences[: max(1, max_sentences)]).strip()
-    # Years must be spelled out so TTS reads them as dates, not numerals.
-    return _spell_dates(text)
+    # Years must be spelled out so an English TTS reads them as dates, not a
+    # string of numerals. Russian-track text is left as-is (digits) because the
+    # Russian voice reads year numerals natively.
+    if language != "russian":
+        text = _spell_dates(text)
+    return text
 
 
 def fallback_script(track: dict[str, Any],
@@ -264,7 +246,8 @@ def fallback_script(track: dict[str, Any],
                 base = f"Отправляемся в {label}. {base}"
             elif kind == "language":
                 base = f"Звучит подборка {label} музыки. {base}"
-        return _spell_dates_ru(base)
+        # Leave years/dates as digits (the Russian voice reads them natively).
+        return base
     # English (default) fallback path.
     if artist and year:
         base = f"Coming up next: {title}, by {artist}, from {year}."
@@ -410,7 +393,7 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
         )
         resp.raise_for_status()
         content = (resp.json().get("message") or {}).get("content", "")
-        script = _clean_script(content, max_sentences)
+        script = _clean_script(content, max_sentences, language=language)
         if script:
             return script
         log.warning("LLM returned an empty script; using fallback")
@@ -440,12 +423,12 @@ def synthesize(text: str, voice: str | None = None,
     text = (text or "").strip()
     if not text:
         return None
-    # Final guard: years must be spoken as words, not read as numerals, so the
-    # voice says "nineteen seventy-seven" / "тысяча девятьсот..." and not a
-    # string of digits.
-    if language == "russian":
-        text = _spell_dates_ru(text)
-    else:
+    # English voices mis-read bare numerals as digits, so years are spelled out
+    # as words. The Russian voice, however, reads year numerals natively and
+    # spells them as Russian words only when they appear as digits in the audio
+    # anyway -- so we leave Russian-text dates exactly as written (digits) and
+    # do NOT convert them. Convert only for the non-Russian (English) path.
+    if language != "russian":
         text = _spell_dates(text)
     # Russian (Cyrillic) names cannot be spoken by the English voices — render
     # them as a Latin spelling the voice reads with roughly Russian pronunciation

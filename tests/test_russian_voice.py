@@ -41,11 +41,15 @@ def _patch_synth(monkeypatch, calls, russian=True):
     monkeypatch.setattr(dj, "shutil", __import__("shutil"))
 
 
-def test_russian_year_spelling():
-    assert dj._int_to_words_ru(1984) == "тысяча девятьсот восемьдесят четыре"
-    assert dj._int_to_words_ru(2024) == "две тысячи двадцать четыре"
-    assert dj._spell_dates_ru("from 1984") == \
-        "from тысяча девятьсот восемьдесят четыре"
+def test_russian_dates_left_as_digits():
+    # Russian voice reads year numerals natively — years/dates must NOT be
+    # converted to words on the Russian path. (English path still spells them.)
+    assert dj.synthesize is not None  # smoke; real check below in caller
+    # _clean_script leaves digits intact for Russian.
+    assert "1984" in dj._clean_script("в 1984 году", 3, language="russian")
+    # And the English path does spell them out.
+    assert "nineteen eighty-four" in dj._clean_script(
+        "in 1984", 3, language="english")
 
 
 def test_synthesize_routes_russian_voice_and_skips_translit(monkeypatch):
@@ -60,8 +64,9 @@ def test_synthesize_routes_russian_voice_and_skips_translit(monkeypatch):
     # Cyrillic passed through verbatim (NO transliteration for Russian).
     assert "Агаты Кристи" in calls["text"]
     assert "Agata" not in calls["text"]
-    # Year spelled in Russian words.
-    assert "тысяча девятьсот восемьдесят четыре" in calls["text"]
+    # Year left as digits (Russian voice reads them natively), NOT spelled out.
+    assert "1984" in calls["text"]
+    assert "тысяча девятьсот восемьдесят четыре" not in calls["text"]
 
 
 def test_synthesize_english_path_transliterates_russian_names(monkeypatch):
@@ -90,7 +95,8 @@ def test_fallback_script_russian():
              "year": "2007", "language": "russian"}
     out = dj.fallback_script(track, language="russian")
     assert "Котики-наркотики" in out
-    # 2007 -> "две тысячи семь" (Russian year words, not digits).
-    assert "две тысячи семь" in out
+    # Year left as digits (Russian voice reads them natively), not spelled out.
+    assert "2007" in out
+    assert "две тысячи семь" not in out
     # Must be Cyrillic (not transliterated).
     assert "Котики" in out
