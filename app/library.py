@@ -360,7 +360,24 @@ def scan_library(music_dir: str | None = None, full: bool = False,
             STATUS.scanned += 1
 
             from . import language as _language
-            meta["language"] = _language.classify_track(meta)
+            from . import enrich as _enrich
+            artist = (meta.get("artist") or "").strip()
+            # Resolve the artist's country-of-origin and use it as a tiebreaker
+            # so bands whose name is clearly from a language but whose titles
+            # are not (e.g. Téléphone) are grouped correctly instead of falling
+            # back to English.
+            #   * A name with a language-diacritic triggers a (cached, throttled)
+            #     MusicBrainz lookup -- that is the genuinely ambiguous set.
+            #   * Any other name only reuses an origin already in the cache
+            #     (e.g. an unaccented "Telephone" reusing "Téléphone" -> France),
+            #     so we never hammer the API for obvious English artists.
+            country = None
+            if artist:
+                if _language._looks_like_non_english_name(artist):
+                    country = _enrich.artist_country(artist)
+                else:
+                    country = _enrich.artist_country_cached(artist)
+            meta["language"] = _language.classify_track(meta, artist_country=country)
 
             with STATUS.lock:
                 source = meta.get("meta_source")

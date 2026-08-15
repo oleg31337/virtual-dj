@@ -71,3 +71,35 @@ def test_unknown_language_falls_back_to_english():
     # The classifier only emits the five supported buckets.
     for t, a in [("Volare", "Domenico Modugno"), ("Aquelas", "Madredeus")]:
         assert L.classify(t, a) in L.LANGUAGES
+
+
+def test_language_from_country():
+    assert L.language_from_country("FR") == "french"
+    assert L.language_from_country("fr") == "french"
+    assert L.language_from_country("france") == "french"
+    assert L.language_from_country("ES") == "spanish"
+    assert L.language_from_country("DE") == "german"
+    assert L.language_from_country("RU") == "russian"
+    assert L.language_from_country("UA") == "russian"
+    # Non-mapped / unknown -> None (keeps English default).
+    assert L.language_from_country("US") is None
+    assert L.language_from_country("GB") is None
+    assert L.language_from_country("") is None
+    assert L.language_from_country(None) is None
+    # Brazil/Portugal are NOT Spanish.
+    assert L.language_from_country("BR") is None
+    assert L.language_from_country("PT") is None
+
+
+def test_artist_origin_tiebreaker_upgrades_country():
+    # Téléphone: French diacritics in the name but a plain title -> text is
+    # inconclusive (English). The artist's French origin must upgrade it.
+    assert L.classify("Cendrillon", "Téléphone", artist_country="FR") == "french"
+    # Without the country hint it would fall back to English.
+    assert L.classify("Cendrillon", "Téléphone") == "english"
+    # A confident text decision is NOT overridden by country.
+    assert L.classify("Ne Me Quitte Pas", "Jacques Brel",
+                      artist_country="US") == "french"
+    # Unknown country keeps the English default.
+    assert L.classify("Just Another Song", "Some Band",
+                      artist_country="US") == "english"

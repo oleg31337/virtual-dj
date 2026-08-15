@@ -90,7 +90,120 @@ def _musicbrainz(client: httpx.Client, artist: str, title: str) -> dict[str, Any
     return out
 
 
-def _wikipedia(client: httpx.Client, term: str) -> dict[str, Any]:
+def _musicbrainz_artist_country(name: str) -> str | None:
+    """Best-effort artist country-of-origin from MusicBrainz (for language hint).
+
+    Returns the ISO country code (or area name) of the top artist match, or
+    ``None`` if unresolved. The result is mapped to a language bucket elsewhere;
+    here we just return the raw origin so caching is language-agnostic.
+    """
+    query = f'artist:"{name}"'
+    _throttle()
+    resp = httpx.get(
+        f"{MB_ROOT}/artist",
+        params={"query": query, "fmt": "json", "limit": 1},
+    )
+    resp.raise_for_status()
+    artists = resp.json().get("artists") or []
+    if not artists:
+        return None
+    top = artists[0]
+    # Guard against a wildly wrong match (MusicBrainz fuzzy search): the top
+    # hit should at least share the queried name (accent-insensitive).
+    norm = lambda s: "".join(c for c in (s or "").lower() if c.isalnum())
+    if norm(name) and norm(name) not in norm(top.get("name", "")):
+        return None
+    return top.get("country") or (top.get("area") or {}).get("name")
+
+
+def _norm_artist(name: str) -> str:
+    """Accent- and case-insensitive artist key (e.g. Téléphone -> telephone).
+
+    Lets one MusicBrainz origin resolve cover both "Téléphone" and "Telephone"
+    spellings of the same band without a second network call.
+    """
+    import unicodedata
+    return "".join(
+        c for c in unicodedata.normalize("NFKD", name)
+        if not unicodedata.combining(c)
+    ).lower().strip()
+
+
+def artist_country_cached(name: str) -> str | None:
+    """Cache-only artist country lookup (no network call).
+
+    Returns the cached MusicBrainz country for ``name`` (or its accent-stripped
+    variant), or ``None`` if not cached. Used at scan time for artists without a
+    language diacritic, so an already-resolved origin (e.g. an unaccented
+    "Telephone" reusing "Téléphone" -> France) is applied without hitting the
+    API for every obvious English artist.
+    """
+    name = (name or "").strip()
+    if not name:
+        return None
+    conn = db.connect()
+    row = conn.execute(
+        "SELECT country FROM artist_origin WHERE artist = ?", (name,)
+    ).fetchone()
+    if row is not None:
+        return row["country"] or None
+    norm = _norm_artist(name)
+    if norm and norm != name.lower():
+        nrow = conn.execute(
+            "SELECT country FROM artist_origin WHERE artist = ?", (norm,)
+        ).fetchone()
+        if nrow is not None:
+            return nrow["country"] or None
+    return None
+
+
+def artist_country(name: str) -> str | None:
+    """Resolve and cache an artist's country-of-origin.
+
+    Caches both hits and misses (empty string) in the ``artist_origin`` table
+    so each distinct artist is looked up at most once, and the result survives
+    re-scans. Also shares a resolved origin across accent/spelling variants of
+    the same name (Téléphone / Telephone) via an accent-stripped key. Returns the
+    ISO country code / area name, or ``None``.
+    """
+    name = (name or "").strip()
+    if not name:
+        return None
+    conn = db.connect()
+    row = conn.execute(
+        "SELECT country FROM artist_origin WHERE artist = ?", (name,)
+    ).fetchone()
+    if row is not None:
+        return row["country"] or None
+    # Fall back to the accent-stripped key so an unaccented spelling reuses a
+    # previously resolved accented one (no second MusicBrainz call).
+    norm = _norm_artist(name)
+    if norm and norm != name.lower():
+        nrow = conn.execute(
+            "SELECT country FROM artist_origin WHERE artist = ?", (norm,)
+        ).fetchone()
+        if nrow is not None:
+            return nrow["country"] or None
+    country = None
+    try:
+        country = _musicbrainz_artist_country(name)
+    except Exception as exc:
+        log.debug("musicbrainz artist lookup failed for %s: %s", name, exc)
+    # Store under both the exact name and the accent-stripped key so either
+    # spelling finds it next time.
+    conn.execute(
+        "INSERT INTO artist_origin(artist, country) VALUES(?, ?) "
+        "ON CONFLICT(artist) DO UPDATE SET country=excluded.country",
+        (name, country or ""),
+    )
+    if norm and norm != name.lower():
+        conn.execute(
+            "INSERT INTO artist_origin(artist, country) VALUES(?, ?) "
+            "ON CONFLICT(artist) DO UPDATE SET country=excluded.country",
+            (norm, country or ""),
+        )
+    conn.commit()
+    return country or None
     from urllib.parse import quote
 
     resp = client.get(f"{WIKI_ROOT}/{quote(term, safe='')}")

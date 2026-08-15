@@ -25,6 +25,86 @@ from typing import Iterable
 LANGUAGES = ("english", "french", "spanish", "german", "russian")
 DEFAULT_LANGUAGE = "english"
 
+# Artist country-of-origin (from MusicBrainz `area`/`country`) -> the language
+# bucket we group that artist under. Used ONLY as a tiebreaker when the cheap
+# text classifier is inconclusive (it falls back to English). Map is
+# deliberately conservative: a country is only associated with a language when
+# that language is clearly dominant there, so a mis-resolved origin cannot flip
+# an otherwise-confident classification.
+#
+# France and its overseas territories are unambiguously French. Belgium and
+# Switzerland are multilingual, but the text classifier already catches German/
+# Italian tracks by their diacritics/words, so mapping them here only upgrades
+# the French-singing majority that would otherwise fall to English.
+_COUNTRY_TO_LANGUAGE = {
+    # French
+    "FR": "french", "MQ": "french", "GP": "french", "RE": "french",
+    "YT": "french", "MF": "french", "BL": "french", "MC": "french",
+    "BE": "french", "CH": "french",
+    # Spanish (Spain + Latin America). Brazil (BR) and Portugal (PT) excluded.
+    "ES": "spanish", "MX": "spanish", "AR": "spanish", "CO": "spanish",
+    "CL": "spanish", "PE": "spanish", "VE": "spanish", "EC": "spanish",
+    "UY": "spanish", "BO": "spanish", "PY": "spanish", "CR": "spanish",
+    "DO": "spanish", "PA": "spanish", "NI": "spanish", "HN": "spanish",
+    "GT": "spanish", "SV": "spanish", "CU": "spanish", "PR": "spanish",
+    # German
+    "DE": "german", "AT": "german",
+    # Russian (and the core Russian-speaking CIS)
+    "RU": "russian", "UA": "russian", "BY": "russian",
+}
+# Also accept a few lowercased country names in case MusicBrainz returns the
+# full name instead of the ISO code.
+_COUNTRY_NAME_TO_LANGUAGE = {k.lower(): v for k, v in {
+    "france": "french", "belgium": "french", "switzerland": "french",
+    "monaco": "french", "spain": "spanish", "mexico": "spanish",
+    "argentina": "spanish", "colombia": "spanish", "chile": "spanish",
+    "germany": "german", "austria": "german", "russia": "russian",
+    "ukraine": "russian", "belarus": "russian",
+}.items()}
+
+
+def language_from_country(country: str | None) -> str | None:
+    """Map a MusicBrainz country/area code or name to a language bucket.
+
+    Returns ``None`` when the country is unknown or not associated with one of
+    the supported non-English buckets (so the caller keeps its default).
+    """
+    if not country:
+        return None
+    c = country.strip()
+    code = c.upper()
+    if code in _COUNTRY_TO_LANGUAGE:
+        return _COUNTRY_TO_LANGUAGE[code]
+    name = c.lower()
+    if name in _COUNTRY_NAME_TO_LANGUAGE:
+        return _COUNTRY_NAME_TO_LANGUAGE[name]
+    # Some MB areas are nested ("X, France"); accept a trailing known name.
+    for key, lang in _COUNTRY_NAME_TO_LANGUAGE.items():
+        if name.endswith(", " + key) or name == key:
+            return lang
+    return None
+
+
+# Diacritics that suggest an artist name is from a non-English language and is
+# worth resolving via MusicBrainz origin. These are the SAME distinctive marks
+# the text classifier uses (French ç/æ/œ + accents, Spanish ñ, German
+# ä/ö/ü/ß), so we only spend a network lookup on the names that could actually
+# benefit. Plain ASCII names (Queen, Nirvana) are skipped -- their text
+# classification is already correct and the network call would be wasted.
+_NAME_DIACRITIC_RE = re.compile(
+    r"[àâäãáåæçéèêëíìîïñóòôöõøúùûüýÿßÀÂÄÃÁÅÆÇÉÈÊËÍÌÎÏÑÓÒÔÖÕØÚÙÛÜÝ]"
+)
+
+
+def _looks_like_non_english_name(artist: str) -> bool:
+    """True if the artist name carries a language-diagnostic diacritic.
+
+    Used to decide whether a MusicBrainz country lookup is worth attempting for
+    an otherwise-English-default track. Keeps the scan fast and avoids
+    hammering the API for names that are already correctly classified.
+    """
+    return bool(_NAME_DIACRITIC_RE.search(artist or ""))
+
 _CYRILLIC_RE = re.compile(r"[А-Яа-яЁё]")
 
 # Distinctive diacritics per language, split by reliability:
@@ -144,7 +224,8 @@ def _title_diacritics(title: str) -> dict[str, dict[str, int]]:
     return res
 
 
-def classify(title: str = "", artist: str = "", album: str = "") -> str:
+def classify(title: str = "", artist: str = "", album: str = "",
+             artist_country: str | None = None) -> str:
     """Classify a track's language into one of ``LANGUAGES``.
 
     Decision order:
@@ -159,6 +240,11 @@ def classify(title: str = "", artist: str = "", album: str = "") -> str:
          title diacritic, >=2 distinct vocabulary matches, or >=2 weak
          diacritics. Everything else (including mojibake stray accents) is
          English, the safe default.
+      3. **Artist origin tiebreaker** -- if the text classifier is inconclusive
+         (English default) and the artist's MusicBrainz country-of-origin maps
+         to a non-English bucket (e.g. France -> French), use that. This catches
+         bands like Téléphone whose name carries French diacritics but whose
+         track titles do not, without disturbing any confident text decision.
     """
     title = title or ""
     joined = " ".join(p for p in (title, artist or "", album or "") if p)
@@ -204,15 +290,25 @@ def classify(title: str = "", artist: str = "", album: str = "") -> str:
     # mojibake accent can never decide.
     if scores[best] > others and (strong >= 1 or distinct >= 2 or weak >= 2):
         return best
+    # Inconclusive by text: fall back to the artist's country-of-origin when it
+    # maps to a supported non-English bucket. This upgrades bands whose *name*
+    # is clearly from a language (Téléphone -> France -> French) but whose
+    # titles carry no decisive diacritics/words. It never overrides a confident
+    # text decision above, and a missing/unknown country keeps English default.
+    if artist_country:
+        origin_lang = language_from_country(artist_country)
+        if origin_lang and origin_lang != DEFAULT_LANGUAGE:
+            return origin_lang
     return DEFAULT_LANGUAGE
 
 
-def classify_track(track: dict) -> str:
+def classify_track(track: dict, artist_country: str | None = None) -> str:
     """Classify a track dict (keys: title/artist/album)."""
     return classify(
         title=(track.get("title") or ""),
         artist=(track.get("artist") or ""),
         album=(track.get("album") or ""),
+        artist_country=artist_country,
     )
 
 

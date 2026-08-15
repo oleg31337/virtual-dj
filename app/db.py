@@ -142,6 +142,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_tracks_language ON tracks(language)"
     )
+    # Cache of artist country-of-origin (MusicBrainz), keyed by artist name.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS artist_origin ("
+        "artist TEXT PRIMARY KEY, country TEXT NOT NULL DEFAULT '')"
+    )
 
 
 def close() -> None:
