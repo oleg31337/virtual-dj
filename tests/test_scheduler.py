@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from app import config, library
+from app import language as lang_mod
 from app.scheduler import Scheduler
+
+LANGUAGES = lang_mod.LANGUAGES
 
 
 def _fresh(music_dir):
@@ -151,3 +154,41 @@ def test_status_reports_counts(music_dir, has_ffmpeg):
     assert status["tracks_played"] == 0
     sched.pop_next()
     assert sched.status()["tracks_played"] == 1
+
+
+def test_language_strategy_groups_into_language_runs(monkeypatch):
+    # The 4th program strategy groups the queue into per-language runs
+    # (English/French/Spanish/German/Russian). Verify the scheduler's wiring
+    # (kind + label) without depending on the (empty in tests) library DB.
+    config.save_config({"playback": {
+        "genres": [], "artists": [], "shuffle": True,
+        "program": {"enabled": True, "size": 5, "strategy": "language"}}})
+
+    languages = ["russian", "french", "spanish", "german", "english"]
+    monkeypatch.setattr(
+        library, "program_themes",
+        lambda strategy: [{"language": l, "n": 20} for l in languages]
+        if strategy == "language" else [],
+    )
+    # Each language query returns two distinct fake tracks so the block is kept.
+    def fake_query(languages=None, search="", limit=200, random_order=False, **kw):
+        if not languages:
+            return []
+        return [
+            {"id": 1, "path": "/x/1.mp3", "title": f"t1-{languages[0]}",
+             "artist": "A", "album": "Al", "genre": "G", "year": "2000",
+             "duration": 10.0},
+            {"id": 2, "path": "/x/2.mp3", "title": f"t2-{languages[0]}",
+             "artist": "A", "album": "Al", "genre": "G", "year": "2000",
+             "duration": 10.0},
+        ]
+
+    monkeypatch.setattr(library, "query_tracks", fake_query)
+
+    sched = Scheduler()
+    items = sched._build_programs(3)
+    assert items, "expected at least one program block"
+    kinds = {it["program"]["kind"] for it in items if it.get("program")}
+    assert kinds == {"language"}
+    labels = [it["program"]["label"] for it in items if it.get("program")]
+    assert all(label in LANGUAGES for label in labels)

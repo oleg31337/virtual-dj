@@ -115,6 +115,7 @@ _ADDED_COLUMNS = (
     ("tracks", "meta_source", "TEXT"),
     ("tracks", "ai_resolved", "INTEGER NOT NULL DEFAULT 0"),
     ("tracks", "ai_genre", "INTEGER NOT NULL DEFAULT 0"),
+    ("tracks", "language", "TEXT NOT NULL DEFAULT 'english'"),
 )
 
 
@@ -137,6 +138,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         "CREATE TABLE IF NOT EXISTS ai_lookups ("
         "query TEXT PRIMARY KEY, result TEXT NOT NULL, "
         "fetched_at REAL DEFAULT (strftime('%s','now')))"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tracks_language ON tracks(language)"
     )
 
 

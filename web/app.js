@@ -53,7 +53,7 @@ function renderState(s) {
   $('np-kind').textContent = (s.kind || 'idle').toUpperCase();
   const prog = s.program;
   if (prog && prog.label) {
-    const word = { genre: 'genre', artist: 'artist', decade: 'era' }[prog.kind] || 'set';
+    const word = { genre: 'genre', artist: 'artist', decade: 'era', language: 'language' }[prog.kind] || 'set';
     $('np-program').textContent = `ON AIR · ${prog.label} (${word})`;
     $('np-program').style.display = '';
   } else {
@@ -249,7 +249,7 @@ async function loadPrograms() {
   try {
     const p = await api('/api/programs');
     $('program-strategy').textContent =
-      `(${{ genre: 'by genre', artist: 'by artist', decade: 'by decade' }[p.strategy] || p.strategy})`;
+      `(${{ genre: 'by genre', artist: 'by artist', decade: 'by decade', language: 'by language' }[p.strategy] || p.strategy})`;
     const themes = (p.themes || []).slice(0, 12);
     if (!themes.length) {
       $('programs').innerHTML = '<div class="dim">No themes available yet.</div>';
@@ -257,10 +257,13 @@ async function loadPrograms() {
     }
     $('programs').innerHTML = themes.map((t) => {
       const kind = p.strategy === 'artist' ? 'artist'
-                 : p.strategy === 'decade' ? 'decade' : 'genre';
+                 : p.strategy === 'decade' ? 'decade'
+                 : p.strategy === 'language' ? 'language' : 'genre';
       let label;
       if (p.strategy === 'decade') {
         label = `${t.decade}s`;
+      } else if (p.strategy === 'language') {
+        label = t.language || '?';
       } else {
         label = t.genre || t.artist || t.label || '?';
       }

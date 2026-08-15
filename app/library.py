@@ -359,6 +359,9 @@ def scan_library(music_dir: str | None = None, full: bool = False,
             meta = read_metadata(path, root=root, allow_web=use_web)
             STATUS.scanned += 1
 
+            from . import language as _language
+            meta["language"] = _language.classify_track(meta)
+
             with STATUS.lock:
                 source = meta.get("meta_source")
                 if source == "tags":
@@ -386,25 +389,26 @@ def scan_library(music_dir: str | None = None, full: bool = False,
                 conn.execute(
                     "INSERT INTO tracks(path,title,artist,album,genre,year,duration,"
                     "mtime,size,missing,excluded,exclude_reason,meta_source,"
-                    "ai_resolved,ai_genre) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,0,?,?,?,?,?)",
+                    "ai_resolved,ai_genre,language) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?)",
                     (spath, meta["title"], meta["artist"], meta["album"],
                      meta["genre"], meta["year"], meta["duration"],
                      stat.st_mtime, stat.st_size,
                      meta["excluded"], meta["exclude_reason"], meta["meta_source"],
-                     meta["ai_resolved"], meta["ai_genre"]),
+                     meta["ai_resolved"], meta["ai_genre"], meta["language"]),
                 )
                 STATUS.added += 1
             else:
                 conn.execute(
                     "UPDATE tracks SET title=?,artist=?,album=?,genre=?,year=?,"
                     "duration=?,mtime=?,size=?,missing=0,excluded=?,"
-                    "exclude_reason=?,meta_source=?,ai_resolved=?,ai_genre=? "
+                    "exclude_reason=?,meta_source=?,ai_resolved=?,ai_genre=?,"
+                    "language=? "
                     "WHERE id=?",
                     (meta["title"], meta["artist"], meta["album"], meta["genre"],
                      meta["year"], meta["duration"], stat.st_mtime, stat.st_size,
                      meta["excluded"], meta["exclude_reason"], meta["meta_source"],
-                     meta["ai_resolved"], meta["ai_genre"], prior[0]),
+                     meta["ai_resolved"], meta["ai_genre"], meta["language"], prior[0]),
                 )
                 STATUS.updated += 1
 
@@ -526,6 +530,17 @@ def list_genres() -> list[dict[str, Any]]:
     return db.rows_to_dicts(rows)
 
 
+def list_languages(limit: int = 50) -> list[dict[str, Any]]:
+    """Distinct song languages with track counts, for program grouping."""
+    rows = db.connect().execute(
+        "SELECT language, COUNT(*) AS n FROM tracks "
+        "WHERE missing = 0 AND excluded = 0 "
+        "GROUP BY language ORDER BY n DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [{"language": r["language"], "n": r["n"]} for r in rows]
+
+
 def list_artists(limit: int = 500) -> list[dict[str, Any]]:
     rows = db.connect().execute(
         "SELECT COALESCE(NULLIF(TRIM(artist),''),'Unknown') AS artist, COUNT(*) AS n "
@@ -556,6 +571,8 @@ def program_themes(strategy: str = "genre") -> list[dict[str, Any]]:
         return list_artists(limit=200)
     if strategy == "decade":
         return list_decades()
+    if strategy == "language":
+        return list_languages()
     return list_genres()
 
 
@@ -563,6 +580,7 @@ def query_tracks(
     search: str = "",
     genres: list[str] | None = None,
     artists: list[str] | None = None,
+    languages: list[str] | None = None,
     decade: int | None = None,
     limit: int = 200,
     offset: int = 0,
@@ -597,6 +615,11 @@ def query_tracks(
         placeholders = ",".join("?" * len(artists))
         where.append(f"artist IN ({placeholders})")
         params += artists
+
+    if languages:
+        placeholders = ",".join("?" * len(languages))
+        where.append(f"language IN ({placeholders})")
+        params += languages
 
     if decade:
         lo = int(decade)

@@ -263,6 +263,11 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
                 f"\nThis song opens a trip back to the {label}. Set the era before "
                 f"the intro."
             )
+        elif kind == "language":
+            program_line = (
+                f"\nThis song opens a set of {label} music. Welcome the listeners "
+                f"into that language's vibe before introducing the track."
+            )
 
     user_prompt = (
         f"Persona: {style}.\n"

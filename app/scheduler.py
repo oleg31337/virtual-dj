@@ -119,6 +119,8 @@ class Scheduler:
                 kwargs = {"genres": [theme["genre"]], "search": search}
             elif strategy == "artist":
                 kwargs = {"artists": [theme["artist"]], "search": search}
+            elif strategy == "language":
+                kwargs = {"languages": [theme["language"]], "search": search}
             else:  # decade
                 kwargs = {"decade": int(theme["decade"]), "search": search}
             # Apply global genre/artist filters to the track pool for this
@@ -134,7 +136,7 @@ class Scheduler:
             program = {
                 "kind": strategy,
                 "label": theme.get("genre") or theme.get("artist")
-                or f"{theme['decade']}s",
+                or theme.get("language") or f"{theme['decade']}s",
             }
             first = True
             for track in tracks:
