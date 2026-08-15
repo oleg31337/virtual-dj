@@ -73,6 +73,42 @@ def _spell_dates(text: str) -> str:
     return _YEAR_RE.sub(lambda m: _int_to_words(int(m.group(0))), text)
 
 
+def _int_to_words_ru(n: int) -> str:
+    """Spoken Russian for a year, e.g. 1984 -> 'тысяча девятьсот восемьдесят четыре'."""
+    ones = ["ноль", "один", "два", "три", "четыре", "пять", "шесть", "семь",
+            "восемь", "девять", "десять", "одиннадцать", "двенадцать",
+            "тринадцать", "четырнадцать", "пятнадцать", "шестнадцать",
+            "семнадцать", "восемнадцать", "девятнадцать"]
+    tens = ["", "", "двадцать", "тридцать", "сорок", "пятьдесят", "шестьдесят",
+            "семьдесят", "восемьдесят", "девяносто"]
+    hundreds = ["", "сто", "двести", "триста", "четыреста", "пятьсот",
+                "шестьсот", "семьсот", "восемьсот", "девятьсот"]
+    if n < 20:
+        return ones[n]
+    if n < 100:
+        t, r = divmod(n, 10)
+        return tens[t] + (f" {ones[r]}" if r else "")
+    if n < 1000:
+        h, r = divmod(n, 100)
+        return hundreds[h] + (f" {_int_to_words_ru(r)}" if r else "")
+    if n < 2000:
+        # 19xx -> "тысяча девятьсот <tail>"
+        return "тысяча девятьсот " + _int_to_words_ru(n - 1900)
+    if n < 2100:
+        # 20xx -> "две тысячи <tail>"
+        return "две тысячи " + _int_to_words_ru(n - 2000)
+    return " ".join(_int_to_words_ru(int(d)) for d in str(n))
+
+
+# Years in a Russian-language DJ break must be spelled in Russian words so the
+# Russian voice reads them as a year, not a string of numerals.
+_YEAR_RU_RE = re.compile(r"\b(19|20)(\d{2})\b")
+
+
+def _spell_dates_ru(text: str) -> str:
+    return _YEAR_RU_RE.sub(lambda m: _int_to_words_ru(int(m.group(0))), text)
+
+
 # ---------------------------------------------------------------------------
 # Russian (Cyrillic) transliteration for TTS.
 #
@@ -204,11 +240,32 @@ def _clean_script(text: str, max_sentences: int) -> str:
 
 
 def fallback_script(track: dict[str, Any],
-                    program: dict[str, Any] | None = None) -> str:
+                    program: dict[str, Any] | None = None,
+                    language: str | None = None) -> str:
     artist = (track.get("artist") or "").strip()
     title = (track.get("title") or "").strip() or "this next one"
     year = (track.get("year") or "").strip()
     base = ""
+    if language == "russian":
+        if artist and year:
+            base = f"Далее в эфире: {title}, в исполнении {artist}, {year} года."
+        elif artist:
+            base = f"А сейчас — {title}, {artist}."
+        else:
+            base = f"Далее — {title}."
+        if program:
+            label = program.get("label") or "следующий блок"
+            kind = program.get("kind")
+            if kind == "genre":
+                base = f"Звучит подборка в стиле {label}. {base}"
+            elif kind == "artist":
+                base = f"Шоу, посвящённое {label}. {base}"
+            elif kind == "decade":
+                base = f"Отправляемся в {label}. {base}"
+            elif kind == "language":
+                base = f"Звучит подборка {label} музыки. {base}"
+        return _spell_dates_ru(base)
+    # English (default) fallback path.
     if artist and year:
         base = f"Coming up next: {title}, by {artist}, from {year}."
     elif artist:
@@ -267,8 +324,11 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
     except Exception as exc:
         log.debug("enrichment failed: %s", exc)
 
+    language = (track.get("language") or "").strip().lower()
+    is_russian = language == "russian"
+
     if not config.get("llm.enabled", True):
-        return fallback_script(track, program=program)
+        return fallback_script(track, program=program, language=language)
 
     style = config.get("dj.style", "warm, witty late-night radio host")
     prev_line = ""
@@ -306,12 +366,22 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
                 f"into that language's vibe before introducing the track."
             )
 
+    lang_line = ""
+    if is_russian:
+        # The Russian voice speaks Russian natively; the intro must be written
+        # in Russian so the DJ actually talks in Russian for Russian songs.
+        lang_line = (
+            "\nОБЯЗАТЕЛЬНО пиши свой ответ ПО-РУССКИ (на русском языке). "
+            "Названия песен и имя исполнителя даны на русском — произноси их "
+            "как есть."
+        )
+
     user_prompt = (
         f"Persona: {style}.\n"
         f"Write at most {max_sentences} sentences introducing the next song.\n"
         f"Mention one genuinely interesting fact ONLY if the information block "
         f"below directly supports it. Do NOT state any release date or year "
-        f"that is not listed below.{prev_line}{program_line}\n\n"
+        f"that is not listed below.{prev_line}{program_line}{lang_line}\n\n"
         f"Information about the next song:\n"
         f"{_facts_block(track, facts)}\n"
     )
@@ -358,20 +428,36 @@ def _cache_path(text: str, voice: str, speed: float, noise_scale: float) -> Path
 
 def synthesize(text: str, voice: str | None = None,
                speed: float | None = None,
-               noise_scale: float | None = None) -> Path | None:
-    """Render ``text`` to an mp3 with Piper. Returns None on failure."""
+               noise_scale: float | None = None,
+               language: str | None = None) -> Path | None:
+    """Render ``text`` to an mp3 with Piper. Returns None on failure.
+
+    The voice is chosen by ``language``: Russian tracks use the dedicated
+    ``dj.russian_voice`` (which speaks Cyrillic natively, so no transliteration
+    is applied), everything else uses ``dj.voice`` and gets the Cyrillic ->
+    Latin transliteration so the English voice can read Russian names.
+    """
     text = (text or "").strip()
     if not text:
         return None
     # Final guard: years must be spoken as words, not read as numerals, so the
-    # voice says "nineteen seventy-seven" and not "one nine seven seven".
-    text = _spell_dates(text)
+    # voice says "nineteen seventy-seven" / "тысяча девятьсот..." and not a
+    # string of digits.
+    if language == "russian":
+        text = _spell_dates_ru(text)
+    else:
+        text = _spell_dates(text)
     # Russian (Cyrillic) names cannot be spoken by the English voices — render
     # them as a Latin spelling the voice reads with roughly Russian pronunciation
-    # (on-screen dj_text stays Cyrillic; this only affects the audio).
-    text = _transliterate_cyrillic(text)
+    # (on-screen dj_text stays Cyrillic; this only affects the audio). The
+    # Russian voice reads Cyrillic directly, so it is skipped for Russian.
+    if language != "russian":
+        text = _transliterate_cyrillic(text)
 
-    voice = voice or config.get("dj.voice", "en_US-amy-medium")
+    if language == "russian":
+        voice = voice or config.get("dj.russian_voice", "ru_RU-irina-medium")
+    else:
+        voice = voice or config.get("dj.voice", "en_US-amy-medium")
     speed = float(speed if speed is not None else config.get("dj.speed", 1.0))
     speed = max(0.5, min(speed, 2.0))
     noise_scale = float(noise_scale if noise_scale is not None
@@ -455,7 +541,8 @@ def prepare_break(track: dict[str, Any],
     script = generate_script(track, previous, program=program)
     if not script:
         return None
-    audio = synthesize(script)
+    language = (track.get("language") or "").strip().lower() or None
+    audio = synthesize(script, language=language)
     if audio is None:
         return None
     duration = audio_duration(audio)
@@ -514,11 +601,14 @@ __all__ = [
 # Human-readable descriptions of the bundled voices, with notes from community
 # feedback about which read most naturally. The DJ picker in the web UI shows
 # these so you can pick a voice by character, not just by a model filename.
+# ``lang`` marks the voice's language so the UI can split the English and
+# Russian pickers (the Russian voice is used only for Russian-language tracks).
 VOICE_PROFILES: list[dict[str, str]] = [
     {
         "id": "en_US-amy-medium",
         "name": "Amy",
         "gender": "female",
+        "lang": "english",
         "note": "Default. Clear and neutral; good all-rounder but the most "
                 "'robotic' of the set on long intros.",
     },
@@ -526,6 +616,7 @@ VOICE_PROFILES: list[dict[str, str]] = [
         "id": "en_US-lessac-medium",
         "name": "Lessac",
         "gender": "female",
+        "lang": "english",
         "note": "Warmest, most natural intonation per community feedback — the "
                 "usual upgrade pick. Occasionally over-pauses between phrases.",
     },
@@ -533,6 +624,7 @@ VOICE_PROFILES: list[dict[str, str]] = [
         "id": "en_US-libritts_r-medium",
         "name": "LibriTTS-R",
         "gender": "female",
+        "lang": "english",
         "note": "Broadest tonal range and most expressive prosody of the "
                 "English set; great for lively, varied delivery.",
     },
@@ -540,6 +632,7 @@ VOICE_PROFILES: list[dict[str, str]] = [
         "id": "en_US-ryan-medium",
         "name": "Ryan",
         "gender": "male",
+        "lang": "english",
         "note": "Natural male voice, slightly bright/fresh; the go-to male "
                 "option when you want a different timbre from the women.",
     },
@@ -547,24 +640,60 @@ VOICE_PROFILES: list[dict[str, str]] = [
         "id": "en_US-bryce-medium",
         "name": "Bryce",
         "gender": "male",
+        "lang": "english",
         "note": "Deeper male voice; pairs well with a late-night radio persona.",
+    },
+    {
+        "id": "ru_RU-irina-medium",
+        "name": "Irina",
+        "gender": "female",
+        "lang": "russian",
+        "note": "Russian voice. Used for Russian-language tracks; speaks "
+                "Cyrillic natively (no transliteration).",
+    },
+    {
+        "id": "ru_RU-denis-medium",
+        "name": "Denis",
+        "gender": "male",
+        "lang": "russian",
+        "note": "Russian voice (male). Native Cyrillic; no transliteration.",
+    },
+    {
+        "id": "ru_RU-dmitri-medium",
+        "name": "Dmitri",
+        "gender": "male",
+        "lang": "russian",
+        "note": "Russian voice (male). Native Cyrillic; no transliteration.",
+    },
+    {
+        "id": "ru_RU-ruslan-medium",
+        "name": "Ruslan",
+        "gender": "male",
+        "lang": "russian",
+        "note": "Russian voice (male). Native Cyrillic; no transliteration.",
     },
 ]
 
 
-def voice_profiles() -> list[dict[str, str]]:
-    """Voice catalogue (id, name, gender, intonation note) for the UI."""
+def voice_profiles(lang: str | None = None) -> list[dict[str, str]]:
+    """Voice catalogue (id, name, gender, lang, intonation note) for the UI.
+
+    Pass ``lang="russian"`` (or "english") to filter to one language's picker.
+    """
     installed = set(available_voices())
+    known = {p["id"] for p in VOICE_PROFILES}
     profiles = []
     for p in VOICE_PROFILES:
+        if lang and p.get("lang") != lang:
+            continue
         entry = dict(p)
         entry["installed"] = p["id"] in installed
         profiles.append(entry)
     # Include any installed voice not in the curated list (e.g. user-added).
-    known = {p["id"] for p in VOICE_PROFILES}
     for v in available_voices():
-        if v not in known:
+        if v not in known and (lang is None or lang == "english"):
             profiles.append({
-                "id": v, "name": v, "gender": "?", "note": "", "installed": True,
+                "id": v, "name": v, "gender": "?", "lang": "english",
+                "note": "", "installed": True,
             })
     return profiles

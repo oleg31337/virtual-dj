@@ -237,6 +237,15 @@ async function loadConfig() {
   const sel = profiles.find((p) => p.id === $('dj-voice').value) || profiles[0];
   $('dj-voice-note').textContent = sel && sel.note ? sel.note : '';
 
+  // Russian voice picker (only Russian-language tracks use it).
+  const ru = voices.russian_profiles || [];
+  $('dj-voice-ru').innerHTML = ru.length
+    ? ru.map((p) =>
+        `<option value="${esc(p.id)}"${p.id === voices.current_russian ? ' selected' : ''}>${esc(p.name)} (${esc(p.gender)})${p.installed ? '' : ' — not installed'}</option>`).join('')
+    : '<option value="">no Russian voices installed</option>';
+  const rusel = ru.find((p) => p.id === $('dj-voice-ru').value) || ru[0];
+  $('dj-voice-ru-note').textContent = rusel && rusel.note ? rusel.note : '';
+
   // Program grouping settings.
   $('program-enabled').checked = !!(cfg.playback?.program?.enabled ?? true);
   $('program-size').value = cfg.playback?.program?.size ?? 6;
@@ -419,10 +428,39 @@ function wire() {
   $('dj-speed').oninput = (e) =>
     ($('speed-val').textContent = (e.target.value / 100).toFixed(2));
 
-  $('dj-voice').onchange = async () => {
-    const profiles = (await api('/api/dj/voices')).profiles || [];
-    const sel = profiles.find((p) => p.id === $('dj-voice').value);
-    $('dj-voice-note').textContent = sel && sel.note ? sel.note : '';
+  $('dj-voice-ru').onchange = async () => {
+    const ru = (await api('/api/dj/voices')).russian_profiles || [];
+    const sel = ru.find((p) => p.id === $('dj-voice-ru').value);
+    $('dj-voice-ru-note').textContent = sel && sel.note ? sel.note : '';
+  };
+  $('test-voice-ru').onclick = async () => {
+    const voice = $('dj-voice-ru').value;
+    const speed = Number($('dj-speed').value) / 100;
+    const noise = Number($('dj-noise').value) / 100;
+    const btn = $('test-voice-ru');
+    btn.disabled = true;
+    btn.textContent = '⏳ synthesizing…';
+    try {
+      const r = await api('/api/dj/preview', {
+        method: 'POST',
+        body: JSON.stringify({
+          text: 'В эфире Виртуальный DJ. Сейчас прозвучит трек, '
+                + 'который вы давно ждали.',
+          voice, language: 'russian', speed, noise_scale: noise,
+        }),
+      });
+      if (r && r.audio_url) {
+        const a = $('preview-audio');
+        a.hidden = false;
+        a.src = r.audio_url;
+        a.play().catch(() => {});
+      }
+    } catch (e) {
+      alert('Voice test failed: ' + e.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '▶ Test Russian voice';
+    }
   };
 
   $('save-program').onclick = async () => {
@@ -460,6 +498,7 @@ function wire() {
           noise_scale: Number($('dj-noise').value) / 100,
           voice: $('dj-voice').value,
           style: $('dj-style').value.trim(),
+          russian_voice: $('dj-voice-ru').value || undefined,
         },
         enrich: { enabled: $('enrich-enabled').checked },
       }),

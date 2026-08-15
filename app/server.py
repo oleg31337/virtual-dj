@@ -374,7 +374,9 @@ def api_dj_voices():
     return {
         "voices": dj.available_voices(),
         "profiles": dj.voice_profiles(),
+        "russian_profiles": dj.voice_profiles("russian"),
         "current": config.get("dj.voice"),
+        "current_russian": config.get("dj.russian_voice"),
     }
 
 
@@ -382,6 +384,7 @@ class PreviewRequest(BaseModel):
     text: str | None = None
     track_id: int | None = None
     voice: str | None = None
+    language: str | None = None
     speed: float | None = None
     noise_scale: float | None = None
 
@@ -403,6 +406,7 @@ def api_dj_preview(req: PreviewRequest):
     audio = dj.synthesize(
         text,
         voice=req.voice,
+        language=req.language,
         speed=req.speed,
         noise_scale=req.noise_scale,
     )
