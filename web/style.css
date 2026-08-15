@@ -28,15 +28,17 @@ h3 { margin: 0 0 10px; font-size: 14px; text-transform: uppercase;
 .sub, .dim { color: var(--dim); font-size: 12px; }
 .player { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 main {
-  display: grid; gap: 16px; padding: 18px;
-  grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
-  align-items: start;
+  padding: 18px;
+  column-width: 340px;
+  column-gap: 16px;
 }
 .card {
   background: var(--card); border: 1px solid var(--border);
   border-radius: 10px; padding: 16px;
+  break-inside: avoid; page-break-inside: avoid;
+  margin: 0 0 16px;
 }
-.card.wide { grid-column: 1 / -1; }
+.card.wide { column-span: all; margin-bottom: 16px; }
 .nowrow { display: flex; gap: 24px; flex-wrap: wrap; }
 .np { flex: 2; min-width: 260px; }
 .djbox { flex: 1; min-width: 240px; background: var(--card2);
