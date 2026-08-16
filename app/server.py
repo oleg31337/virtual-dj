@@ -147,17 +147,44 @@ async def stream_mp3(request: Request):
     )
 
 
+# Target size of each HTTP body chunk sent to the player. Too-small chunks
+# (the old 4 KB) make VLC/Winamp stutter: each arrives as a separate TCP
+# segment and the player's jitter buffer can underrun between them. Coalescing
+# several encoded frames into one ~16 KB (1 s @128 kbps) send keeps the feed
+# smooth, exactly like Icecast's 1-second burst cadence.
+SEND_CHUNK = 16384
+
+
 def _get_chunk(listener) -> bytes | None:
-    """Blocking read with a short timeout so disconnects are noticed promptly
-    and back-to-back track switches don't add a full second of dead air."""
+    """Coalesce queued audio frames into ~SEND_CHUNK sends.
+
+    Returns bytes to send, ``None`` if nothing is buffered yet (caller retries
+    without emitting a body frame), or ``b""`` when the listener is closing.
+    Flushes whatever is buffered at least every ~1 s so
+    latency stays low even when the target size isn't reached in one pass.
+    """
     import queue as _q
-    try:
-        item = listener.queue.get(timeout=0.25)
-    except _q.Empty:
-        return None
-    if item is None:
-        return b""
-    return item
+    import time as _t
+
+    buf = bytearray()
+    # Wait up to ~1 s for a full SEND_CHUNK: at 128 kbps that's one second of
+    # audio (two 8 KB encoded frames). The transmitter keeps a 3 s cushion in
+    # the listener queue, so in steady state the second frame is already there
+    # and we return 16 KB immediately; the window only matters after a stall.
+    deadline = _t.monotonic() + 1.0
+    while True:
+        remaining = deadline - _t.monotonic()
+        if remaining <= 0:
+            return bytes(buf) if buf else None
+        try:
+            item = listener.queue.get(timeout=min(remaining, 0.05))
+        except _q.Empty:
+            continue
+        if item is None:
+            return bytes(buf) if buf else b""
+        buf.extend(item)
+        if len(buf) >= SEND_CHUNK:
+            return bytes(buf)
 
 
 # --- status ----------------------------------------------------------------

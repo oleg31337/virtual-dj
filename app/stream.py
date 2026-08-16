@@ -27,7 +27,7 @@ from .scheduler import SCHEDULER
 
 log = logging.getLogger(__name__)
 
-CHUNK = 4096
+CHUNK = 8192
 # How much audio a slow client may fall behind before we drop it.
 CLIENT_BUFFER_CHUNKS = 512
 # How far ahead of real time we let the pipeline run. Icecast keeps several
