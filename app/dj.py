@@ -354,10 +354,22 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
     if is_russian:
         # The Russian voice speaks Russian natively; the intro must be written
         # in Russian so the DJ actually talks in Russian for Russian songs.
+        # Two pronunciation aids for the TTS engine, which otherwise guesses
+        # stress and silently swallows Ё:
+        #   * place an acute stress mark (´) on the stressed vowel of EVERY
+        #     word (e.g. приве́т, музыка́льный, золото́й) so it is pronounced right;
+        #   * always write Ё (ё) wherever the word actually contains it — never
+        #     substitute Е (е).
         lang_line = (
             "\nОБЯЗАТЕЛЬНО пиши свой ответ ПО-РУССКИ (на русском языке). "
-            "Названия песен и имя исполнителя даны на русском — произноси их "
-            "как есть."
+            "Названия песен и имена исполнителей — на русском, сохраняй их "
+            "смысл и форму, не переводи и не транслитерируй.\n"
+            "Чтобы голосовой движок правильно выговаривал слова, выполни два "
+            "обязательных правила:\n"
+            "1) Ставь знак ударения (аку́т, ´) над ударной гласной КАЖДОГО "
+            "слова, например: приве́т, музыка́льный, золото́й.\n"
+            "2) Всегда пиши букву Ё (ё) там, где она действительно есть в слове, "
+            "никогда не заменяй её на Е (е)."
         )
 
     user_prompt = (
