@@ -204,18 +204,62 @@ def artist_country(name: str) -> str | None:
         )
     conn.commit()
     return country or None
+
+
+def _wikipedia(client: httpx.Client, term: str) -> dict[str, Any]:
+    """Fetch a short Wikipedia summary for an artist.
+
+    Artist names often resolve to disambiguation pages (e.g. "Queen"), so we
+    try the bare term first, then common artist disambiguators ("(band)",
+    "(musician)", "(singer)", ...). Returns ``{"summary": str,
+    "wikipedia_title": str}`` or ``{}`` if none resolve to a real article.
+    """
     from urllib.parse import quote
 
-    resp = client.get(f"{WIKI_ROOT}/{quote(term, safe='')}")
-    if resp.status_code != 200:
-        return {}
-    data = resp.json()
-    if data.get("type", "").endswith("disambiguation"):
-        return {}
-    extract = (data.get("extract") or "").strip()
-    if not extract:
-        return {}
-    return {"summary": extract[:1200], "wikipedia_title": data.get("title")}
+    candidates = [
+        term,
+        f"{term}_(band)",
+        f"{term}_(musician)",
+        f"{term}_(singer)",
+        f"{term}_(American_band)",
+        f"{term}_(English_band)",
+    ]
+    for cand in candidates:
+        _throttle()
+        resp = client.get(f"{WIKI_ROOT}/{quote(cand, safe='')}")
+        if resp.status_code != 200:
+            continue
+        data = resp.json()
+        if data.get("type", "").endswith("disambiguation"):
+            continue
+        extract = (data.get("extract") or "").strip()
+        if not extract:
+            continue
+        return {"summary": extract[:1200], "wikipedia_title": data.get("title")}
+    return {}
+
+
+def _musicbrainz_artist_tags(name: str) -> list[str]:
+    """Best-effort artist tags from MusicBrainz (genre/style facts for the LLM).
+
+    Recording searches rarely carry tags, so the reliable tag source is the
+    artist. Returns up to a handful of tag names, or ``[]`` if unresolved.
+    """
+    query = f'artist:"{name}"'
+    _throttle()
+    resp = httpx.get(
+        f"{MB_ROOT}/artist",
+        params={"query": query, "fmt": "json", "limit": 1},
+    )
+    resp.raise_for_status()
+    artists = resp.json().get("artists") or []
+    if not artists:
+        return []
+    top = artists[0]
+    norm = lambda s: "".join(c for c in (s or "").lower() if c.isalnum())
+    if norm(name) and norm(name) not in norm(top.get("name", "")):
+        return []
+    return [t.get("name") for t in (top.get("tags") or []) if t.get("name")][:8]
 
 
 def enrich_track(track: dict[str, Any], force: bool = False) -> dict[str, Any]:
@@ -257,6 +301,19 @@ def enrich_track(track: dict[str, Any], force: bool = False) -> dict[str, Any]:
                     sources.append("wikipedia")
             except Exception as exc:
                 log.debug("wikipedia lookup failed for %s: %s", artist, exc)
+            try:
+                artist_tags = _musicbrainz_artist_tags(artist)
+                if artist_tags:
+                    # Merge with any tags from the recording lookup, de-duped.
+                    merged = list(facts.get("tags") or [])
+                    for t in artist_tags:
+                        if t not in merged:
+                            merged.append(t)
+                    facts["tags"] = merged[:8]
+                    if "musicbrainz" not in sources:
+                        sources.append("musicbrainz")
+            except Exception as exc:
+                log.debug("musicbrainz artist tags failed for %s: %s", artist, exc)
     except Exception as exc:
         log.debug("enrichment client error: %s", exc)
 
