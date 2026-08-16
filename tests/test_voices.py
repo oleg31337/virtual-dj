@@ -54,7 +54,9 @@ def test_voice_urls_are_well_formed():
 
 
 def test_download_voice_writes_onnx_and_json(monkeypatch):
-    payload = b"FAKE-ONNX-BYTES"
+    # Simulate a realistic voice blob (>= 1 MB) so the post-download
+    # integrity check in download_voice() passes.
+    payload = b"X" * (2 * 1024 * 1024)
 
     class _FakeClient:
         def stream(self, method, url, **kw):
@@ -73,12 +75,13 @@ def test_download_voice_writes_onnx_and_json(monkeypatch):
 
 def test_download_voice_missing_json_is_non_fatal(monkeypatch):
     # The .onnx.json sidecar is optional; a failure there must not abort.
+    onnx_payload = b"X" * (2 * 1024 * 1024)
 
     class _FakeClient:
         def stream(self, method, url, **kw):
             if url.endswith(".onnx.json"):
                 return _fake_stream(b"", status=404)
-            return _fake_stream(b"ONNXDATA")
+            return _fake_stream(onnx_payload)
 
     monkeypatch.setattr(voices.httpx, "stream", _FakeClient().stream)
     path = voices.download_voice("en_US-amy-medium")
@@ -95,7 +98,9 @@ def test_ensure_default_voices_fetches_missing(monkeypatch):
     class _FakeClient:
         def stream(self, method, url, **kw):
             captured.setdefault("urls", []).append(url)
-            return _fake_stream(b"x")
+            # Simulate a realistic voice blob (>= 1 MB) so the integrity
+            # check in download_voice() passes.
+            return _fake_stream(b"X" * (2 * 1024 * 1024))
 
     monkeypatch.setattr(voices.httpx, "stream", _FakeClient().stream)
     done = voices.ensure_default_voices()

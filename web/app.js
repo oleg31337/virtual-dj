@@ -546,44 +546,62 @@ function wire() {
   $('dj-speed').oninput = (e) =>
     ($('speed-val').textContent = (e.target.value / 100).toFixed(2));
 
-  $('dj-voice-ru').onchange = async () => {
-    const ru = (await api('/api/dj/voices')).russian_profiles || [];
-    const sel = ru.find((p) => p.id === $('dj-voice-ru').value);
-    $('dj-voice-ru-note').textContent = sel && sel.note ? sel.note : '';
-  };
-  // Auto-download a voice when the user picks it from the dropdown (per request:
-  // selecting a voice fetches it on demand). Shows progress + result inline.
-  const selectVoice = async (selectId, noteId) => {
+  // Selecting a voice (English or Russian) downloads it on demand if missing,
+  // verifies it actually landed on disk, refreshes the picker, then selects AND
+  // activates it (so the DJ starts using it). This is the full expected flow.
+  const selectVoice = async (selectId, noteId, langKey) => {
     const voice = $(selectId).value;
     const note = $(noteId);
-    const installed = (await api('/api/dj/voices')).voices_available || [];
-    if (installed.includes(voice)) {
-      note.textContent = '✓ installed';
+    const data = await api('/api/dj/voices');
+    const installed = data.voices || [];
+    if (!installed.includes(voice)) {
+      note.textContent = '⏳ downloading…';
       note.className = 'dim';
-      return;
-    }
-    note.textContent = '⏳ downloading…';
-    note.className = 'dim';
-    try {
-      const r = await api('/api/dj/voices/download', {
-        method: 'POST',
-        body: JSON.stringify({ voice }),
-      });
-      if (r.downloaded && r.downloaded.includes(voice)) {
-        note.textContent = '✓ downloaded';
-        note.className = 'dim';
-        loadConfig();
-      } else {
+      let r;
+      try {
+        r = await api('/api/dj/voices/download', {
+          method: 'POST',
+          body: JSON.stringify({ voice }),
+        });
+      } catch (e) {
+        note.textContent = `✗ ${e.message}`;
+        note.className = 'warn';
+        return;
+      }
+      // "Verify it is ok": the download must report success AND the file must
+      // now appear in the available (on-disk) list.
+      const ok = (r.downloaded || []).includes(voice)
+                 && (r.available || []).includes(voice);
+      if (!ok) {
         note.textContent = `✗ download failed: ${(r.failed || []).join(', ') || 'unknown'}`;
         note.className = 'warn';
+        return;
       }
-    } catch (e) {
-      note.textContent = `✗ ${e.message}`;
-      note.className = 'warn';
+      note.textContent = '✓ downloaded & verified';
+    } else {
+      note.textContent = '✓ installed';
     }
+    note.className = 'dim';
+    // Refresh the picker choices, then select + activate the chosen voice.
+    await loadConfig();
+    $(selectId).value = voice;
+    const profiles = (langKey === 'russian' ? data.russian_profiles : data.profiles) || [];
+    const sel = profiles.find((p) => p.id === voice);
+    if (sel && sel.note) $(noteId).textContent = sel.note;
+    // Persist as the active voice for this language so the DJ uses it.
+    const patch = langKey === 'russian'
+      ? { dj: { russian_voice: voice } }
+      : { dj: { voice } };
+    try {
+      await api('/api/config', { method: 'PUT', body: JSON.stringify(patch) });
+    } catch (e) {
+      // Selection still active in the UI even if the save round-trip fails.
+    }
+    // Update the "current" highlight on the next catalogue read.
+    void loadConfig();
   };
-  $('dj-voice').onchange = () => selectVoice('dj-voice', 'dj-voice-note');
-  $('dj-voice-ru').addEventListener('change', () => selectVoice('dj-voice-ru', 'dj-voice-ru-note'));
+  $('dj-voice').onchange = () => selectVoice('dj-voice', 'dj-voice-note', 'english');
+  $('dj-voice-ru').onchange = () => selectVoice('dj-voice-ru', 'dj-voice-ru-note', 'russian');
   $('test-voice-ru').onclick = async () => {
     const voice = $('dj-voice-ru').value;
     const speed = Number($('dj-speed').value) / 100;

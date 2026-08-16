@@ -91,6 +91,14 @@ def download_voice(voice: str, timeout: float = 180.0) -> Path:
     json_path = out_dir / f"{voice}.onnx.json"
     log.info("downloading voice %s -> %s", voice, onnx_path)
     _download_file(onnx_url, onnx_path, timeout=timeout)
+    # Sanity-check the onnx landed intact. Piper voices are >1 MB even at
+    # 'low' quality, so a smaller file means a truncated/empty download that
+    # would fail to load later -- surface it now rather than at DJ time.
+    size = onnx_path.stat().st_size
+    if size < 1_000_000:
+        onnx_path.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"voice {voice} downloaded but file looks truncated ({size} bytes)")
     # The .onnx.json sidecar is metadata; not fatal if it is missing.
     try:
         _download_file(json_url, json_path, timeout=timeout)
