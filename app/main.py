@@ -35,7 +35,12 @@ def main() -> None:
                         help="skip the first-run voice auto-download")
     args = parser.parse_args()
 
-    if not args.no_voice_download:
+    # Allow skipping via env (used by the Docker image / compose).
+    skip_voice_download = (
+        args.no_voice_download
+        or os.environ.get("VDJ_NO_VOICE_DOWNLOAD", "").strip() == "1"
+    )
+    if not skip_voice_download:
         _ensure_voices()
 
     uvicorn.run(

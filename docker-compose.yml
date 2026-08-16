@@ -1,0 +1,57 @@
+# Virtual DJ - Docker Compose stack
+#
+# Usage:
+#   1. Copy .env.example to .env and edit (at least set MUSIC_DIR on the host).
+#   2. docker compose up -d --build
+#   3. Open http://localhost:8420
+#
+# What is persistent: everything the app writes lives in the `data` named
+# volume (config.json, vdj.sqlite3, downloaded voice models, DJ cache). The
+# music library is mounted READ-ONLY from the host (the DJ never writes to it).
+#
+# Security posture:
+#   * Runs as non-root (uid 1000 inside the image).
+#   * No new privileges; read-only root filesystem with small tmpfs mounts.
+#   * Music bind mount is read-only.
+#   * Restarts on failure. No host network, no extra caps.
+
+services:
+  virtual-dj:
+    build: .
+    image: virtual-dj:latest
+    container_name: virtual-dj
+    # Auto-download the default Piper voices on first run. Set to "1" to skip
+    # (e.g. if you pre-populate /data/voices or have no outbound network).
+    environment:
+      VDJ_NO_VOICE_DOWNLOAD: "${VDJ_NO_VOICE_DOWNLOAD:-0}"
+      VDJ_HOST: "0.0.0.0"
+      VDJ_PORT: "8420"
+      VDJ_LOG_LEVEL: "${VDJ_LOG_LEVEL:-info}"
+      # Optional: point the DJ at an Ollama instance.
+      # VDJ_OLLAMA_URL: "http://host-gateway:11434"
+      # VDJ_OLLAMA_MODEL: "qwen3.5:9b"
+    ports:
+      - "${HTTP_PORT:-8420}:8420"
+    volumes:
+      # Persistent app state (config, DB, voices, cache).
+      - virtual-dj-data:/data
+      # Your music library, read-only. Set MUSIC_DIR in .env to a real path.
+      - "${MUSIC_DIR:-/mnt/mp3}:/music:ro"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8420/api/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+volumes:
+  virtual-dj-data:
+    driver: local

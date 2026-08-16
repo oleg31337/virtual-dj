@@ -30,3 +30,6 @@ config.json
 
 # Local verify/agent scratch
 .hermes/
+
+# Docker/local env (keep .env.example tracked)
+.env

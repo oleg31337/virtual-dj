@@ -138,6 +138,61 @@ one is downloadable from the same HuggingFace repo via the web UI or
 | Browser | Just open `http://<host>:8420` and hit **Listen** |
 | CLI     | `mpv http://<host>:8420/stream.mp3` |
 
+## Running with Docker
+
+The app ships a `Dockerfile` and `docker-compose.yml`. Everything the app
+writes — `config.json`, the SQLite library DB, the downloaded **Piper voice
+models**, and the DJ cache — lives in a **named volume** mounted at `/data`, so
+it survives container restarts and upgrades. Your music library is mounted
+**read-only** from the host (the DJ never writes to it).
+
+```bash
+cp .env.example .env        # edit at least MUSIC_DIR to point at your music
+docker compose up -d --build
+```
+
+Then open **http://localhost:8420**.
+
+On first start the container **auto-downloads the default voice models**
+(English + Russian, ~190 MB) into the volume; the DJ can speak out of the box.
+Set `VDJ_NO_VOICE_DOWNLOAD=1` in `.env` to skip (e.g. no outbound network, or
+you pre-populate the volume's `voices/` directory).
+
+### What the container does for you
+
+- **Non-root** (`vdj` user), **read-only root filesystem**, **all Linux
+  capabilities dropped**, `no-new-privileges` enabled — a hardened default.
+- **Healthcheck** against `/api/health`; the container reports `healthy` once
+  the app is serving, and `restart: unless-stopped` keeps it up.
+- A small `tmpfs` at `/tmp`; only `/data` is writable (the named volume).
+- Music is mounted read-only at `/music` (override with the `music_dir` config
+  or the `VDJ_MUSIC_DIR` env if you want a different in-container path).
+
+### Tuning (`.env`)
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `HTTP_PORT` | `8420` | Host port published for the UI + stream |
+| `MUSIC_DIR` | `/mnt/mp3` | **Host** path to your music (mounted `:ro` at `/music`) |
+| `VDJ_LOG_LEVEL` | `info` | Log verbosity |
+| `VDJ_NO_VOICE_DOWNLOAD` | `0` | `1` = skip the first-run voice download |
+| `VDJ_OLLAMA_URL` | _unset_ | Ollama endpoint (e.g. `http://host-gateway:11434` for host Ollama) |
+| `VDJ_OLLAMA_MODEL` | _unset_ | Model for DJ scripts |
+
+### Reaching an Ollama on the host
+
+If Ollama runs on the Docker host, point the container at it with
+`VDJ_OLLAMA_URL=http://host-gateway:11434` in `.env` (or your host's LAN IP).
+
+### Upgrading
+
+```bash
+docker compose pull   # or: docker compose up -d --build
+```
+
+Your `data` volume is untouched — config, library DB, and voice models carry
+over. The first boot after an upgrade will reuse the already-downloaded voices.
+
 ## Configuration
 
 Settings live in `data/config.json` (created on first run, never committed).

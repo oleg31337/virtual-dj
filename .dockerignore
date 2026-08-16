@@ -1,0 +1,28 @@
+# Build context exclusions — keep the image lean and never bake in state.
+data/
+.venv/
+venv/
+*.venv
+__pycache__/
+*.pyc
+.pytest_cache/
+.git/
+.gitignore
+.cache/
+# Local-only artifacts
+*.sqlite3
+*.sqlite3-*
+config.json
+.env
+.env.*
+# Editor / OS noise
+.idea/
+.vscode/
+*.swp
+.DS_Store
+# Test & CI (not needed at runtime)
+tests/
+scripts/
+uv.lock
+# The fresh-install scratch dir used during manual testing
+/tmp/
