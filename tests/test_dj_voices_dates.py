@@ -35,12 +35,16 @@ def test_fallback_script_year_is_spoken():
 def test_voice_profiles_marks_installed():
     profiles = dj.voice_profiles()
     ids = {p["id"] for p in profiles}
-    # The five curated voices are present.
+    # The curated English voices are present (highest-quality variant kept;
+    # the lower-quality -medium Lessac/Ryan duplicates were removed).
     assert "en_US-amy-medium" in ids
-    assert "en_US-lessac-medium" in ids
+    assert "en_US-lessac-high" in ids
     assert "en_US-libritts_r-medium" in ids
-    assert "en_US-ryan-medium" in ids
+    assert "en_US-ryan-high" in ids
     assert "en_US-bryce-medium" in ids
+    # Duplicate lower-quality voices must NOT be present.
+    assert "en_US-lessac-medium" not in ids
+    assert "en_US-ryan-medium" not in ids
     # Each carries an intonation note and installed flag.
     for p in profiles:
         assert "note" in p

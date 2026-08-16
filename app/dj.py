@@ -661,103 +661,89 @@ __all__ = [
 # Russian pickers (the Russian voice is used only for Russian-language tracks).
 VOICE_PROFILES: list[dict[str, str]] = [
     {
-        "id": "en_US-amy-medium",
-        "name": "Amy",
-        "gender": "female",
-        "lang": "english",
-        "note": "Default. Clear and neutral; good all-rounder but the most "
-                "'robotic' of the set on long intros.",
-    },
-    {
-        "id": "en_US-lessac-medium",
-        "name": "Lessac",
-        "gender": "female",
-        "lang": "english",
-        "note": "Warmest, most natural intonation per community feedback — the "
-                "usual upgrade pick. Occasionally over-pauses between phrases.",
-    },
-    {
-        "id": "en_US-libritts_r-medium",
-        "name": "LibriTTS-R",
-        "gender": "female",
-        "lang": "english",
-        "note": "Broadest tonal range and most expressive prosody of the "
-                "English set; great for lively, varied delivery.",
-    },
-    {
-        "id": "en_US-ryan-medium",
-        "name": "Ryan",
-        "gender": "male",
-        "lang": "english",
-        "note": "Natural male voice, slightly bright/fresh; the go-to male "
-                "option when you want a different timbre from the women.",
-    },
-    {
-        "id": "en_US-bryce-medium",
-        "name": "Bryce",
-        "gender": "male",
-        "lang": "english",
-        "note": "Deeper male voice; pairs well with a late-night radio persona.",
-    },
-    {
         "id": "en_GB-alan-medium",
-        "name": "Alan (GB)",
+        "name": "UK Alan",
         "gender": "male",
         "lang": "english",
         "note": "British male voice; clean and measured for a UK-leaning station.",
     },
     {
         "id": "en_GB-jenny_dioco-medium",
-        "name": "Jenny Dioco (GB)",
+        "name": "UK Jenny Dioco",
         "gender": "female",
         "lang": "english",
         "note": "British female voice; bright and friendly.",
     },
     {
         "id": "en_GB-southern_english_female-low",
-        "name": "Southern English (GB, low)",
+        "name": "UK Southern English",
         "gender": "female",
         "lang": "english",
-        "note": "British female voice at the smaller 'low' quality; lighter download.",
+        "note": "British female voice with a gentle southern-English tone; lighter model.",
+    },
+    {
+        "id": "en_US-amy-medium",
+        "name": "US Amy",
+        "gender": "female",
+        "lang": "english",
+        "note": "Default. Clear and neutral; good all-rounder but the most "
+                "'robotic' of the set on long intros.",
+    },
+    {
+        "id": "en_US-bryce-medium",
+        "name": "US Bryce",
+        "gender": "male",
+        "lang": "english",
+        "note": "Deeper male voice; pairs well with a late-night radio persona.",
     },
     {
         "id": "en_US-hfc_female-medium",
-        "name": "HFC Female",
+        "name": "US HFC Female",
         "gender": "female",
         "lang": "english",
         "note": "High-fidelity female voice; crisp, broadcast-style delivery.",
     },
     {
         "id": "en_US-hfc_male-medium",
-        "name": "HFC Male",
+        "name": "US HFC Male",
         "gender": "male",
         "lang": "english",
         "note": "High-fidelity male voice; crisp, broadcast-style delivery.",
     },
     {
         "id": "en_US-lessac-high",
-        "name": "Lessac (high)",
+        "name": "US Lessac",
         "gender": "female",
         "lang": "english",
-        "note": "High-quality Lessac; warmest, most natural intonation of the set.",
+        "note": "Warmest, most natural intonation per community feedback; the "
+                "usual upgrade pick. Occasionally over-pauses between phrases.",
+    },
+    {
+        "id": "en_US-libritts_r-medium",
+        "name": "US LibriTTS-R",
+        "gender": "female",
+        "lang": "english",
+        "note": "Broadest tonal range and most expressive prosody of the "
+                "English set; great for lively, varied delivery.",
     },
     {
         "id": "en_US-norman-medium",
-        "name": "Norman",
+        "name": "US Norman",
         "gender": "male",
         "lang": "english",
         "note": "Natural male voice with a steady, announcer-like cadence.",
     },
     {
         "id": "en_US-ryan-high",
-        "name": "Ryan (high)",
+        "name": "US Ryan",
         "gender": "male",
         "lang": "english",
-        "note": "High-quality Ryan; brighter, more detailed male timbre.",
+        "note": "High-quality Ryan; brighter, more detailed male timbre; the "
+                "go-to male option for a different timbre from the women.",
     },
     {
         "id": "en_US-sam-medium",
-        "name": "Sam",
+        "name": "US Sam",
         "gender": "male",
         "lang": "english",
         "note": "Warm male voice; good neutral alternative to the female leads.",
@@ -808,11 +794,29 @@ def voice_profiles(lang: str | None = None) -> list[dict[str, str]]:
         entry = dict(p)
         entry["installed"] = p["id"] in installed
         profiles.append(entry)
-    # Include any installed voice not in the curated list (e.g. user-added).
+    # Include any installed voice not in the curated list (e.g. user-added or a
+    # leftover from an earlier catalogue). Humanize the label the same way the
+    # curated entries are named: a US/UK prefix and no quality suffix, so the
+    # picker never shows a raw model filename like en_US-lessac-medium.
     for v in available_voices():
         if v not in known and (lang is None or lang == "english"):
             profiles.append({
-                "id": v, "name": v, "gender": "?", "lang": "english",
-                "note": "", "installed": True,
+                "id": v, "name": _humanize_voice_name(v), "gender": "?",
+                "lang": "english", "note": "", "installed": True,
             })
     return profiles
+
+
+def _humanize_voice_name(voice_id: str) -> str:
+    """Turn a Piper voice id into a display label (US/UK prefix, no quality).
+
+    ``en_US-amy-medium`` -> ``US Amy``; ``en_GB-jenny_dioco-medium`` ->
+    ``UK Jenny Dioco``; an unknown shape is returned unchanged.
+    """
+    parts = voice_id.split("-")
+    if len(parts) != 3:
+        return voice_id
+    country, name, _quality = parts
+    region = "UK" if country == "en_GB" else "US" if country == "en_US" else country
+    pretty = name.replace("_", " ").title()
+    return f"{region} {pretty}"
