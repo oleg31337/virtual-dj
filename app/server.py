@@ -86,39 +86,35 @@ class _RawStreamResponse(Response):
     Starlette's StreamingResponse races the body against a background watcher
     that cancels healthy-but-idle listeners; this class avoids that entirely.
 
-    When the client requests ICY metadata (sends ``Icy-MetaData: 1`` — which
-    Winamp/VLC do for SHOUTcast-style playback), we advertise ``icy-metaint``
-    and interleave ``StreamTitle`` metadata blocks every ``metaint`` bytes.
-    That makes those players engage their proper streaming input plugin with
-    far better buffering than the generic HTTP/MP3 reader. Browsers do NOT send
-    that header, so they receive pure audio (unchanged, and unaffected by the
-    metadata bytes, which would otherwise corrupt their decoder).
+    The broadcaster already paces the MP3 at real time (with a multi-second
+    cushion in each listener's queue), so the job here is simply to relay
+    whatever audio is buffered, promptly and continuously, in modest chunks.
+    We deliberately do NOT wait to coalesce a large blob: a 1-second clump
+    followed by a 1-second silence is exactly what makes small-buffer players
+    (Winamp, VLC) underrun and "chop". Relaying steadily keeps the client's
+    jitter buffer full.
     """
 
-    def __init__(self, listener, station: str, bitrate: int, metaint: int = 0):
+    def __init__(self, listener, station: str, bitrate: int):
         self.listener = listener
         self.station = station
         self.bitrate = bitrate
-        self.metaint = metaint
         super().__init__(media_type="audio/mpeg")
 
     async def __call__(self, scope, receive, send):
-        headers = [
-            (b"content-type", b"audio/mpeg"),
-            (b"cache-control", b"no-cache, no-store"),
-            (b"pragma", b"no-cache"),
-            (b"icy-name", self.station.encode("latin-1", "replace")),
-            (b"icy-genre", b"Various"),
-            (b"icy-br", str(self.bitrate).encode()),
-            (b"icy-pub", b"0"),
-            (b"accept-ranges", b"none"),
-        ]
-        if self.metaint:
-            headers.append((b"icy-metaint", str(self.metaint).encode()))
         await send({
             "type": "http.response.start",
             "status": 200,
-            "headers": headers,
+            "headers": [
+                (b"content-type", b"audio/mpeg"),
+                (b"cache-control", b"no-cache, no-store"),
+                (b"pragma", b"no-cache"),
+                (b"icy-name", self.station.encode("latin-1", "replace")),
+                (b"icy-genre", b"Various"),
+                (b"icy-br", str(self.bitrate).encode()),
+                (b"icy-pub", b"0"),
+                (b"accept-ranges", b"none"),
+            ],
         })
 
         # Watch the receive channel for a *real* http.disconnect message (the
@@ -135,122 +131,62 @@ class _RawStreamResponse(Response):
         loop = asyncio.get_running_loop()
         watcher = asyncio.create_task(disconnect_watcher())
         try:
-            if not self.metaint:
-                # Pure audio (browsers, VLC non-ICY): unchanged behaviour.
-                while not watcher.done():
-                    chunk = await loop.run_in_executor(None, _get_chunk, self.listener)
-                    if chunk is None:
-                        continue
-                    if chunk == b"":
-                        break
-                    await send({"type": "http.response.body", "body": chunk,
-                                "more_body": True})
-                return
-
-            # ICY metadata mode (Winamp etc.): send audio in metaint-sized
-            # slices, inserting a metadata block at every boundary so the
-            # client's streaming plugin stays engaged and shows now-playing.
-            audio_sent = 0
-            pending = b""
+            # Relay buffered audio continuously in modest chunks. The
+            # broadcaster's real-time pacing + cushion means data is almost
+            # always available, so this loop drains it as fast as it arrives
+            # with no artificial waits -- a smooth real-time trickle.
             while not watcher.done():
                 chunk = await loop.run_in_executor(None, _get_chunk, self.listener)
                 if chunk is None:
                     continue
                 if chunk == b"":
                     break
-                data = pending + chunk
-                pending = b""
-                while data:
-                    space = self.metaint - (audio_sent % self.metaint)
-                    if len(data) >= space:
-                        audio_part = data[:space]
-                        data = data[space:]
-                        await send({"type": "http.response.body",
-                                    "body": audio_part, "more_body": True})
-                        audio_sent += len(audio_part)
-                        meta = _icy_metadata_block(BROADCASTER.state())
-                        await send({"type": "http.response.body",
-                                    "body": meta, "more_body": True})
-                    else:
-                        pending = data
-                        data = b""
+                await send({"type": "http.response.body", "body": chunk,
+                            "more_body": True})
         finally:
             watcher.cancel()
             BROADCASTER.remove_listener(self.listener)
 
 
-def _icy_metadata_block(state) -> bytes:
-    """One ICY metadata block: length byte + StreamTitle, padded to 16 bytes."""
-    track = (state or {}).get("track") or {}
-    title = (track.get("title") or "").strip()
-    artist = (track.get("artist") or "").strip()
-    text = (f"StreamTitle='{artist} - {title}';"
-            if artist or title else "StreamTitle='Virtual DJ';")
-    payload = text.encode("latin-1", "replace")
-    while len(payload) % 16 != 0:
-        payload += b"\x00"
-    n = min(len(payload) // 16, 255)
-    return bytes([n]) + payload[: n * 16]
-
-
-# Target size of each HTTP body chunk sent to the player. Too-small chunks
-# (the old 4 KB) make VLC/Winamp stutter: each arrives as a separate TCP
-# segment and the player's jitter buffer can underrun between them. Coalescing
-# several encoded frames into one ~16 KB (1 s @128 kbps) send keeps the feed
-# smooth, exactly like Icecast's 1-second burst cadence.
-SEND_CHUNK = 16384
+# Size of one relayed body chunk. Small enough to keep the client's buffer
+# topped up continuously (no multi-second silence between clumps), large enough
+# to avoid per-byte syscall/throttle overhead. At 128 kbps this is ~0.25-0.5 s
+# of audio -- well within any player's jitter buffer.
+SEND_CHUNK = 4096
 
 
 def _get_chunk(listener) -> bytes | None:
-    """Coalesce queued audio frames into ~SEND_CHUNK sends.
+    """Return buffered audio promptly, in modest chunks.
 
     Returns bytes to send, ``None`` if nothing is buffered yet (caller retries
     without emitting a body frame), or ``b""`` when the listener is closing.
-    Flushes whatever is buffered at least every ~1 s so
-    latency stays low even when the target size isn't reached in one pass.
+    Does NOT wait to accumulate a large blob -- steady, continuous delivery is
+    what keeps weak-buffer players (Winamp/VLC) from stuttering.
     """
     import queue as _q
-    import time as _t
 
-    buf = bytearray()
-    # Wait up to ~1 s for a full SEND_CHUNK: at 128 kbps that's one second of
-    # audio (two 8 KB encoded frames). The transmitter keeps a 3 s cushion in
-    # the listener queue, so in steady state the second frame is already there
-    # and we return 16 KB immediately; the window only matters after a stall.
-    deadline = _t.monotonic() + 1.0
-    while True:
-        remaining = deadline - _t.monotonic()
-        if remaining <= 0:
-            return bytes(buf) if buf else None
-        try:
-            item = listener.queue.get(timeout=min(remaining, 0.05))
-        except _q.Empty:
-            continue
-        if item is None:
-            return bytes(buf) if buf else b""
-        buf.extend(item)
-        if len(buf) >= SEND_CHUNK:
-            return bytes(buf)
+    try:
+        # Return one modest chunk as soon as it's available. The broadcaster
+        # keeps a multi-second cushion in the queue, so in steady state there
+        # is almost always an item ready -- we relay it immediately and let
+        # the next call fetch the next one, producing a smooth real-time
+        # trickle rather than periodic 1-second clumps.
+        item = listener.queue.get(timeout=0.05)
+    except _q.Empty:
+        return None
+    if item is None:
+        return b""
+    return item
 
 
 @app.get("/stream.mp3", response_class=_RawStreamResponse)
 async def stream_mp3(request: Request):
-    """Infinite MP3 stream. Compatible with VLC, Winamp, Sonos, browsers.
-
-    Clients that ask for ICY metadata (``Icy-MetaData: 1`` — Winamp, VLC's
-    stream mode, Sonos) get ``icy-metaint`` + interleaved ``StreamTitle``
-    blocks, which makes them use their proper SHOUTcast streaming plugin with
-    much better buffering. Browsers don't send that header, so they get plain
-    audio (their <audio> element does its own buffering and would choke on the
-    metadata bytes).
-    """
+    """Infinite MP3 stream. Compatible with VLC, Winamp, Sonos, browsers."""
     listener = BROADCASTER.add_listener()
-    wants_meta = (request.headers.get("icy-metadata") or "").strip().lower() == "1"
     return _RawStreamResponse(
         listener,
         config.get("stream.station_name", "Virtual DJ"),
         int(config.get("stream.bitrate_kbps", 128)),
-        metaint=16384 if wants_meta else 0,
     )
 
 
