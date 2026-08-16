@@ -155,8 +155,12 @@ Then open **http://localhost:8420**.
 
 On first start the container **auto-downloads the default voice models**
 (English + Russian, ~190 MB) into the volume; the DJ can speak out of the box.
-Set `VDJ_NO_VOICE_DOWNLOAD=1` in `.env` to skip (e.g. no outbound network, or
-you pre-populate the volume's `voices/` directory).
+It also **auto-scans `/music` on first boot** (the container's `music_dir`
+defaults to `/music`, which is where your host library is mounted), so the
+station indexes your music with no setup. If `/music` is empty or unmounted,
+the Library panel shows a clear "No audio files found" / "Music folder not
+found" message instead of failing silently. To rescan after adding files, use
+the **Rescan** button in the Library panel (or change the path there).
 
 ### What the container does for you
 

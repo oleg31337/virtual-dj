@@ -326,7 +326,15 @@ def scan_library(music_dir: str | None = None, full: bool = False,
     conn = db.connect()
     try:
         if not root.is_dir():
-            raise NotADirectoryError(f"music_dir does not exist: {root}")
+            msg = (
+                f"Music folder not found: {root}. Set it in the Library panel "
+                f"or via the VDJ_MUSIC_DIR environment variable."
+            )
+            log.warning("library scan skipped: %s", msg)
+            with STATUS.lock:
+                STATUS.error = msg
+                STATUS.running = False
+            return STATUS.snapshot()
 
         existing = {
             row["path"]: (row["id"], row["mtime"], row["size"])
@@ -434,6 +442,15 @@ def scan_library(music_dir: str | None = None, full: bool = False,
                 conn.commit()
 
         conn.commit()
+
+        if STATUS.total_seen == 0:
+            msg = (
+                f"No audio files found in {root}. Check that the folder "
+                f"contains music and is mounted correctly."
+            )
+            log.warning("library scan: %s", msg)
+            with STATUS.lock:
+                STATUS.error = msg
 
         gone = [p for p in existing if p not in seen and p.startswith(str(root))]
         for chunk_start in range(0, len(gone), 500):

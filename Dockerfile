@@ -18,6 +18,9 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     # All mutable state goes here; mount a volume on /data.
     VDJ_DATA_DIR=/data \
+    # Docker mounts the host music library at /music (read-only); point the
+    # default scan target there so a fresh container indexes it automatically.
+    VDJ_MUSIC_DIR=/music \
     # Listen on all interfaces by default inside the container.
     VDJ_HOST=0.0.0.0 \
     VDJ_PORT=8420

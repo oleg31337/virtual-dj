@@ -145,6 +145,14 @@ def test_missing_directory_records_error():
     assert result["running"] is False
 
 
+def test_empty_directory_records_message(tmp_path):
+    result = library.scan_library(str(tmp_path))
+    assert result["total_seen"] == 0
+    assert result["error"] is not None
+    assert "No audio files found" in result["error"]
+    assert result["running"] is False
+
+
 def test_corrupt_file_does_not_break_scan(music_dir, has_ffmpeg):
     (music_dir / "broken.mp3").write_bytes(b"this is definitely not audio")
     result = library.scan_library(str(music_dir))

@@ -327,12 +327,22 @@ async function loadLibraryStats() {
 
 async function pollScan() {
   const s = await api('/api/library/scan');
-  $('scan-status').textContent = s.running
-    ? `scanning… ${s.total_seen} files seen, ${s.added} new`
-    : (s.error ? `error: ${s.error}`
-       : (s.finished_at ? `last scan: +${s.added} new, ${s.updated} updated` : 'idle'));
-  if (s.running) setTimeout(pollScan, 1500);
-  else { loadGenres(); loadLanguages(); loadHealth(); loadLibraryStats(); }
+  const el = $('scan-status');
+  if (s.running) {
+    el.textContent = `scanning… ${s.total_seen} files seen, ${s.added} new`;
+    el.className = 'meta dim';
+    setTimeout(pollScan, 1500);
+  } else if (s.error) {
+    el.textContent = `⚠ ${s.error}`;
+    el.className = 'meta warn';
+    loadHealth();
+  } else {
+    el.textContent = s.finished_at
+      ? `last scan: +${s.added} new, ${s.updated} updated`
+      : 'idle';
+    el.className = 'meta dim';
+    loadGenres(); loadLanguages(); loadHealth(); loadLibraryStats();
+  }
 }
 
 /* ---------- wiring ---------- */
