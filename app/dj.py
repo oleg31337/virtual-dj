@@ -415,7 +415,7 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
         log.warning("LLM returned an empty script; using fallback")
     else:
         log.warning("LLM script generation failed (%s); using fallback", last_exc)
-    return fallback_script(track)
+    return fallback_script(track, program=program, language=language)
 
 
 def _cache_path(text: str, voice: str, speed: float, noise_scale: float) -> Path:
