@@ -321,6 +321,34 @@ async function loadLLMModels() {
   }
 }
 
+async function testLLM() {
+  const url = $('llm-url').value.trim();
+  const model = $('llm-model').value;
+  const btn = $('llm-test');
+  const out = $('llm-test-result');
+  btn.disabled = true; btn.textContent = 'testing…';
+  out.textContent = 'contacting model…';
+  out.className = 'meta dim';
+  try {
+    const r = await api('/api/llm/test', {
+      method: 'POST',
+      body: JSON.stringify({ base_url: url || undefined, model: model || undefined }),
+    });
+    if (r.ok && r.text) {
+      out.textContent = `✓ ${r.model}: "${r.text.trim()}"`;
+      out.className = 'meta ok';
+    } else {
+      out.textContent = `✗ ${r.error || 'no response'}`;
+      out.className = 'meta warn';
+    }
+  } catch (e) {
+    out.textContent = `✗ ${e.message}`;
+    out.className = 'meta warn';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Test connection';
+  }
+}
+
 async function loadHealth() {
   try {
     const h = await api('/api/health');
@@ -441,6 +469,7 @@ function wire() {
     loadConfig();
   };
   $('llm-load-models').onclick = () => loadLLMModels();
+  $('llm-test').onclick = () => testLLM();
   $('save-llm').onclick = async () => {
     const patch = {
       llm: {

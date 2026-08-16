@@ -376,6 +376,22 @@ def api_llm_models(req: LLMModelsRequest):
     return dj.list_ollama_models(req.base_url)
 
 
+class LLMTestRequest(BaseModel):
+    base_url: str | None = None
+    model: str | None = None
+    prompt: str | None = None
+
+
+@app.post("/api/llm/test")
+def api_llm_test(req: LLMTestRequest):
+    """Verify the LLM can actually generate a DJ line (real chat completion).
+
+    Uses the supplied base_url/model (so the UI can test before saving) or the
+    configured ones. Returns {"ok", "text", "model", "error"}.
+    """
+    return dj.test_llm(req.base_url, req.model, req.prompt)
+
+
 
 # --- DJ --------------------------------------------------------------------
 

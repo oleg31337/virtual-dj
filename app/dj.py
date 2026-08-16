@@ -601,6 +601,44 @@ def list_ollama_models(base_url: str | None = None) -> dict[str, Any]:
         return {"ok": False, "models": [], "error": str(exc)}
 
 
+def test_llm(base_url: str | None = None, model: str | None = None,
+             prompt: str | None = None) -> dict[str, Any]:
+    """Make a real chat completion to verify the LLM works as the DJ.
+
+    Uses the supplied ``base_url``/``model`` (so the UI can test before saving)
+    or the configured ones. Performs one real ``/api/chat`` call — the same
+    shape ``generate_script`` uses — and returns the generated text. Never
+    raises; returns ``{"ok", "text", "model", "error"}``.
+    """
+    url = str(base_url or config.get("llm.base_url", "")).rstrip("/")
+    model = model or config.get("llm.model", "qwen3.5:9b")
+    timeout = float(config.get("llm.timeout_s", 120))
+    if not url:
+        return {"ok": False, "text": "", "model": model, "error": "no base_url configured"}
+    try:
+        resp = httpx.post(
+            f"{url}/api/chat",
+            timeout=timeout,
+            json={
+                "model": model,
+                "stream": False,
+                "think": False,
+                "messages": [
+                    {"role": "system",
+                     "content": "You are the on-air DJ for a late-night radio station."},
+                    {"role": "user",
+                     "content": prompt or "Say hello to the listeners in one short, warm sentence."},
+                ],
+                "options": {"temperature": 0.7, "num_predict": 120},
+            },
+        )
+        resp.raise_for_status()
+        text = (resp.json().get("message") or {}).get("content", "")
+        return {"ok": True, "text": text, "model": model, "error": None}
+    except Exception as exc:
+        return {"ok": False, "text": "", "model": model, "error": str(exc)}
+
+
 def tts_health() -> dict[str, Any]:
     return {
         "ok": bool(piper_binary() and voice_model_path()),
