@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -373,32 +374,47 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
     model = config.get("llm.model", "qwen3.5:9b")
     timeout = float(config.get("llm.timeout_s", 120))
 
-    try:
-        resp = httpx.post(
-            f"{base_url}/api/chat",
-            timeout=timeout,
-            json={
-                "model": model,
-                "stream": False,
-                "think": False,
-                "messages": [
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "options": {
-                    "temperature": float(config.get("llm.temperature", 0.7)),
-                    "num_predict": 220,
+    # A transient Ollama blip (restart, first-load of a model) should not
+    # immediately drop the DJ line to the templated fallback. Retry a few times
+    # with a short backoff; the connection is re-attempted each time it is
+    # needed, so a briefly-down Ollama recovers on its own.
+    content = ""
+    last_exc: Exception | None = None
+    for attempt in range(int(config.get("llm.retries", 2)) + 1):
+        try:
+            resp = httpx.post(
+                f"{base_url}/api/chat",
+                timeout=timeout,
+                json={
+                    "model": model,
+                    "stream": False,
+                    "think": False,
+                    "messages": [
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "options": {
+                        "temperature": float(config.get("llm.temperature", 0.7)),
+                        "num_predict": 220,
+                    },
                 },
-            },
-        )
-        resp.raise_for_status()
-        content = (resp.json().get("message") or {}).get("content", "")
+            )
+            resp.raise_for_status()
+            content = (resp.json().get("message") or {}).get("content", "")
+            break
+        except Exception as exc:  # connection refused, timeout, 5xx, empty body
+            last_exc = exc
+            if attempt < int(config.get("llm.retries", 2)):
+                log.warning("LLM attempt %d failed (%s); retrying", attempt + 1, exc)
+                time.sleep(1.0 * (attempt + 1))
+            continue
+    if content:
         script = _clean_script(content, max_sentences, language=language)
         if script:
             return script
         log.warning("LLM returned an empty script; using fallback")
-    except Exception as exc:
-        log.warning("LLM script generation failed (%s); using fallback", exc)
+    else:
+        log.warning("LLM script generation failed (%s); using fallback", last_exc)
     return fallback_script(track)
 
 
@@ -564,6 +580,25 @@ def llm_health() -> dict[str, Any]:
         return {"ok": True, "models": models, "model_present": wanted in models}
     except Exception as exc:
         return {"ok": False, "error": str(exc)}
+
+
+def list_ollama_models(base_url: str | None = None) -> dict[str, Any]:
+    """Query an Ollama instance for its available models.
+
+    Uses ``base_url`` if given (so the UI can probe a URL the user just typed
+    before saving), otherwise the configured ``llm.base_url``. Returns
+    ``{"ok": bool, "models": [name, ...], "error": str|None}``. Never raises.
+    """
+    url = str(base_url or config.get("llm.base_url", "")).rstrip("/")
+    if not url:
+        return {"ok": False, "models": [], "error": "no base_url configured"}
+    try:
+        resp = httpx.get(f"{url}/api/tags", timeout=5)
+        resp.raise_for_status()
+        models = [m.get("name") for m in resp.json().get("models", [])]
+        return {"ok": True, "models": models, "error": None}
+    except Exception as exc:
+        return {"ok": False, "models": [], "error": str(exc)}
 
 
 def tts_health() -> dict[str, Any]:

@@ -362,6 +362,21 @@ async def api_put_config(request: Request):
     return updated
 
 
+class LLMModelsRequest(BaseModel):
+    base_url: str | None = None
+
+
+@app.post("/api/llm/models")
+def api_llm_models(req: LLMModelsRequest):
+    """List models an Ollama instance exposes (for the web UI dropdown).
+
+    Probes ``req.base_url`` if supplied (so the UI can test a URL before
+    saving), otherwise the currently configured ``llm.base_url``.
+    """
+    return dj.list_ollama_models(req.base_url)
+
+
+
 # --- DJ --------------------------------------------------------------------
 
 @app.get("/api/dj/scripts")

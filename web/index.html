@@ -69,6 +69,35 @@
   </section>
 
   <section class="card">
+    <h3>LLM configuration <span class="dim">(talking DJ)</span></h3>
+    <p class="dim">Points the DJ at an Ollama instance for script generation.
+      Saved values here override the <code>.env</code> settings.</p>
+    <label class="field inline">
+      <input type="checkbox" id="llm-enabled" checked /> LLM enabled
+    </label>
+    <div class="row">
+      <input type="text" id="llm-url" placeholder="http://host-gateway:11434" />
+      <button id="llm-load-models">Load models</button>
+    </div>
+    <div class="meta dim" id="llm-status">—</div>
+    <div class="row">
+      <select id="llm-model"></select>
+    </div>
+    <div class="row">
+      <label class="field inline">Timeout (s)
+        <input type="number" id="llm-timeout" min="5" max="600" value="120" />
+      </label>
+      <label class="field inline">Temperature
+        <input type="number" id="llm-temperature" min="0" max="2" step="0.05" value="0.7" />
+      </label>
+      <label class="field inline">Retries
+        <input type="number" id="llm-retries" min="0" max="5" value="2" />
+      </label>
+    </div>
+    <button id="save-llm" class="primary">Save LLM settings</button>
+  </section>
+
+  <section class="card">
     <h3>Programs <span class="dim" id="program-strategy"></span></h3>
     <p class="dim">The DJ groups the queue into themed runs and announces each
       switch — like a real host. This is what's coming up.</p>

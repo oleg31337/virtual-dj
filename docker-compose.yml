@@ -27,9 +27,12 @@ services:
       VDJ_HOST: "0.0.0.0"
       VDJ_PORT: "8420"
       VDJ_LOG_LEVEL: "${VDJ_LOG_LEVEL:-info}"
-      # Optional: point the DJ at an Ollama instance.
-      # VDJ_OLLAMA_URL: "http://host-gateway:11434"
-      # VDJ_OLLAMA_MODEL: "qwen3.5:9b"
+      # Optional: point the DJ at an Ollama instance. Uncomment (and set in
+      # .env) to reach Ollama on the Docker host. Inside the container,
+      # "host-gateway" resolves to the host's loopback. The web UI can override
+      # both of these at runtime; a saved value in data/config.json wins.
+      VDJ_OLLAMA_URL: "${VDJ_OLLAMA_URL:-}"
+      VDJ_OLLAMA_MODEL: "${VDJ_OLLAMA_MODEL:-}"
     ports:
       - "${HTTP_PORT:-8420}:8420"
     volumes:

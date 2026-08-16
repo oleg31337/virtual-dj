@@ -72,6 +72,10 @@ DEFAULTS: dict[str, Any] = {
         "model": os.environ.get("VDJ_OLLAMA_MODEL", "qwen3.5:9b"),
         "timeout_s": 120,
         "temperature": 0.7,
+        # Connection attempts per DJ line before falling back to a templated
+        # line. A few retries let a briefly-restarting or model-loading Ollama
+        # recover without dropping the break.
+        "retries": 2,
     },
     "ai": {
         # Use the local LLM to fill genres web search couldn't, and to recover

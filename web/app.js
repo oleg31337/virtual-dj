@@ -259,6 +259,68 @@ async function loadConfig() {
   $('expr-val').textContent = ns.toFixed(2);
 }
 
+async function loadLLMConfig() {
+  const cfg = state.config;
+  if (!cfg || !cfg.llm) return;
+  $('llm-enabled').checked = !!(cfg.llm.enabled ?? true);
+  $('llm-url').value = cfg.llm.base_url || '';
+  $('llm-timeout').value = cfg.llm.timeout_s ?? 120;
+  $('llm-temperature').value = cfg.llm.temperature ?? 0.7;
+  $('llm-retries').value = cfg.llm.retries ?? 2;
+  // Pre-populate the dropdown with the configured model (no probe yet).
+  const cur = cfg.llm.model || '';
+  $('llm-model').innerHTML = cur
+    ? `<option value="${esc(cur)}" selected>${esc(cur)}</option>`
+    : '<option value="">— set URL and click Load models —</option>';
+  await loadLLMStatus();
+}
+
+async function loadLLMStatus() {
+  try {
+    const h = await api('/api/health');
+    const llm = h.llm || {};
+    const el = $('llm-status');
+    if (llm.ok) {
+      el.textContent = `connected · ${llm.models?.length || 0} models`
+        + (llm.model_present ? ' · configured model present' : ' · configured model MISSING');
+      el.className = 'meta ' + (llm.model_present ? 'ok' : 'warn');
+    } else {
+      el.textContent = `not connected: ${llm.error || 'no base_url configured'}`;
+      el.className = 'meta warn';
+    }
+  } catch (e) { /* ignore */ }
+}
+
+async function loadLLMModels() {
+  const url = $('llm-url').value.trim();
+  const btn = $('llm-load-models');
+  btn.disabled = true; btn.textContent = 'loading…';
+  try {
+    const r = await api('/api/llm/models', {
+      method: 'POST',
+      body: JSON.stringify({ base_url: url || undefined }),
+    });
+    const sel = $('llm-model');
+    if (r.ok && r.models && r.models.length) {
+      const cur = sel.value;
+      sel.innerHTML = r.models
+        .map((m) => `<option value="${esc(m)}"${m === cur ? ' selected' : ''}>${esc(m)}</option>`)
+        .join('');
+      $('llm-status').textContent = `${r.models.length} models found`;
+      $('llm-status').className = 'meta ok';
+    } else {
+      sel.innerHTML = '<option value="">— no models / unreachable —</option>';
+      $('llm-status').textContent = `no models: ${r.error || 'unknown'}`;
+      $('llm-status').className = 'meta warn';
+    }
+  } catch (e) {
+    $('llm-status').textContent = `error: ${e.message}`;
+    $('llm-status').className = 'meta warn';
+  } finally {
+    btn.disabled = false; btn.textContent = 'Load models';
+  }
+}
+
 async function loadHealth() {
   try {
     const h = await api('/api/health');
@@ -378,6 +440,23 @@ function wire() {
     });
     loadConfig();
   };
+  $('llm-load-models').onclick = () => loadLLMModels();
+  $('save-llm').onclick = async () => {
+    const patch = {
+      llm: {
+        enabled: $('llm-enabled').checked,
+        base_url: $('llm-url').value.trim(),
+        model: $('llm-model').value,
+        timeout_s: Number($('llm-timeout').value) || 120,
+        temperature: Number($('llm-temperature').value) || 0.7,
+        retries: Number($('llm-retries').value) || 0,
+      },
+    };
+    await api('/api/config', { method: 'PUT', body: JSON.stringify(patch) });
+    await loadLLMStatus();
+    loadHealth();
+  };
+  $('llm-url').onchange = () => { $('llm-model').innerHTML = '<option value="">— click Load models —</option>'; };
   $('scan').onclick = async () => {
     await api('/api/library/scan', {
       method: 'POST',
@@ -572,7 +651,8 @@ async function init() {
   wire();
   await loadConfig();
   await Promise.all([loadGenres(), loadLanguages(), loadTracks(''), loadQueue(),
-                     loadPresets(), loadHistory(), loadHealth(), loadPrograms()]);
+                     loadPresets(), loadHistory(), loadHealth(), loadPrograms(),
+                     loadLLMConfig()]);
   pollScan();
   connectWS();
   setInterval(loadHistory, 30000);
