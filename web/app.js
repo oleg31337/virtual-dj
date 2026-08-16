@@ -547,8 +547,10 @@ function wire() {
     ($('speed-val').textContent = (e.target.value / 100).toFixed(2));
 
   // Selecting a voice (English or Russian) downloads it on demand if missing,
-  // verifies it actually landed on disk, refreshes the picker, then selects AND
-  // activates it (so the DJ starts using it). This is the full expected flow.
+  // verifies it actually landed on disk, refreshes the picker, then selects it
+  // in the UI. Activation (making it the DJ's active voice) is intentionally a
+  // UI-only change -- the user must click "Save DJ" to persist it, same as any
+  // other DJ setting.
   const selectVoice = async (selectId, noteId, langKey) => {
     const voice = $(selectId).value;
     const note = $(noteId);
@@ -582,23 +584,13 @@ function wire() {
       note.textContent = '✓ installed';
     }
     note.className = 'dim';
-    // Refresh the picker choices, then select + activate the chosen voice.
+    // Refresh the picker choices, then select the chosen voice in the UI.
+    // (Not persisted -- "Save DJ" applies it.)
     await loadConfig();
     $(selectId).value = voice;
     const profiles = (langKey === 'russian' ? data.russian_profiles : data.profiles) || [];
     const sel = profiles.find((p) => p.id === voice);
     if (sel && sel.note) $(noteId).textContent = sel.note;
-    // Persist as the active voice for this language so the DJ uses it.
-    const patch = langKey === 'russian'
-      ? { dj: { russian_voice: voice } }
-      : { dj: { voice } };
-    try {
-      await api('/api/config', { method: 'PUT', body: JSON.stringify(patch) });
-    } catch (e) {
-      // Selection still active in the UI even if the save round-trip fails.
-    }
-    // Update the "current" highlight on the next catalogue read.
-    void loadConfig();
   };
   $('dj-voice').onchange = () => selectVoice('dj-voice', 'dj-voice-note', 'english');
   $('dj-voice-ru').onchange = () => selectVoice('dj-voice-ru', 'dj-voice-ru-note', 'russian');
