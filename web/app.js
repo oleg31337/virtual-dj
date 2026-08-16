@@ -226,7 +226,7 @@ async function loadConfig() {
   state.activeLanguages = new Set(cfg.playback.languages || []);
 
   const voices = await api('/api/dj/voices');
-  const profiles = voices.profiles || [];
+  const profiles = (voices.profiles || []).filter((p) => p.lang === 'english');
   $('dj-voice').innerHTML = profiles.length
     ? profiles.map((p) =>
         `<option value="${esc(p.id)}"${p.id === voices.current ? ' selected' : ''}>${esc(p.name)} (${esc(p.gender)})${p.installed ? '' : ' — not installed'}</option>`).join('')
