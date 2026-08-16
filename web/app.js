@@ -551,6 +551,39 @@ function wire() {
     const sel = ru.find((p) => p.id === $('dj-voice-ru').value);
     $('dj-voice-ru-note').textContent = sel && sel.note ? sel.note : '';
   };
+  // Auto-download a voice when the user picks it from the dropdown (per request:
+  // selecting a voice fetches it on demand). Shows progress + result inline.
+  const selectVoice = async (selectId, noteId) => {
+    const voice = $(selectId).value;
+    const note = $(noteId);
+    const installed = (await api('/api/dj/voices')).voices_available || [];
+    if (installed.includes(voice)) {
+      note.textContent = '✓ installed';
+      note.className = 'dim';
+      return;
+    }
+    note.textContent = '⏳ downloading…';
+    note.className = 'dim';
+    try {
+      const r = await api('/api/dj/voices/download', {
+        method: 'POST',
+        body: JSON.stringify({ voice }),
+      });
+      if (r.downloaded && r.downloaded.includes(voice)) {
+        note.textContent = '✓ downloaded';
+        note.className = 'dim';
+        loadConfig();
+      } else {
+        note.textContent = `✗ download failed: ${(r.failed || []).join(', ') || 'unknown'}`;
+        note.className = 'warn';
+      }
+    } catch (e) {
+      note.textContent = `✗ ${e.message}`;
+      note.className = 'warn';
+    }
+  };
+  $('dj-voice').onchange = () => selectVoice('dj-voice', 'dj-voice-note');
+  $('dj-voice-ru').addEventListener('change', () => selectVoice('dj-voice-ru', 'dj-voice-ru-note'));
   $('test-voice-ru').onclick = async () => {
     const voice = $('dj-voice-ru').value;
     const speed = Number($('dj-speed').value) / 100;
