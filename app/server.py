@@ -85,35 +85,47 @@ class _RawStreamResponse(Response):
 
     Starlette's StreamingResponse races the body against a background watcher
     that cancels healthy-but-idle listeners; this class avoids that entirely.
+
+    When the client requests ICY metadata (sends ``Icy-MetaData: 1`` — which
+    Winamp/VLC do for SHOUTcast-style playback), we advertise ``icy-metaint``
+    and interleave ``StreamTitle`` metadata blocks every ``metaint`` bytes.
+    That makes those players engage their proper streaming input plugin with
+    far better buffering than the generic HTTP/MP3 reader. Browsers do NOT send
+    that header, so they receive pure audio (unchanged, and unaffected by the
+    metadata bytes, which would otherwise corrupt their decoder).
     """
 
-    def __init__(self, listener, station: str, bitrate: int):
+    def __init__(self, listener, station: str, bitrate: int, metaint: int = 0):
         self.listener = listener
         self.station = station
         self.bitrate = bitrate
+        self.metaint = metaint
         super().__init__(media_type="audio/mpeg")
 
     async def __call__(self, scope, receive, send):
+        headers = [
+            (b"content-type", b"audio/mpeg"),
+            (b"cache-control", b"no-cache, no-store"),
+            (b"pragma", b"no-cache"),
+            (b"icy-name", self.station.encode("latin-1", "replace")),
+            (b"icy-genre", b"Various"),
+            (b"icy-br", str(self.bitrate).encode()),
+            (b"icy-pub", b"0"),
+            (b"accept-ranges", b"none"),
+        ]
+        if self.metaint:
+            headers.append((b"icy-metaint", str(self.metaint).encode()))
         await send({
             "type": "http.response.start",
             "status": 200,
-            "headers": [
-                (b"content-type", b"audio/mpeg"),
-                (b"cache-control", b"no-cache, no-store"),
-                (b"pragma", b"no-cache"),
-                (b"icy-name", self.station.encode("latin-1", "replace")),
-                (b"icy-genre", b"Various"),
-                (b"icy-br", str(self.bitrate).encode()),
-                (b"icy-pub", b"0"),
-                (b"accept-ranges", b"none"),
-            ],
+            "headers": headers,
         })
 
         # Watch the receive channel for a *real* http.disconnect message (the
         # client is gone or went away). This is the correct way to notice
-        # disconnects: Starlette's alternative — polling is_disconnected()
-        # from the body loop — fires on any idle receive channel, which is the
-        # normal state for a live listener, and kills healthy connections.
+        # disconnects: Starlette's alternative — polling is_disconnected() from
+        # the body loop — fires on any idle receive channel, which is the normal
+        # state for a live listener, and kills healthy connections.
         async def disconnect_watcher():
             while True:
                 message = await receive()
@@ -123,28 +135,62 @@ class _RawStreamResponse(Response):
         loop = asyncio.get_running_loop()
         watcher = asyncio.create_task(disconnect_watcher())
         try:
+            if not self.metaint:
+                # Pure audio (browsers, VLC non-ICY): unchanged behaviour.
+                while not watcher.done():
+                    chunk = await loop.run_in_executor(None, _get_chunk, self.listener)
+                    if chunk is None:
+                        continue
+                    if chunk == b"":
+                        break
+                    await send({"type": "http.response.body", "body": chunk,
+                                "more_body": True})
+                return
+
+            # ICY metadata mode (Winamp etc.): send audio in metaint-sized
+            # slices, inserting a metadata block at every boundary so the
+            # client's streaming plugin stays engaged and shows now-playing.
+            audio_sent = 0
+            pending = b""
             while not watcher.done():
                 chunk = await loop.run_in_executor(None, _get_chunk, self.listener)
                 if chunk is None:
                     continue
                 if chunk == b"":
                     break
-                await send({"type": "http.response.body", "body": chunk,
-                            "more_body": True})
+                data = pending + chunk
+                pending = b""
+                while data:
+                    space = self.metaint - (audio_sent % self.metaint)
+                    if len(data) >= space:
+                        audio_part = data[:space]
+                        data = data[space:]
+                        await send({"type": "http.response.body",
+                                    "body": audio_part, "more_body": True})
+                        audio_sent += len(audio_part)
+                        meta = _icy_metadata_block(BROADCASTER.state())
+                        await send({"type": "http.response.body",
+                                    "body": meta, "more_body": True})
+                    else:
+                        pending = data
+                        data = b""
         finally:
             watcher.cancel()
             BROADCASTER.remove_listener(self.listener)
 
 
-@app.get("/stream.mp3", response_class=_RawStreamResponse)
-async def stream_mp3(request: Request):
-    """Infinite MP3 stream. Compatible with VLC, Winamp, Sonos, browsers."""
-    listener = BROADCASTER.add_listener()
-    return _RawStreamResponse(
-        listener,
-        config.get("stream.station_name", "Virtual DJ"),
-        int(config.get("stream.bitrate_kbps", 128)),
-    )
+def _icy_metadata_block(state) -> bytes:
+    """One ICY metadata block: length byte + StreamTitle, padded to 16 bytes."""
+    track = (state or {}).get("track") or {}
+    title = (track.get("title") or "").strip()
+    artist = (track.get("artist") or "").strip()
+    text = (f"StreamTitle='{artist} - {title}';"
+            if artist or title else "StreamTitle='Virtual DJ';")
+    payload = text.encode("latin-1", "replace")
+    while len(payload) % 16 != 0:
+        payload += b"\x00"
+    n = min(len(payload) // 16, 255)
+    return bytes([n]) + payload[: n * 16]
 
 
 # Target size of each HTTP body chunk sent to the player. Too-small chunks
@@ -185,6 +231,27 @@ def _get_chunk(listener) -> bytes | None:
         buf.extend(item)
         if len(buf) >= SEND_CHUNK:
             return bytes(buf)
+
+
+@app.get("/stream.mp3", response_class=_RawStreamResponse)
+async def stream_mp3(request: Request):
+    """Infinite MP3 stream. Compatible with VLC, Winamp, Sonos, browsers.
+
+    Clients that ask for ICY metadata (``Icy-MetaData: 1`` — Winamp, VLC's
+    stream mode, Sonos) get ``icy-metaint`` + interleaved ``StreamTitle``
+    blocks, which makes them use their proper SHOUTcast streaming plugin with
+    much better buffering. Browsers don't send that header, so they get plain
+    audio (their <audio> element does its own buffering and would choke on the
+    metadata bytes).
+    """
+    listener = BROADCASTER.add_listener()
+    wants_meta = (request.headers.get("icy-metadata") or "").strip().lower() == "1"
+    return _RawStreamResponse(
+        listener,
+        config.get("stream.station_name", "Virtual DJ"),
+        int(config.get("stream.bitrate_kbps", 128)),
+        metaint=16384 if wants_meta else 0,
+    )
 
 
 # --- status ----------------------------------------------------------------
