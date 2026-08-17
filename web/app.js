@@ -75,17 +75,73 @@ function renderState(s) {
   // External-player URL (Winamp / VLC / Sonos): point at the Icecast mount
   // when delivery is enabled, otherwise the app's own stream endpoint.
   const ice = s.icecast || {};
+  window.__icecast = ice;
   const link = $('stream-link');
   if (ice.enabled) {
     const url = `http://${location.hostname}:${ice.public_port}/${ice.mount}`;
     link.href = url;
     link.textContent = `Winamp/VLC: ${location.hostname}:${ice.public_port}/${ice.mount}`;
     link.title = 'Open this URL in Winamp, VLC, or any SHOUTcast/Icecast player';
+    // Mirror into the Streaming card (also filled by loadIcecastStatus).
+    const u = $('icecast-url');
+    if (u && !document.activeElement === u) u.value = url;
   } else {
     link.href = `${location.origin}/stream.mp3`;
     link.textContent = 'stream URL';
     link.title = '';
   }
+  renderIcecastFromState(s);
+}
+
+function renderIcecastFromState(s) {
+  const ice = s.icecast || {};
+  if (!ice.enabled) return;
+  const u = $('icecast-url');
+  if (u && document.activeElement !== u) {
+    u.value = `http://${location.hostname}:${ice.public_port}/${ice.mount}`;
+  }
+}
+
+async function loadIcecastStatus() {
+  const status = $('icecast-status');
+  const listeners = $('icecast-listeners');
+  const note = $('icecast-note');
+  const url = $('icecast-url');
+  if (!status) return;
+  try {
+    const d = await (await fetch('/api/icecast/status')).json();
+    if (!d.enabled) {
+      status.textContent = 'disabled';
+      status.className = 'pill';
+      listeners.textContent = '';
+      note.textContent = 'Icecast delivery is off — set icecast.enabled in config or run with VDJ_ICECAST_ENABLED=1.';
+      url.value = '(icecast disabled)';
+      return;
+    }
+    if (d.connected) {
+      status.textContent = '● live';
+      status.className = 'pill ok';
+      listeners.textContent = `${d.listeners} listener${d.listeners === 1 ? '' : 's'}`;
+      const parts = [`Mount ${d.mount}`];
+      if (d.server_name) parts.push(`on ${d.server_name}`);
+      if (d.bitrate) parts.push(`${d.bitrate} kbps`);
+      note.textContent = parts.join(' · ');
+      url.value = `http://${location.hostname}:${icecastPublicPort()}/${d.mount.replace(/^\//, '')}`;
+    } else {
+      status.textContent = '○ not connected';
+      status.className = 'pill warn';
+      listeners.textContent = '';
+      note.textContent = 'App pusher not connected to Icecast — is the Icecast server running?';
+    }
+  } catch (e) {
+    status.textContent = '?';
+    status.className = 'pill warn';
+  }
+}
+
+function icecastPublicPort() {
+  // Pulled from the live state once available; default 8000.
+  return (window.__icecast && window.__icecast.public_port) || 8000;
 }
 
 function connectWS() {
@@ -457,6 +513,14 @@ function wire() {
   // stream-link is filled in by renderState() from live state (Icecast-aware).
   link = $('stream-link');
   link.href = `${location.origin}/stream.mp3`;
+  $('icecast-copy').onclick = () => {
+    const u = $('icecast-url');
+    if (u && u.value && u.value !== '(icecast disabled)') {
+      navigator.clipboard?.writeText(u.value);
+      $('icecast-copy').textContent = 'Copied!';
+      setTimeout(() => { $('icecast-copy').textContent = 'Copy'; }, 1500);
+    }
+  };
 
   $('skip').onclick = () => api('/api/transport/skip', { method: 'POST' });
   $('pauseresume').onclick = async () => {
@@ -743,8 +807,10 @@ async function init() {
                      loadLLMConfig()]);
   pollScan();
   connectWS();
+  loadIcecastStatus();
   setInterval(loadHistory, 30000);
   setInterval(loadHealth, 30000);
+  setInterval(loadIcecastStatus, 5000);
 }
 
 init();

@@ -230,6 +230,44 @@ def api_programs():
     return {"strategy": strategy, "themes": library.program_themes(strategy)}
 
 
+@app.get("/api/icecast/status")
+def api_icecast_status():
+    """Live Icecast mount info (listener count, connected) for the web UI.
+
+    Icecast's own status endpoint isn't CORS-reachable from the browser, so
+    the app proxies it server-side. Returns a small shape regardless of
+    whether Icecast is enabled or reachable.
+    """
+    if not config.get("icecast.enabled", False):
+        return {"enabled": False}
+    host = config.get("icecast.host", "127.0.0.1")
+    port = int(config.get("icecast.port", 8000))
+    mount = "/" + str(config.get("icecast.mount", "virtualdj")).lstrip("/")
+    try:
+        import httpx
+        r = httpx.get(
+            f"http://{host}:{port}/status-json.xsl?mount={mount}",
+            timeout=4.0,
+        )
+        if r.status_code == 200:
+            src = r.json().get("icestats", {}).get("source", {})
+            if isinstance(src, list):
+                src = src[0] if src else {}
+            return {
+                "enabled": True,
+                "connected": True,
+                "mount": mount,
+                "listeners": int(src.get("listeners", 0) or 0),
+                "server_name": src.get("server_name"),
+                "bitrate": src.get("bitrate"),
+            }
+        return {"enabled": True, "connected": False, "mount": mount,
+                "listeners": 0, "error": f"icecast returned {r.status_code}"}
+    except Exception as exc:  # noqa: BLE001 - report any connectivity issue
+        return {"enabled": True, "connected": False, "mount": mount,
+                "listeners": 0, "error": str(exc)}
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()

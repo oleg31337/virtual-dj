@@ -100,6 +100,22 @@
   </section>
 
   <section class="card">
+    <h3>Streaming <span class="dim">(Icecast)</span></h3>
+    <p class="dim">External players (Winamp / VLC / Sonos) connect to the Icecast
+      mount below — that's the fix for choppy/garbled playback. The web player
+      listens to the app's own stream.</p>
+    <div class="row">
+      <span class="pill" id="icecast-status">—</span>
+      <span class="pill" id="icecast-listeners"></span>
+    </div>
+    <div class="row">
+      <input type="text" id="icecast-url" readonly value="(icecast disabled)" />
+      <button id="icecast-copy" class="ghost">Copy</button>
+    </div>
+    <div class="meta dim" id="icecast-note"></div>
+  </section>
+
+  <section class="card">
     <h3>Programs <span class="dim" id="program-strategy"></span></h3>
     <p class="dim">The DJ groups the queue into themed runs and announces each
       switch — like a real host. This is what's coming up.</p>
