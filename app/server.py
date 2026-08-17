@@ -245,7 +245,7 @@ def api_icecast_status():
     if not config.get("icecast.enabled", False):
         return {"enabled": False}
     host = config.get("icecast.host", "127.0.0.1")
-    port = int(config.get("icecast.port", 8000))
+    port = int(config.get("icecast.port", 8008))
     mount = "/" + str(config.get("icecast.mount", "virtualdj")).lstrip("/")
     try:
         import httpx

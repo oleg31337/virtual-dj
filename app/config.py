@@ -134,14 +134,14 @@ DEFAULTS: dict[str, Any] = {
         # Icecast runs in the same container as the app (managed mode).
         "host": os.environ.get("VDJ_ICECAST_HOST", "127.0.0.1"),
         # Port the pusher connects to (the Icecast listen port).
-        "port": int(os.environ.get("VDJ_ICECAST_PORT", "8000")),
+        "port": int(os.environ.get("VDJ_ICECAST_PORT", "8008")),
         # Mountpoint the pusher publishes to.
         "mount": os.environ.get("VDJ_ICECAST_MOUNT", "virtualdj"),
         # Source (relay) password — must match the rendered icecast.xml.
         "source_password": os.environ.get("VDJ_ICECAST_SOURCE_PASSWORD", "hackme"),
         # Port external players hit (the published Docker port / the host's
         # Icecast port). The web UI builds the external URL from this.
-        "public_port": int(os.environ.get("VDJ_ICECAST_PUBLIC_PORT", "8000")),
+        "public_port": int(os.environ.get("VDJ_ICECAST_PUBLIC_PORT", "8008")),
     },
 }
 

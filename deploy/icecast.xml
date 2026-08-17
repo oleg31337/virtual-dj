@@ -7,7 +7,7 @@
 
   The Virtual DJ app relays its MP3 into the `virtualdj` mount using the
   source password below. Point Winamp / VLC / Sonos at:
-      http://<this-host>:8000/virtualdj
+      http://<this-host>:8008/virtualdj
 
   Match <source-password> to the app's icecast.source_password (env
   VDJ_ICECAST_SOURCE_PASSWORD, default "hackme"). The app's config key is
@@ -35,7 +35,7 @@
 
   <hostname>virtual-dj</hostname>
   <listen-socket>
-    <port>8000</port>
+    <port>8008</port>
     <!-- bind to loopback by default; external players reach it via the host's
          firewall / port forward. Remove the <bind-address> to listen on all
          interfaces. -->

@@ -75,7 +75,7 @@ class IcecastPusher:
 
     def _build_cmd(self) -> list[str]:
         host = config.get("icecast.host", "127.0.0.1")
-        port = int(config.get("icecast.port", 8000))
+        port = int(config.get("icecast.port", 8008))
         mount = config.get("icecast.mount", "virtualdj")
         password = config.get("icecast.source_password", "hackme")
         bitrate = int(config.get("stream.bitrate_kbps", 128))

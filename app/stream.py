@@ -471,7 +471,7 @@ class Broadcaster:
             "icecast": {
                 "enabled": bool(config.get("icecast.enabled", False)),
                 "mount": config.get("icecast.mount", "virtualdj"),
-                "public_port": int(config.get("icecast.public_port", 8000)),
+                "public_port": int(config.get("icecast.public_port", 8008)),
             },
         }
 

@@ -140,8 +140,8 @@ async function loadIcecastStatus() {
 }
 
 function icecastPublicPort() {
-  // Pulled from the live state once available; default 8000.
-  return (window.__icecast && window.__icecast.public_port) || 8000;
+  // Pulled from the live state once available; default 8008.
+  return (window.__icecast && window.__icecast.public_port) || 8008;
 }
 
 function connectWS() {

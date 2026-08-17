@@ -3,7 +3,7 @@
 # Usage:
 #   1. Copy .env.example to .env and edit (at least set MUSIC_DIR on the host).
 #   2. docker compose up -d --build
-#   3. Open http://localhost:8420  (web UI) and http://localhost:8000/virtualdj
+#   3. Open http://localhost:8420  (web UI) and http://localhost:8008/virtualdj
 #      (the Icecast mount for Winamp / VLC / Sonos).
 #
 # What is persistent: everything the app writes lives in the `data` named
@@ -34,10 +34,10 @@ services:
       # runtime; a saved value in data/config.json wins.
       VDJ_ICECAST_ENABLED: "1"
       VDJ_ICECAST_HOST: "127.0.0.1"
-      VDJ_ICECAST_PORT: "8000"
+      VDJ_ICECAST_PORT: "8008"
       VDJ_ICECAST_MOUNT: "virtualdj"
       VDJ_ICECAST_SOURCE_PASSWORD: "${ICECAST_SOURCE_PASSWORD:-hackme}"
-      VDJ_ICECAST_PUBLIC_PORT: "${ICECAST_PORT:-8000}"
+      VDJ_ICECAST_PUBLIC_PORT: "${ICECAST_PORT:-8008}"
       # Optional: point the DJ at an Ollama instance. Uncomment (and set in
       # .env) to reach Ollama on the Docker host. Inside the container,
       # "host-gateway" resolves to the host's loopback. The web UI can override
@@ -48,7 +48,7 @@ services:
       # Web UI / app API.
       - "${HTTP_PORT:-8420}:8420"
       # Icecast mount for external players (Winamp / VLC / Sonos).
-      - "${ICECAST_PORT:-8000}:8000"
+      - "${ICECAST_PORT:-8008}:8008"
     volumes:
       # Persistent app state (config, DB, voices, cache).
       - virtual-dj-data:/data

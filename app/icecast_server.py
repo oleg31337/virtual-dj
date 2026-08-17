@@ -81,7 +81,7 @@ class ManagedIcecast:
         source_password = str(config.get("icecast.source_password", "hackme"))
         admin_password = os.environ.get("VDJ_ICECAST_ADMIN_PASSWORD", "admin")
         relay_password = os.environ.get("VDJ_ICECAST_RELAY_PASSWORD", source_password)
-        port = int(config.get("icecast.port", 8000))
+        port = int(config.get("icecast.port", 8008))
         hostname = str(config.get("icecast.hostname", "virtual-dj"))
         mount = str(config.get("icecast.mount", "virtualdj")).lstrip("/") or "virtualdj"
         stream_name = str(config.get("stream.station_name", "Virtual DJ"))
