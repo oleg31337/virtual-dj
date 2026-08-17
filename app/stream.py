@@ -465,6 +465,14 @@ class Broadcaster:
             "uptime": (round(time.time() - self._started_stream_at, 1)
                        if self._started_stream_at else None),
             "scheduler": SCHEDULER.status(),
+            # Icecast delivery info so the web UI can point external players
+            # (Winamp/VLC/Sonos) at the mount. Browser clients keep using the
+            # app's own /stream.mp3.
+            "icecast": {
+                "enabled": bool(config.get("icecast.enabled", False)),
+                "mount": config.get("icecast.mount", "virtualdj"),
+                "public_port": int(config.get("icecast.public_port", 8000)),
+            },
         }
 
 

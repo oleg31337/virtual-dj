@@ -1,0 +1,67 @@
+<!--
+  Icecast2 config for Virtual DJ — bare-metal / Option B.
+
+  Install:   sudo apt-get install icecast2
+  Run:       icecast2 -c deploy/icecast.xml
+             (or: sudo cp deploy/icecast.xml /etc/icecast2/icecast.xml && sudo systemctl restart icecast2)
+
+  The Virtual DJ app relays its MP3 into the `virtualdj` mount using the
+  source password below. Point Winamp / VLC / Sonos at:
+      http://<this-host>:8000/virtualdj
+
+  Match <source-password> to the app's icecast.source_password (env
+  VDJ_ICECAST_SOURCE_PASSWORD, default "hackme"). The app's config key is
+  icecast.enabled=true (set in data/config.json or VDJ_ICECAST_ENABLED=1);
+  icecast.host defaults to 127.0.0.1, which is correct for bare metal.
+-->
+<icecast>
+  <location>Earth</location>
+  <admin>icemaster@localhost</admin>
+
+  <limits>
+    <clients>100</clients>
+    <sources>2</sources>
+    <queue-size>524288</queue-size>
+    <client-timeout>30</client-timeout>
+    <header-timeout>15</header-timeout>
+    <source-timeout>10</source-timeout>
+  </limits>
+
+  <authentication>
+    <source-password>hackme</source-password>
+    <relay-password>hackme</relay-password>
+    <admin-password>admin</admin-password>
+  </authentication>
+
+  <hostname>virtual-dj</hostname>
+  <listen-socket>
+    <port>8000</port>
+    <!-- bind to loopback by default; external players reach it via the host's
+         firewall / port forward. Remove the <bind-address> to listen on all
+         interfaces. -->
+    <bind-address>127.0.0.1</bind-address>
+  </listen-socket>
+
+  <mount>
+    <mount-name>/virtualdj</mount-name>
+    <stream-name>Virtual DJ</stream-name>
+    <stream-genre>Various</stream-genre>
+    <stream-description>Self-hosted personal radio</stream-description>
+    <public>0</public>
+    <!-- Prevents a dead connection between tracks: the app already emits an
+         idle tone when the library is empty, so the mount is never silent. -->
+    <no-mount>1</no-mount>
+  </mount>
+
+  <fileserve>0</fileserve>
+  <paths>
+    <logdir>/tmp</logdir>
+    <webroot>/usr/share/icecast2/web</webroot>
+    <adminroot>/usr/share/icecast2/admin</adminroot>
+  </paths>
+  <logging>
+    <level>2</level>
+    <logfile>icecast.log</logfile>
+    <errorlog>icecast-error.log</errorlog>
+  </logging>
+</icecast>

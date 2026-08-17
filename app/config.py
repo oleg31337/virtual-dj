@@ -118,6 +118,34 @@ DEFAULTS: dict[str, Any] = {
             "strategy": "genre",
         },
     },
+    # Icecast delivery. When enabled, a background ffmpeg ("the pusher") reads
+    # the internal MP3 feed and relays it to an Icecast server, which is what
+    # Winamp / VLC / Sonos / Sonos consume natively (a real SHOUTcast/Icecast
+    # stream with proper client-side buffering, instead of the app's custom
+    # HTTP sender that those players choke on). The web player keeps using the
+    # app's own /stream.mp3, which also remains the pusher's source.
+    #
+    # Docker (Option A): the compose stack runs an icecast service and sets
+    #   VDJ_ICECAST_ENABLED=1 and VDJ_ICECAST_HOST=icecast.
+    # Bare metal (Option B): install icecast2 yourself and set enabled=true
+    #   (host defaults to 127.0.0.1). See deploy/icecast.xml.
+    "icecast": {
+        "enabled": os.environ.get("VDJ_ICECAST_ENABLED", "0").lower()
+        in ("1", "true", "yes"),
+        # Host the pusher's ffmpeg connects to. "icecast" inside the compose
+        # network; 127.0.0.1 when Icecast runs on the same host.
+        "host": os.environ.get("VDJ_ICECAST_HOST", "127.0.0.1"),
+        # Port the pusher connects to (inside Docker this is the container port,
+        # not the published one).
+        "port": int(os.environ.get("VDJ_ICECAST_PORT", "8000")),
+        # Mountpoint the pusher publishes to.
+        "mount": os.environ.get("VDJ_ICECAST_MOUNT", "virtualdj"),
+        # Source (relay) password — must match the Icecast server config.
+        "source_password": os.environ.get("VDJ_ICECAST_SOURCE_PASSWORD", "hackme"),
+        # Port external players hit (the published Docker port / the host's
+        # Icecast port). The web UI builds the external URL from this.
+        "public_port": int(os.environ.get("VDJ_ICECAST_PUBLIC_PORT", "8000")),
+    },
 }
 
 _LOCK = threading.RLock()

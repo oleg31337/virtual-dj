@@ -72,6 +72,20 @@ function renderState(s) {
     ? `${fmtTime(s.elapsed)} / ${fmtTime(s.duration)}`
     : fmtTime(s.elapsed);
   $('pauseresume').textContent = s.paused ? '▶ Resume broadcast' : '⏸ Pause broadcast';
+  // External-player URL (Winamp / VLC / Sonos): point at the Icecast mount
+  // when delivery is enabled, otherwise the app's own stream endpoint.
+  const ice = s.icecast || {};
+  const link = $('stream-link');
+  if (ice.enabled) {
+    const url = `http://${location.hostname}:${ice.public_port}/${ice.mount}`;
+    link.href = url;
+    link.textContent = `Winamp/VLC: ${location.hostname}:${ice.public_port}/${ice.mount}`;
+    link.title = 'Open this URL in Winamp, VLC, or any SHOUTcast/Icecast player';
+  } else {
+    link.href = `${location.origin}/stream.mp3`;
+    link.textContent = 'stream URL';
+    link.title = '';
+  }
 }
 
 function connectWS() {
@@ -440,7 +454,9 @@ async function pollScan() {
 function wire() {
   $('listen').onclick = toggleListen;
   $('volume').oninput = (e) => { if (audio) audio.volume = e.target.value / 100; };
-  $('stream-link').href = `${location.origin}/stream.mp3`;
+  // stream-link is filled in by renderState() from live state (Icecast-aware).
+  link = $('stream-link');
+  link.href = `${location.origin}/stream.mp3`;
 
   $('skip').onclick = () => api('/api/transport/skip', { method: 'POST' });
   $('pauseresume').onclick = async () => {

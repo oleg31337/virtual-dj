@@ -33,6 +33,15 @@ services:
       # both of these at runtime; a saved value in data/config.json wins.
       VDJ_OLLAMA_URL: "${VDJ_OLLAMA_URL:-}"
       VDJ_OLLAMA_MODEL: "${VDJ_OLLAMA_MODEL:-}"
+      # Icecast delivery (Option A). The compose stack runs an `icecast`
+      # service (below); these vars point the app's pusher at it. External
+      # players (Winamp/VLC/Sonos) connect to the published Icecast port.
+      VDJ_ICECAST_ENABLED: "1"
+      VDJ_ICECAST_HOST: "icecast"
+      VDJ_ICECAST_PORT: "8000"
+      VDJ_ICECAST_MOUNT: "virtualdj"
+      VDJ_ICECAST_SOURCE_PASSWORD: "${ICECAST_SOURCE_PASSWORD:-hackme}"
+      VDJ_ICECAST_PUBLIC_PORT: "${ICECAST_PORT:-8000}"
     ports:
       - "${HTTP_PORT:-8420}:8420"
     volumes:
@@ -54,6 +63,26 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    # The app's pusher needs to reach the icecast service.
+    depends_on:
+      - icecast
+
+  # Icecast2 — the streaming server Winamp/VLC/Sonos consume natively. The app
+  # relays its MP3 into the `virtualdj` mount; external players open
+  # http://<host>:${ICECAST_PORT:-8000}/virtualdj . The app's web player keeps
+  # using the app's own /stream.mp3; only external players use this mount.
+  icecast:
+    image: icecast/icecast:2.4.4
+    container_name: virtual-dj-icecast
+    environment:
+      ICECAST_SOURCE_PASSWORD: "${ICECAST_SOURCE_PASSWORD:-hackme}"
+      ICECAST_ADMIN_PASSWORD: "${ICECAST_ADMIN_PASSWORD:-admin}"
+      ICECAST_PASSWORD: "${ICECAST_PASSWORD:-hackme}"
+      ICECAST_PORT: "8000"
+      ICECAST_HOSTNAME: "virtual-dj"
+    ports:
+      - "${ICECAST_PORT:-8000}:8000"
+    restart: unless-stopped
 
 volumes:
   virtual-dj-data:
