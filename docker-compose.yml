@@ -1,19 +1,21 @@
-# Virtual DJ - Docker Compose stack
+# Virtual DJ - Docker Compose stack (single container, Icecast bundled)
 #
 # Usage:
 #   1. Copy .env.example to .env and edit (at least set MUSIC_DIR on the host).
 #   2. docker compose up -d --build
-#   3. Open http://localhost:8420
+#   3. Open http://localhost:8420  (web UI) and http://localhost:8000/virtualdj
+#      (the Icecast mount for Winamp / VLC / Sonos).
 #
 # What is persistent: everything the app writes lives in the `data` named
 # volume (config.json, vdj.sqlite3, downloaded voice models, DJ cache). The
 # music library is mounted READ-ONLY from the host (the DJ never writes to it).
 #
-# Security posture:
-#   * Runs as non-root (uid 1000 inside the image).
-#   * No new privileges; read-only root filesystem with small tmpfs mounts.
-#   * Music bind mount is read-only.
-#   * Restarts on failure. No host network, no extra caps.
+# Icecast: the app runs a *managed* Icecast2 server in the same container
+# (rendered from data/config.json). The app image runs as root so icecast2 -b
+# can perform its privilege-drop (required for MP3 source mounts to serve).
+# Because of that, this single-container deployment intentionally does NOT use
+# the read-only-rootfs / cap_drop hardening the old split stack had -- the
+# trade-off for having one image that fully controls Icecast.
 
 services:
   virtual-dj:
@@ -27,23 +29,26 @@ services:
       VDJ_HOST: "0.0.0.0"
       VDJ_PORT: "8420"
       VDJ_LOG_LEVEL: "${VDJ_LOG_LEVEL:-info}"
+      # Icecast is managed by the app (bundled). These tell the app's pusher +
+      # server where to listen/render. The web UI can override both of these at
+      # runtime; a saved value in data/config.json wins.
+      VDJ_ICECAST_ENABLED: "1"
+      VDJ_ICECAST_HOST: "127.0.0.1"
+      VDJ_ICECAST_PORT: "8000"
+      VDJ_ICECAST_MOUNT: "virtualdj"
+      VDJ_ICECAST_SOURCE_PASSWORD: "${ICECAST_SOURCE_PASSWORD:-hackme}"
+      VDJ_ICECAST_PUBLIC_PORT: "${ICECAST_PORT:-8000}"
       # Optional: point the DJ at an Ollama instance. Uncomment (and set in
       # .env) to reach Ollama on the Docker host. Inside the container,
       # "host-gateway" resolves to the host's loopback. The web UI can override
       # both of these at runtime; a saved value in data/config.json wins.
       VDJ_OLLAMA_URL: "${VDJ_OLLAMA_URL:-}"
       VDJ_OLLAMA_MODEL: "${VDJ_OLLAMA_MODEL:-}"
-      # Icecast delivery (Option A). The compose stack runs an `icecast`
-      # service (below); these vars point the app's pusher at it. External
-      # players (Winamp/VLC/Sonos) connect to the published Icecast port.
-      VDJ_ICECAST_ENABLED: "1"
-      VDJ_ICECAST_HOST: "icecast"
-      VDJ_ICECAST_PORT: "8000"
-      VDJ_ICECAST_MOUNT: "virtualdj"
-      VDJ_ICECAST_SOURCE_PASSWORD: "${ICECAST_SOURCE_PASSWORD:-hackme}"
-      VDJ_ICECAST_PUBLIC_PORT: "${ICECAST_PORT:-8000}"
     ports:
+      # Web UI / app API.
       - "${HTTP_PORT:-8420}:8420"
+      # Icecast mount for external players (Winamp / VLC / Sonos).
+      - "${ICECAST_PORT:-8000}:8000"
     volumes:
       # Persistent app state (config, DB, voices, cache).
       - virtual-dj-data:/data
@@ -56,33 +61,6 @@ services:
       timeout: 5s
       start_period: 60s
       retries: 3
-    read_only: true
-    tmpfs:
-      - /tmp
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    # The app's pusher needs to reach the icecast service.
-    depends_on:
-      - icecast
-
-  # Icecast2 — the streaming server Winamp/VLC/Sonos consume natively. The app
-  # relays its MP3 into the `virtualdj` mount; external players open
-  # http://<host>:${ICECAST_PORT:-8000}/virtualdj . The app's web player keeps
-  # using the app's own /stream.mp3; only external players use this mount.
-  icecast:
-    image: icecast/icecast:2.4.4
-    container_name: virtual-dj-icecast
-    environment:
-      ICECAST_SOURCE_PASSWORD: "${ICECAST_SOURCE_PASSWORD:-hackme}"
-      ICECAST_ADMIN_PASSWORD: "${ICECAST_ADMIN_PASSWORD:-admin}"
-      ICECAST_PASSWORD: "${ICECAST_PASSWORD:-hackme}"
-      ICECAST_PORT: "8000"
-      ICECAST_HOSTNAME: "virtual-dj"
-    ports:
-      - "${ICECAST_PORT:-8000}:8000"
-    restart: unless-stopped
 
 volumes:
   virtual-dj-data:

@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from . import config, db, dj, library, websearch, ai_meta
 from . import icecast as icecast_mod
+from . import icecast_server as icecast_server_mod
 from .scheduler import SCHEDULER
 from .stream import BROADCASTER
 
@@ -61,11 +62,14 @@ async def lifespan(app: FastAPI):
     SCHEDULER.start()
     BROADCASTER.on_change(_push_state)
     BROADCASTER.start()
+    # Managed Icecast server (bundled) must be up before the pusher feeds it.
+    icecast_server_mod.SERVER.start()
     icecast_mod.PUSHER.start()
     try:
         yield
     finally:
         icecast_mod.PUSHER.stop()
+        icecast_server_mod.SERVER.stop()
         BROADCASTER.stop()
         SCHEDULER.stop()
 
