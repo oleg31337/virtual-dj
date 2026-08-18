@@ -150,6 +150,11 @@ class _RawStreamResponse(Response):
                     break
                 await send({"type": "http.response.body", "body": chunk,
                             "more_body": True})
+        except asyncio.CancelledError:
+            # Server is shutting down (e.g. `docker stop`) while a listener is
+            # connected, or the client vanished mid-stream. Stop streaming
+            # quietly instead of letting uvicorn log a CancelledError traceback.
+            pass
         finally:
             watcher.cancel()
             BROADCASTER.remove_listener(self.listener)
