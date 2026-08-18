@@ -277,6 +277,28 @@ def api_icecast_status():
                 "listeners": 0, "error": str(exc)}
 
 
+@app.post("/api/icecast/restart")
+def api_icecast_restart():
+    """Restart the managed Icecast server + pusher with the current config.
+
+    Used by the web UI's Streaming card "Apply" button after the user changes
+    the Icecast port / mount / hostname. The managed server re-renders
+    icecast.xml (new port) and rebinds; the pusher reconnects to the new port.
+    No-op (returns started=False) when Icecast delivery is disabled.
+    """
+    if not config.get("icecast.enabled", False):
+        return {"ok": True, "started": False, "note": "icecast disabled"}
+    # Ensure the supervisor thread is running (it launches from latest config
+    # if Icecast was just enabled at runtime), then restart the daemon so a
+    # changed port/mount takes effect.
+    icecast_server_mod.SERVER.start()
+    icecast_server_mod.SERVER.restart()
+    # Reconnect the pusher to the (possibly new) port/host.
+    icecast_mod.PUSHER.stop()
+    icecast_mod.PUSHER.start()
+    return {"ok": True, "started": True}
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()

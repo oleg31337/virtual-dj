@@ -140,8 +140,16 @@ DEFAULTS: dict[str, Any] = {
         # Source (relay) password — must match the rendered icecast.xml.
         "source_password": os.environ.get("VDJ_ICECAST_SOURCE_PASSWORD", "hackme"),
         # Port external players hit (the published Docker port / the host's
-        # Icecast port). The web UI builds the external URL from this.
+        # Icecast port). The web UI builds the external URL from this. In the
+        # single-container deployment this must match ``port`` (the container's
+        # listen port) so the published Docker mapping reaches Icecast.
         "public_port": int(os.environ.get("VDJ_ICECAST_PUBLIC_PORT", "8008")),
+        # Host clients connect to for the external URL (e.g. 192.168.1.50 or a
+        # DNS name). Empty means "derive from the browser's address" at display
+        # time, which works when you open the UI from the same host Winamp/VLC
+        # will point at. Set it explicitly when those differ (reverse proxy,
+        # different LAN hostname, public DNS, ...).
+        "public_host": os.environ.get("VDJ_ICECAST_PUBLIC_HOST", ""),
     },
 }
 

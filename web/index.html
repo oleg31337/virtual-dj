@@ -112,6 +112,17 @@
       <input type="text" id="icecast-url" readonly value="(icecast disabled)" />
       <button id="icecast-copy" class="ghost">Copy</button>
     </div>
+    <div class="row">
+      <label class="lbl">Icecast port</label>
+      <input type="number" id="icecast-port" min="1" max="65535" value="8008" />
+      <label class="lbl">Public host / URL</label>
+      <input type="text" id="icecast-public-host" placeholder="auto (this page's host)" />
+    </div>
+    <div class="meta dim" id="icecast-config-note"></div>
+    <div class="row">
+      <button id="icecast-apply" class="primary">Apply &amp; restart Icecast</button>
+      <span class="meta dim" id="icecast-apply-status"></span>
+    </div>
     <div class="meta dim" id="icecast-note"></div>
   </section>
 

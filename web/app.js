@@ -78,13 +78,14 @@ function renderState(s) {
   window.__icecast = ice;
   const link = $('stream-link');
   if (ice.enabled) {
-    const url = `http://${location.hostname}:${ice.public_port}/${ice.mount}`;
+    const host = icecastExternalHost(ice);
+    const url = `http://${host}:${ice.public_port}/${ice.mount}`;
     link.href = url;
-    link.textContent = `Winamp/VLC: ${location.hostname}:${ice.public_port}/${ice.mount}`;
+    link.textContent = `Winamp/VLC: ${host}:${ice.public_port}/${ice.mount}`;
     link.title = 'Open this URL in Winamp, VLC, or any SHOUTcast/Icecast player';
     // Mirror into the Streaming card (also filled by loadIcecastStatus).
     const u = $('icecast-url');
-    if (u && !document.activeElement === u) u.value = url;
+    if (u && document.activeElement !== u) u.value = url;
   } else {
     link.href = `${location.origin}/stream.mp3`;
     link.textContent = 'stream URL';
@@ -93,12 +94,23 @@ function renderState(s) {
   renderIcecastFromState(s);
 }
 
+// The host external players should connect to. Defaults to the host this page
+// was opened from (so Winamp/VLC on the same LAN host work), but uses the
+// explicitly configured public_host when set (reverse proxy, different LAN
+// hostname, public DNS, ...).
+function icecastExternalHost(ice) {
+  const explicit = (ice && ice.public_host) || (window.__icecast && window.__icecast.public_host);
+  if (explicit) return explicit;
+  return location.hostname;
+}
+
 function renderIcecastFromState(s) {
   const ice = s.icecast || {};
   if (!ice.enabled) return;
   const u = $('icecast-url');
   if (u && document.activeElement !== u) {
-    u.value = `http://${location.hostname}:${ice.public_port}/${ice.mount}`;
+    const host = icecastExternalHost(ice);
+    u.value = `http://${host}:${ice.public_port}/${ice.mount}`;
   }
 }
 
@@ -126,7 +138,7 @@ async function loadIcecastStatus() {
       if (d.server_name) parts.push(`on ${d.server_name}`);
       if (d.bitrate) parts.push(`${d.bitrate} kbps`);
       note.textContent = parts.join(' · ');
-      url.value = `http://${location.hostname}:${icecastPublicPort()}/${d.mount.replace(/^\//, '')}`;
+      url.value = `http://${icecastExternalHost()}:${icecastPublicPort()}/${d.mount.replace(/^\//, '')}`;
     } else {
       status.textContent = '○ not connected';
       status.className = 'pill warn';
@@ -294,6 +306,13 @@ async function loadConfig() {
   $('shuffle').checked = cfg.playback.shuffle;
   state.activeGenres = new Set(cfg.playback.genres || []);
   state.activeLanguages = new Set(cfg.playback.languages || []);
+
+  // Icecast Streaming card: port + public host (the external URL host).
+  const ice = cfg.icecast || {};
+  const portInput = $('icecast-port');
+  if (portInput) portInput.value = ice.public_port ?? ice.port ?? 8008;
+  const hostInput = $('icecast-public-host');
+  if (hostInput) hostInput.value = ice.public_host || '';
 
   const voices = await api('/api/dj/voices');
   const profiles = (voices.profiles || []).filter((p) => p.lang === 'english');
@@ -519,6 +538,53 @@ function wire() {
       navigator.clipboard?.writeText(u.value);
       $('icecast-copy').textContent = 'Copied!';
       setTimeout(() => { $('icecast-copy').textContent = 'Copy'; }, 1500);
+    }
+  };
+
+  // Streaming card: apply Icecast port / public host, restarting Icecast when
+  // the configuration actually changed. The port drives both the internal
+  // listen port and the external (published) port in the single-container
+  // deployment; changing it requires the Docker port mapping to match too
+  // (see .env ICECAST_PORT). The public host just changes the displayed URL.
+  $('icecast-apply').onclick = async () => {
+    const statusEl = $('icecast-apply-status');
+    const port = parseInt($('icecast-port').value, 10);
+    const host = ($('icecast-public-host').value || '').trim();
+    if (!port || port < 1 || port > 65535) {
+      statusEl.textContent = 'invalid port';
+      statusEl.className = 'meta warn';
+      return;
+    }
+    statusEl.textContent = 'saving…';
+    statusEl.className = 'meta dim';
+    try {
+      const before = await api('/api/config');
+      const patch = {
+        icecast: {
+          port, public_port: port, public_host: host,
+        },
+      };
+      const saved = await api('/api/config', {
+        method: 'PUT', body: JSON.stringify(patch),
+      });
+      // Restart Icecast only if a restart-affecting value changed (port), or
+      // if it was just enabled. public_host alone needs no restart.
+      const beforePort = before.icecast?.port ?? before.icecast?.public_port;
+      const afterPort = saved.icecast?.port ?? saved.icecast?.public_port;
+      const beforeEnabled = !!before.icecast?.enabled;
+      const afterEnabled = !!saved.icecast?.enabled;
+      if (afterPort !== beforePort || (afterEnabled && !beforeEnabled)) {
+        statusEl.textContent = 'restarting Icecast…';
+        await api('/api/icecast/restart', { method: 'POST' });
+        statusEl.textContent = 'restarted ✓';
+      } else {
+        statusEl.textContent = 'saved ✓';
+      }
+      statusEl.className = 'meta dim';
+      loadIcecastStatus();
+    } catch (e) {
+      statusEl.textContent = `error: ${e.message}`;
+      statusEl.className = 'meta warn';
     }
   };
 

@@ -31,13 +31,15 @@ services:
       VDJ_LOG_LEVEL: "${VDJ_LOG_LEVEL:-info}"
       # Icecast is managed by the app (bundled). These tell the app's pusher +
       # server where to listen/render. The web UI can override both of these at
-      # runtime; a saved value in data/config.json wins.
-      VDJ_ICECAST_ENABLED: "1"
+      # runtime; a saved value in data/config.json wins. The published host port
+      # below MUST match ICECAST_PORT so external players reach Icecast.
+      VDJ_ICECAST_ENABLED: "${VDJ_ICECAST_ENABLED:-1}"
       VDJ_ICECAST_HOST: "127.0.0.1"
-      VDJ_ICECAST_PORT: "8008"
-      VDJ_ICECAST_MOUNT: "virtualdj"
+      VDJ_ICECAST_PORT: "${ICECAST_PORT:-8008}"
+      VDJ_ICECAST_MOUNT: "${ICECAST_MOUNT:-virtualdj}"
       VDJ_ICECAST_SOURCE_PASSWORD: "${ICECAST_SOURCE_PASSWORD:-hackme}"
       VDJ_ICECAST_PUBLIC_PORT: "${ICECAST_PORT:-8008}"
+      VDJ_ICECAST_PUBLIC_HOST: "${ICECAST_PUBLIC_HOST:-}"
       # Optional: point the DJ at an Ollama instance. Uncomment (and set in
       # .env) to reach Ollama on the Docker host. Inside the container,
       # "host-gateway" resolves to the host's loopback. The web UI can override
@@ -47,8 +49,12 @@ services:
     ports:
       # Web UI / app API.
       - "${HTTP_PORT:-8420}:8420"
-      # Icecast mount for external players (Winamp / VLC / Sonos).
-      - "${ICECAST_PORT:-8008}:8008"
+      # Icecast mount for external players (Winamp / VLC / Sonos). BOTH sides of
+      # the mapping use ICECAST_PORT so the host port the players hit equals the
+      # port Icecast actually listens on inside the container. Change ICECAST_PORT
+      # in .env to move off 8008 (e.g. to avoid a conflict) and it updates the
+      # listen port AND the published port together.
+      - "${ICECAST_PORT:-8008}:${ICECAST_PORT:-8008}"
     volumes:
       # Persistent app state (config, DB, voices, cache).
       - virtual-dj-data:/data

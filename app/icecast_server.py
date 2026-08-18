@@ -79,6 +79,28 @@ class ManagedIcecast:
             self._thread.join(timeout=5)
             self._thread = None
 
+    def restart(self) -> None:
+        """Restart the Icecast daemon with the current (possibly changed) config.
+
+        Kills the running daemon; the supervise loop notices the port stopped
+        listening and re-renders icecast.xml (picking up a new port/mount/...) and
+        rebinds. No-op if the server isn't currently up (the supervisor will
+        launch it from the latest config on next start()).
+        """
+        with self._lock:
+            pid = self._daemon_pid
+            self._daemon_pid = None
+        if pid and self._pid_alive(pid):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+            # Wait briefly for the port to free so the relaunch can bind it.
+            for _ in range(30):
+                if not self._pid_alive(pid):
+                    break
+                time.sleep(0.1)
+
     # --- rendering ---------------------------------------------------------
 
     def render_config(self) -> str:
