@@ -511,7 +511,7 @@ function wire() {
   $('listen').onclick = toggleListen;
   $('volume').oninput = (e) => { if (audio) audio.volume = e.target.value / 100; };
   // stream-link is filled in by renderState() from live state (Icecast-aware).
-  link = $('stream-link');
+  const link = $('stream-link');
   link.href = `${location.origin}/stream.mp3`;
   $('icecast-copy').onclick = () => {
     const u = $('icecast-url');
@@ -802,9 +802,16 @@ function wire() {
 async function init() {
   wire();
   await loadConfig();
-  await Promise.all([loadGenres(), loadLanguages(), loadTracks(''), loadQueue(),
-                     loadPresets(), loadHistory(), loadHealth(), loadPrograms(),
-                     loadLLMConfig()]);
+  // Run the data loaders concurrently, but don't let one failing loader
+  // abort the rest (and thereby the WebSocket + live status). Each loader
+  // already swallows its own errors where appropriate; we add a safety net so
+  // a single bad response can never leave the UI stuck on "connecting…".
+  const safe = (p) => Promise.resolve(p).catch((e) => console.warn('loader failed:', e));
+  await Promise.all([
+    safe(loadGenres()), safe(loadLanguages()), safe(loadTracks('')),
+    safe(loadQueue()), safe(loadPresets()), safe(loadHistory()),
+    safe(loadHealth()), safe(loadPrograms()), safe(loadLLMConfig()),
+  ]);
   pollScan();
   connectWS();
   loadIcecastStatus();
