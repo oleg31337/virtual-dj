@@ -83,12 +83,32 @@ class IcecastPusher:
         source = _PUSH_SOURCE_URL.format(port=app_port)
         # Icecast requires the source to declare a Content-Type. ffmpeg's
         # icecast muxer sends audio/mpeg for mp3; we make it explicit.
+        #
+        # The broadcaster already emits a clean, constant-bitrate MP3 stream
+        # (CBR, no Xing/ID3 frames), so we relay it byte-for-byte with
+        # "-c:a copy" -- there is NO reason to re-encode it here. Re-encoding
+        # (the old "-c:a libmp3lame -b:a 128k") plus the "-re" read throttle
+        # was the root cause of Icecast timing out the source ("socket
+        # timeout") roughly every minute: the encode stalled ffmpeg's output to
+        # Icecast long enough to trip Icecast's source-timeout, Icecast dropped
+        # the source, every listener was disconnected (Winamp "Buffer 0%", 0
+        # listeners), and the pusher had to reconnect.
+        #
+        # Without "-re", ffmpeg reads /stream.mp3 as fast as it is produced and
+        # buffers it; its own buffer smooths the tiny (sub-second) gaps at track
+        # boundaries so the Icecast socket is never idle long enough to time out.
+        # The reconnect flags make the input side self-healing if /stream.mp3
+        # ever hiccups.
         return [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
-            # Read the live feed at its native (real-time) rate.
-            "-re",
+            # Self-heal if the app's /stream.mp3 feed ever stalls/drops.
+            "-reconnect", "1",
+            "-reconnect_at_eof", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "2",
             "-i", source,
-            "-c:a", "libmp3lame", "-b:a", f"{bitrate}k",
+            # Relay the already-encoded MP3 without re-encoding.
+            "-c:a", "copy",
             "-content_type", "audio/mpeg",
             "-f", "mp3",
             f"icecast://source:{password}@{host}:{port}/{mount}",
