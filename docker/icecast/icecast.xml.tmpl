@@ -5,8 +5,8 @@
      icecast2 default (which accepts MP3 sources); the <security><changeowner>
      block lets icecast2 -b drop to nobody so MP3 mounts serve correctly. -->
 <icecast>
-  <location>Earth</location>
-  <admin>icemaster@localhost</admin>
+  <location>Virtual DJ</location>
+  <admin>dj@virtual-dj.local</admin>
 
   <limits>
     <clients>100</clients>
@@ -42,6 +42,7 @@
   <paths>
     <basedir>/usr/share/icecast2</basedir>
     <logdir>/tmp/icecast</logdir>
+    <pidfile>/tmp/icecast/icecast.pid</pidfile>
     <webroot>/usr/share/icecast2/web</webroot>
     <adminroot>/usr/share/icecast2/admin</adminroot>
   </paths>
