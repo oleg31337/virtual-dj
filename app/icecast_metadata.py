@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import threading
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -98,9 +99,33 @@ def push_now_playing(kind: str, meta: dict[str, Any]) -> None:
 
     ``kind`` is "track" or "dj"; for both we surface the *track's* title (the
     DJ break is an intro to that track). Idle / silence clears the metadata.
+
+    This function performs a network call to Icecast's admin API and is meant
+    to be run off the broadcast thread (see ``push_async``) so a slow/unreachable
+    Icecast can never stall the audio stream.
     """
     if kind in ("track", "dj"):
         update_metadata(build_title(meta))
     else:
         # idle / unknown: clear so players don't keep showing the last song
         update_metadata(None)
+
+
+def push_async(kind: str, meta: dict[str, Any]) -> None:
+    """Fire-and-forget variant of ``push_now_playing``.
+
+    Runs the Icecast admin call on a short-lived daemon thread so it can never
+    block the broadcaster's audio-critical path. Failures are logged at debug
+    level and otherwise ignored.
+    """
+    threading.Thread(
+        target=_push_now_playing_safe, args=(kind, meta),
+        name="vdj-icecast-meta", daemon=True,
+    ).start()
+
+
+def _push_now_playing_safe(kind: str, meta: dict[str, Any]) -> None:
+    try:
+        push_now_playing(kind, meta)
+    except Exception:  # noqa: BLE001 - metadata is non-critical
+        log.debug("icecast metadata push failed", exc_info=True)

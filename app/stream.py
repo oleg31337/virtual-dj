@@ -283,12 +283,10 @@ class Broadcaster:
             self._last_dj_text = meta["dj_text"]
             self._dj_for_track_id = meta["track"].get("id")
         self._notify_change()
-        # Push the now-playing title to Icecast (best-effort; never raises
-        # into the broadcast loop). Winamp/VLC/Sonos read it from the mount.
-        try:
-            icecast_metadata.push_now_playing(kind, meta)
-        except Exception:  # noqa: BLE001 - metadata is non-critical
-            log.debug("icecast metadata push failed", exc_info=True)
+        # Push the now-playing title to Icecast off-thread (best-effort): a
+        # slow/unreachable Icecast admin API must never stall the broadcast
+        # loop, which would underrun the pusher and can drop Winamp listeners.
+        icecast_metadata.push_async(kind, meta)
 
         bps = self._bytes_per_second()
         sent = 0
@@ -359,11 +357,8 @@ class Broadcaster:
         }
         self._notify_change()
         # Clear Icecast "now playing" while idle so players don't keep showing
-        # the last song over silence.
-        try:
-            icecast_metadata.push_now_playing("idle", {})
-        except Exception:  # noqa: BLE001
-            log.debug("icecast metadata push failed (idle)", exc_info=True)
+        # the last song over silence. Off-thread so it can't stall the loop.
+        icecast_metadata.push_async("idle", {})
         try:
             proc = subprocess.Popen(args, stdout=subprocess.PIPE,
                                     stderr=subprocess.DEVNULL, bufsize=0)
