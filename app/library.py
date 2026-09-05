@@ -301,9 +301,11 @@ def scan_library(music_dir: str | None = None, full: bool = False,
     """Index every audio file under ``music_dir``.
 
     Files whose size and mtime are unchanged are skipped unless ``full``.
-    Tracks that vanished from disk are flagged ``missing`` rather than deleted,
-    so history and presets keep resolving. Tracks that cannot be identified
-    well enough to announce are flagged ``excluded`` with a reason.
+    Tracks that vanished from disk are removed from the database (along with
+    their history), so the library always mirrors the folder on disk; new
+    files are added. Tracks that cannot be identified well enough to announce
+    are flagged ``excluded`` with a reason (they stay for the report but are
+    never playable).
     """
     root = Path(music_dir or config.get("music_dir", "")).expanduser()
     if use_web is None:
@@ -341,7 +343,6 @@ def scan_library(music_dir: str | None = None, full: bool = False,
             for row in conn.execute("SELECT id, path, mtime, size FROM tracks")
         }
         seen: set[str] = set()
-        batch = 0
 
         for path in iter_audio_files(root):
             spath = str(path)
@@ -437,11 +438,14 @@ def scan_library(music_dir: str | None = None, full: bool = False,
                 )
                 STATUS.updated += 1
 
-            batch += 1
-            if batch % 500 == 0:
-                conn.commit()
-
-        conn.commit()
+            # Commit per file: read_metadata (web/AI lookups) runs before the
+            # INSERT/UPDATE above, so committing now means the write lock is
+            # held only for the microseconds of one statement -- never across
+            # the slow lookups of the next file. (A scan commits every 500
+            # files used to hold the SQLite write lock for minutes, which
+            # blocked the app's other writers -- play history, a second
+            # scan -- with "database is locked".)
+            conn.commit()
 
         if STATUS.total_seen == 0:
             msg = (
@@ -453,14 +457,40 @@ def scan_library(music_dir: str | None = None, full: bool = False,
                 STATUS.error = msg
 
         gone = [p for p in existing if p not in seen and p.startswith(str(root))]
-        for chunk_start in range(0, len(gone), 500):
-            chunk = gone[chunk_start:chunk_start + 500]
-            placeholders = ",".join("?" * len(chunk))
-            conn.execute(
-                f"UPDATE tracks SET missing=1 WHERE path IN ({placeholders})", chunk
+        if gone and STATUS.total_seen == 0:
+            # The folder is empty / not mounted (0 files seen). Deleting every
+            # previously-indexed track here would wipe the library on a
+            # transient mount failure -- refuse and warn instead.
+            log.warning(
+                "scan saw 0 files under %s but %d tracks are indexed; "
+                "skipping removal (is the folder mounted?)",
+                root, len(gone),
             )
+            with STATUS.lock:
+                STATUS.error = (
+                    f"0 files found in {root} but {len(gone)} tracks are "
+                    "indexed — nothing was removed. Check the mount, then "
+                    "rescan."
+                )
+            gone = []
+        if gone:
+            # Remove vanished files from the library entirely (mirroring the
+            # folder on disk), along with their play-history rows. dj_scripts
+            # and enrichment rows cascade via their FOREIGN KEY ... ON DELETE
+            # CASCADE when the track row is deleted.
+            for chunk_start in range(0, len(gone), 500):
+                chunk = gone[chunk_start:chunk_start + 500]
+                ids = [existing[p][0] for p in chunk]
+                placeholders = ",".join("?" * len(chunk))
+                conn.execute(
+                    f"DELETE FROM tracks WHERE path IN ({placeholders})", chunk
+                )
+                conn.execute(
+                    "DELETE FROM history WHERE track_id IN ("
+                    + ",".join("?" * len(ids)) + ")", ids
+                )
+                conn.commit()
         STATUS.removed = len(gone)
-        conn.commit()
         log.info(
             "scan complete: %d seen, %d indexed (%d tags, %d path, %d web), "
             "%d excluded %s",

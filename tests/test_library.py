@@ -97,15 +97,20 @@ def test_new_file_is_picked_up_on_rescan(music_dir, has_ffmpeg):
     assert library.library_stats()["total"] == 4
 
 
-def test_deleted_file_is_flagged_missing_not_dropped(music_dir, has_ffmpeg):
+def test_deleted_file_is_removed_from_library_on_rescan(music_dir, has_ffmpeg):
     library.scan_library(str(music_dir))
-    (music_dir / "a.mp3").unlink()
+    deleted = music_dir / "a.mp3"
+    deleted.unlink()
     result = library.scan_library(str(music_dir))
     assert result["removed"] == 1
-    # Row survives (history keeps resolving) but is excluded from queries.
-    assert library.library_stats()["total"] == 3
-    assert library.library_stats()["missing"] == 1
+    # The vanished file's row is dropped so the library mirrors the folder on
+    # disk: total drops to 2 and the deleted track no longer appears anywhere.
+    assert library.library_stats()["total"] == 2
     assert not any(t["title"] == "Alpha" for t in library.query_tracks())
+    assert db.connect().execute(
+        "SELECT COUNT(*) AS n FROM tracks WHERE path = ?",
+        (str(deleted),),
+    ).fetchone()["n"] == 0
 
 
 def test_genre_filter(music_dir, has_ffmpeg):
