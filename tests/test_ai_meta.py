@@ -56,7 +56,7 @@ def test_infer_genre_caches(monkeypatch):
 def test_recover_names_splits_and_romanises(monkeypatch):
     payload = (
         '{"artist": "Basta", "title": "Sansara", "album": null, '
-        '"language": "cyrillic", "confident": true}'
+        '"confident": true}'
     )
     monkeypatch.setattr(ai_meta, "_ollama_chat", lambda *a, **k: payload)
     res = ai_meta.recover_names("01bastasansara", None, path="/x/01bastasansara.mp3")

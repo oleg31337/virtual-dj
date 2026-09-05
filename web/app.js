@@ -15,7 +15,6 @@ const state = {
   config: null,
   selected: new Set(),
   activeGenres: new Set(),
-  activeLanguages: new Set(),
   tracks: [],
   playing: false,
 };
@@ -54,7 +53,7 @@ function renderState(s) {
   $('np-kind').textContent = (s.kind || 'idle').toUpperCase();
   const prog = s.program;
   if (prog && prog.label) {
-    const word = { genre: 'genre', artist: 'artist', decade: 'era', language: 'language' }[prog.kind] || 'set';
+    const word = { genre: 'genre', artist: 'artist', decade: 'era' }[prog.kind] || 'set';
     $('np-program').textContent = `ON AIR · ${prog.label} (${word})`;
     $('np-program').style.display = '';
   } else {
@@ -172,7 +171,6 @@ async function loadTracks(search) {
   const q = new URLSearchParams({ limit: '300' });
   if (search) q.set('search', search);
   if (state.activeGenres.size) q.set('genre', [...state.activeGenres].join(','));
-  if (state.activeLanguages.size) q.set('language', [...state.activeLanguages].join(','));
   state.tracks = await api(`/api/library/tracks?${q}`);
   const box = $('tracks');
   box.innerHTML = '';
@@ -206,23 +204,6 @@ async function loadGenres() {
     chip.onclick = () => {
       if (state.activeGenres.has(g.genre)) state.activeGenres.delete(g.genre);
       else state.activeGenres.add(g.genre);
-      chip.classList.toggle('on');
-    };
-    box.appendChild(chip);
-  }
-}
-
-async function loadLanguages() {
-  const languages = await api('/api/library/languages');
-  const box = $('languages');
-  box.innerHTML = '';
-  for (const l of languages.slice(0, 50)) {
-    const chip = document.createElement('div');
-    chip.className = 'chip' + (state.activeLanguages.has(l.language) ? ' on' : '');
-    chip.textContent = `${l.language} (${l.n})`;
-    chip.onclick = () => {
-      if (state.activeLanguages.has(l.language)) state.activeLanguages.delete(l.language);
-      else state.activeLanguages.add(l.language);
       chip.classList.toggle('on');
     };
     box.appendChild(chip);
@@ -305,7 +286,6 @@ async function loadConfig() {
   $('enrich-enabled').checked = cfg.enrich.enabled;
   $('shuffle').checked = cfg.playback.shuffle;
   state.activeGenres = new Set(cfg.playback.genres || []);
-  state.activeLanguages = new Set(cfg.playback.languages || []);
 
   // Icecast Streaming card: port + public host (the external URL host).
   const ice = cfg.icecast || {};
@@ -315,25 +295,16 @@ async function loadConfig() {
   if (hostInput) hostInput.value = ice.public_host || '';
 
   const voices = await api('/api/dj/voices');
-  const profiles = (voices.profiles || []).filter((p) => p.lang === 'english');
+  const profiles = voices.profiles || [];
   $('dj-voice').innerHTML = profiles.length
     ? profiles.map((p) =>
-        `<option value="${esc(p.id)}"${p.id === voices.current ? ' selected' : ''}>${esc(p.name)} (${esc(p.gender)})${p.installed ? '' : ' — not installed'}</option>`).join('')
+        `<option value="${esc(p.id)}"${p.id === voices.current ? ' selected' : ''}>${esc(p.name)} (${esc(p.gender)})${p.lang === 'russian' ? ' · Russian' : ''}${p.installed ? '' : ' — not installed'}</option>`).join('')
     : (voices.voices.length
         ? voices.voices.map((v) => `<option${v === voices.current ? ' selected' : ''}>${esc(v)}</option>`).join('')
         : '<option>no voices installed</option>');
   // Show the intonation note for the selected voice.
   const sel = profiles.find((p) => p.id === $('dj-voice').value) || profiles[0];
   $('dj-voice-note').textContent = sel && sel.note ? sel.note : '';
-
-  // Russian voice picker (only Russian-language tracks use it).
-  const ru = voices.russian_profiles || [];
-  $('dj-voice-ru').innerHTML = ru.length
-    ? ru.map((p) =>
-        `<option value="${esc(p.id)}"${p.id === voices.current_russian ? ' selected' : ''}>${esc(p.name)} (${esc(p.gender)})${p.installed ? '' : ' — not installed'}</option>`).join('')
-    : '<option value="">no Russian voices installed</option>';
-  const rusel = ru.find((p) => p.id === $('dj-voice-ru').value) || ru[0];
-  $('dj-voice-ru-note').textContent = rusel && rusel.note ? rusel.note : '';
 
   // Program grouping settings.
   $('program-enabled').checked = !!(cfg.playback?.program?.enabled ?? true);
@@ -457,7 +428,7 @@ async function loadPrograms() {
   try {
     const p = await api('/api/programs');
     $('program-strategy').textContent =
-      `(${{ genre: 'by genre', artist: 'by artist', decade: 'by decade', language: 'by language' }[p.strategy] || p.strategy})`;
+      `(${{ genre: 'by genre', artist: 'by artist', decade: 'by decade' }[p.strategy] || p.strategy})`;
     const themes = (p.themes || []).slice(0, 12);
     if (!themes.length) {
       $('programs').innerHTML = '<div class="dim">No themes available yet.</div>';
@@ -465,13 +436,10 @@ async function loadPrograms() {
     }
     $('programs').innerHTML = themes.map((t) => {
       const kind = p.strategy === 'artist' ? 'artist'
-                 : p.strategy === 'decade' ? 'decade'
-                 : p.strategy === 'language' ? 'language' : 'genre';
+                 : p.strategy === 'decade' ? 'decade' : 'genre';
       let label;
       if (p.strategy === 'decade') {
         label = `${t.decade}s`;
-      } else if (p.strategy === 'language') {
-        label = t.language || '?';
       } else {
         label = t.genre || t.artist || t.label || '?';
       }
@@ -520,7 +488,7 @@ async function pollScan() {
       ? `last scan: +${s.added} new, ${s.updated} updated`
       : 'idle';
     el.className = 'meta dim';
-    loadGenres(); loadLanguages(); loadHealth(); loadLibraryStats();
+    loadGenres(); loadHealth(); loadLibraryStats();
   }
 }
 
@@ -678,17 +646,6 @@ function wire() {
     loadTracks($('search').value.trim()); loadQueue();
   };
 
-  $('apply-language-filters').onclick = async () => {
-    await api('/api/config', {
-      method: 'PUT',
-      body: JSON.stringify({
-        playback: { languages: [...state.activeLanguages] },
-      }),
-    });
-    await api('/api/queue/clear', { method: 'POST' });
-    loadTracks($('search').value.trim()); loadQueue();
-  };
-
   $('dj-speed').oninput = (e) =>
     ($('speed-val').textContent = (e.target.value / 100).toFixed(2));
 
@@ -697,7 +654,7 @@ function wire() {
   // in the UI. Activation (making it the DJ's active voice) is intentionally a
   // UI-only change -- the user must click "Save DJ" to persist it, same as any
   // other DJ setting.
-  const selectVoice = async (selectId, noteId, langKey) => {
+  const selectVoice = async (selectId, noteId) => {
     const voice = $(selectId).value;
     const note = $(noteId);
     const data = await api('/api/dj/voices');
@@ -734,27 +691,30 @@ function wire() {
     // (Not persisted -- "Save DJ" applies it.)
     await loadConfig();
     $(selectId).value = voice;
-    const profiles = (langKey === 'russian' ? data.russian_profiles : data.profiles) || [];
+    const profiles = data.profiles || [];
     const sel = profiles.find((p) => p.id === voice);
     if (sel && sel.note) $(noteId).textContent = sel.note;
   };
-  $('dj-voice').onchange = () => selectVoice('dj-voice', 'dj-voice-note', 'english');
-  $('dj-voice-ru').onchange = () => selectVoice('dj-voice-ru', 'dj-voice-ru-note', 'russian');
-  $('test-voice-ru').onclick = async () => {
-    const voice = $('dj-voice-ru').value;
+  $('dj-voice').onchange = () => selectVoice('dj-voice', 'dj-voice-note');
+  $('test-voice').onclick = async () => {
+    const voice = $('dj-voice').value;
     const speed = Number($('dj-speed').value) / 100;
     const noise = Number($('dj-noise').value) / 100;
-    const btn = $('test-voice-ru');
+    const btn = $('test-voice');
     btn.disabled = true;
     btn.textContent = '⏳ synthesizing…';
     try {
+      // Sample text matches the selected voice's language (Russian voices
+      // demonstrate with a Russian line, English voices with an English one).
+      const profiles = (await api('/api/dj/voices')).profiles || [];
+      const sel = profiles.find((p) => p.id === voice);
+      const russian = !!(sel && sel.lang === 'russian');
+      const text = russian
+        ? 'В эфире Виртуальный DJ. Сейчас прозвучит трек, который вы давно ждали.'
+        : 'Hey listeners, this is your Virtual DJ — let\'s keep the vibes flowing through the night.';
       const r = await api('/api/dj/preview', {
         method: 'POST',
-        body: JSON.stringify({
-          text: 'В эфире Виртуальный DJ. Сейчас прозвучит трек, '
-                + 'который вы давно ждали.',
-          voice, language: 'russian', speed, noise_scale: noise,
-        }),
+        body: JSON.stringify({ text, voice, speed, noise_scale: noise }),
       });
       if (r && r.audio_url) {
         const a = $('preview-audio');
@@ -766,10 +726,9 @@ function wire() {
       alert('Voice test failed: ' + e.message);
     } finally {
       btn.disabled = false;
-      btn.textContent = '▶ Test Russian voice';
+      btn.textContent = '▶ Test this voice';
     }
   };
-
   $('save-program').onclick = async () => {
     await api('/api/config', {
       method: 'PUT',
@@ -805,7 +764,6 @@ function wire() {
           noise_scale: Number($('dj-noise').value) / 100,
           voice: $('dj-voice').value,
           style: $('dj-style').value.trim(),
-          russian_voice: $('dj-voice-ru').value || undefined,
         },
         enrich: { enabled: $('enrich-enabled').checked },
       }),
@@ -874,7 +832,7 @@ async function init() {
   // a single bad response can never leave the UI stuck on "connecting…".
   const safe = (p) => Promise.resolve(p).catch((e) => console.warn('loader failed:', e));
   await Promise.all([
-    safe(loadGenres()), safe(loadLanguages()), safe(loadTracks('')),
+    safe(loadGenres()), safe(loadTracks('')),
     safe(loadQueue()), safe(loadPresets()), safe(loadHistory()),
     safe(loadHealth()), safe(loadPrograms()), safe(loadLLMConfig()),
   ]);

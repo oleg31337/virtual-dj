@@ -1,7 +1,6 @@
-"""Tests for Russian-language DJ voice routing and year spelling."""
+"""Tests for voice-driven DJ language: a Russian voice makes the DJ speak Russian."""
 
 import sys
-import subprocess as _sp
 sys.path.insert(0, ".")
 
 from app import dj, config
@@ -20,7 +19,6 @@ def _fake_run_factory(calls: dict):
             out = cmd[-1]
             with open(out, "wb") as f:
                 f.write(b"ID3 fake mp3")
-        # capture stdin text for the piper invocation if present
 
         class R:
             returncode = 0
@@ -29,10 +27,9 @@ def _fake_run_factory(calls: dict):
     return fake_run
 
 
-def _patch_synth(monkeypatch, calls, russian=True):
-    voice = "ru_RU-irina-medium" if russian else "en_US-amy-medium"
+def _patch_synth(monkeypatch, calls):
     monkeypatch.setattr(dj, "voice_model_path",
-                        lambda v=None: config.VOICES_DIR / f"{voice}.onnx")
+                        lambda v=None: config.VOICES_DIR / f"{v}.onnx")
     monkeypatch.setattr(dj, "_cache_path",
                         lambda *a, **k: config.DJ_CACHE_DIR / "x.mp3")
     monkeypatch.setattr(dj, "piper_binary", lambda: "piper")
@@ -44,20 +41,28 @@ def _patch_synth(monkeypatch, calls, russian=True):
 def test_russian_dates_left_as_digits():
     # Russian voice reads year numerals natively — years/dates must NOT be
     # converted to words on the Russian path. (English path still spells them.)
-    assert dj.synthesize is not None  # smoke; real check below in caller
-    # _clean_script leaves digits intact for Russian.
     assert "1984" in dj._clean_script("в 1984 году", 3, language="russian")
     # And the English path does spell them out.
     assert "nineteen eighty-four" in dj._clean_script(
         "in 1984", 3, language="english")
 
 
-def test_synthesize_routes_russian_voice_and_skips_translit(monkeypatch):
-    calls: dict = {}
-    _patch_synth(monkeypatch, calls, russian=True)
-    monkeypatch.setitem(config.DEFAULTS["dj"], "russian_voice", "ru_RU-irina-medium")
+def test_voice_language():
+    assert dj.voice_language("ru_RU-irina-medium") == "russian"
+    assert dj.voice_language("ru_RU-denis-medium") == "russian"
+    assert dj.voice_language("en_US-amy-medium") == "english"
+    assert dj.voice_language("en_GB-alan-medium") == "english"
+    assert dj.voice_language(None) == "english"
+    # Un-curated but installed Russian voice is still Russian.
+    assert dj.voice_language("ru_RU-someone-medium") == "russian"
 
-    out = dj.synthesize("Песня Агаты Кристи, 1984 года", language="russian")
+
+def test_synthesize_russian_voice_skips_translit_and_spelling(monkeypatch):
+    calls: dict = {}
+    _patch_synth(monkeypatch, calls)
+
+    out = dj.synthesize("Песня Агаты Кристи, 1984 года",
+                        voice="ru_RU-irina-medium")
     assert out is not None
     # Russian voice model is selected for the piper call.
     assert "ru_RU-irina-medium" in calls["cmd"][calls["cmd"].index("-m") + 1]
@@ -66,18 +71,28 @@ def test_synthesize_routes_russian_voice_and_skips_translit(monkeypatch):
     assert "Agata" not in calls["text"]
     # Year left as digits (Russian voice reads them natively), NOT spelled out.
     assert "1984" in calls["text"]
-    assert "тысяча девятьсот восемьдесят четыре" not in calls["text"]
 
 
-def test_synthesize_english_path_transliterates_russian_names(monkeypatch):
+def test_synthesize_english_voice_transliterates_russian_names(monkeypatch):
     calls: dict = {}
-    _patch_synth(monkeypatch, calls, russian=False)
+    _patch_synth(monkeypatch, calls)
 
-    out = dj.synthesize("Агата Кристи", language="english")
+    out = dj.synthesize("Агата Кристи", voice="en_US-amy-medium")
     assert out is not None
     # English voice path: transliteration applied, no raw Cyrillic.
     assert "Agata Kristi" in calls["text"]
     assert "Агата" not in calls["text"]
+
+
+def test_synthesize_defaults_to_configured_voice(monkeypatch):
+    calls: dict = {}
+    _patch_synth(monkeypatch, calls)
+    monkeypatch.setitem(config.DEFAULTS["dj"], "voice", "ru_RU-irina-medium")
+
+    out = dj.synthesize("Привет, слушатели!")
+    assert out is not None
+    assert "ru_RU-irina-medium" in calls["cmd"][calls["cmd"].index("-m") + 1]
+    assert "Привет" in calls["text"]  # no transliteration for RU voice
 
 
 def test_voice_profiles_split_by_language():
@@ -92,7 +107,7 @@ def test_voice_profiles_split_by_language():
 
 def test_fallback_script_russian():
     track = {"title": "Котики-наркотики", "artist": "Мёртвые Дельфины",
-             "year": "2007", "language": "russian"}
+             "year": "2007"}
     out = dj.fallback_script(track, language="russian")
     assert "Котики-наркотики" in out
     # Year left as digits (Russian voice reads them natively), not spelled out.

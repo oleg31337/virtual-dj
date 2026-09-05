@@ -39,12 +39,11 @@ DEFAULTS: dict[str, Any] = {
         "every_n_tracks": 3,
         "max_sentences": 3,
         "style": "warm, witty late-night radio host",
+        # The DJ voice. Any curated voice (English or Russian) can be chosen;
+        # the voice's language decides the DJ's language (a Russian voice makes
+        # the DJ speak Russian). All other dj.* settings (speed, noise_scale,
+        # gain, sentence counts, cadence) apply to the chosen voice.
         "voice": "en_US-amy-medium",
-        # Voice used for RUSSIAN-language tracks. The DJ speaks Russian natively
-        # for Russian songs (no transliteration), and English for everything
-        # else. All other dj.* settings (speed, noise_scale, gain, sentence
-        # counts, cadence) apply to BOTH voices.
-        "russian_voice": "ru_RU-irina-medium",
         "speed": 1.0,
         # Piper prosody: noise_scale controls expressive variation. Lower is
         # more monotone/robotic; higher is more lively/wobbly. The real lever

@@ -92,10 +92,13 @@ class Scheduler:
         prog = playback.get("program", {}) or {}
         size = max(2, int(prog.get("size", 6)))
         strategy = str(prog.get("strategy", "genre"))
+        # The "language" strategy was removed (language detection is gone);
+        # coerce any leftover saved value so it degrades to genre grouping.
+        if strategy not in ("genre", "artist", "decade"):
+            strategy = "genre"
         search = playback.get("search", "") or ""
         genres_filter = playback.get("genres") or None
         artists_filter = playback.get("artists") or None
-        languages_filter = playback.get("languages") or None
 
         themes = library.program_themes(strategy)
         themes = [t for t in themes if t.get("n", 0) >= size]
@@ -120,8 +123,6 @@ class Scheduler:
                 kwargs = {"genres": [theme["genre"]], "search": search}
             elif strategy == "artist":
                 kwargs = {"artists": [theme["artist"]], "search": search}
-            elif strategy == "language":
-                kwargs = {"languages": [theme["language"]], "search": search}
             else:  # decade
                 kwargs = {"decade": int(theme["decade"]), "search": search}
             # Apply global genre/artist filters to the track pool for this
@@ -131,15 +132,13 @@ class Scheduler:
                 kwargs["genres"] = (kwargs.get("genres") or []) + list(genres_filter)
             if artists_filter:
                 kwargs["artists"] = (kwargs.get("artists") or []) + list(artists_filter)
-            if languages_filter:
-                kwargs["languages"] = (kwargs.get("languages") or []) + list(languages_filter)
             tracks = library.query_tracks(limit=size, random_order=True, **kwargs)
             if len(tracks) < 2:
                 continue
             program = {
                 "kind": strategy,
                 "label": theme.get("genre") or theme.get("artist")
-                or theme.get("language") or f"{theme['decade']}s",
+                or f"{theme['decade']}s",
             }
             first = True
             for track in tracks:
@@ -177,7 +176,6 @@ class Scheduler:
             search=playback.get("search", "") or "",
             genres=playback.get("genres") or None,
             artists=playback.get("artists") or None,
-            languages=playback.get("languages") or None,
             limit=count,
             random_order=bool(playback.get("shuffle", True)),
         )

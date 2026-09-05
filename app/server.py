@@ -236,6 +236,8 @@ def api_health():
 def api_programs():
     """Candidate themes for program grouping (genres/artists/decades)."""
     strategy = str(config.get("playback.program.strategy", "genre"))
+    if strategy not in ("genre", "artist", "decade"):
+        strategy = "genre"  # "language" was removed; degrade to genre.
     return {"strategy": strategy, "themes": library.program_themes(strategy)}
 
 
@@ -352,11 +354,6 @@ def api_genres():
     return library.list_genres()
 
 
-@app.get("/api/library/languages")
-def api_languages():
-    return library.list_languages()
-
-
 @app.get("/api/library/artists")
 def api_artists(limit: int = 300):
     return library.list_artists(limit)
@@ -364,12 +361,11 @@ def api_artists(limit: int = 300):
 
 @app.get("/api/library/tracks")
 def api_tracks(search: str = "", genre: str = "", artist: str = "",
-               language: str = "", limit: int = 200, offset: int = 0):
+               limit: int = 200, offset: int = 0):
     return library.query_tracks(
         search=search,
         genres=[g for g in genre.split(",") if g] or None,
         artists=[a for a in artist.split(",") if a] or None,
-        languages=[l for l in language.split(",") if l] or None,
         limit=limit, offset=offset,
     )
 
@@ -507,15 +503,13 @@ def api_dj_voices():
     return {
         "voices": dj.available_voices(),
         "profiles": dj.voice_profiles(),
-        "russian_profiles": dj.voice_profiles("russian"),
         "current": config.get("dj.voice"),
-        "current_russian": config.get("dj.russian_voice"),
     }
 
 
 class VoiceDownloadRequest(BaseModel):
     voice: str | None = None
-    # "default" (config voices), "all" (every curated voice), or a list of ids.
+    # "default" (config voice), "all" (every curated voice), or a list of ids.
     voices: list[str] | None = None
 
 
@@ -523,8 +517,8 @@ class VoiceDownloadRequest(BaseModel):
 def api_dj_voices_download(req: VoiceDownloadRequest):
     """Download Piper voice model(s) on demand.
 
-    Without arguments, fetches the two default voices the app needs. Returns
-    the ids that succeeded and any that failed (e.g. no network).
+    Without arguments, fetches the default voice the app needs. Returns the
+    ids that succeeded and any that failed (e.g. no network).
     """
     from . import voices as voice_mgr
 
@@ -533,7 +527,7 @@ def api_dj_voices_download(req: VoiceDownloadRequest):
     elif req.voices:
         targets = list(req.voices)
     else:
-        targets = [config.get("dj.voice"), config.get("dj.russian_voice")]
+        targets = [config.get("dj.voice")]
     targets = [t for t in targets if t]
     done = voice_mgr.download_voices(targets)
     return {
@@ -556,7 +550,6 @@ class PreviewRequest(BaseModel):
     text: str | None = None
     track_id: int | None = None
     voice: str | None = None
-    language: str | None = None
     speed: float | None = None
     noise_scale: float | None = None
 
@@ -574,11 +567,10 @@ def api_dj_preview(req: PreviewRequest):
             track = tracks[0] if tracks else None
         if track is None:
             raise HTTPException(400, "library is empty")
-        text = dj.generate_script(track)
+        text = dj.generate_script(track, voice=req.voice)
     audio = dj.synthesize(
         text,
         voice=req.voice,
-        language=req.language,
         speed=req.speed,
         noise_scale=req.noise_scale,
     )

@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 from app import config, library
-from app import language as lang_mod
 from app.scheduler import Scheduler
-
-LANGUAGES = lang_mod.LANGUAGES
 
 
 def _fresh(music_dir):
@@ -156,97 +153,31 @@ def test_status_reports_counts(music_dir, has_ffmpeg):
     assert sched.status()["tracks_played"] == 1
 
 
-def test_language_strategy_groups_into_language_runs(monkeypatch):
-    # The 4th program strategy groups the queue into per-language runs
-    # (English/French/Spanish/German/Russian). Verify the scheduler's wiring
-    # (kind + label) without depending on the (empty in tests) library DB.
+def test_leftover_language_strategy_degrades_to_genre(monkeypatch):
+    # The "language" program strategy was removed (language detection is gone).
+    # A config that still has strategy:"language" saved must degrade to genre
+    # grouping instead of crashing on a missing dimension.
     config.save_config({"playback": {
         "genres": [], "artists": [], "shuffle": True,
         "program": {"enabled": True, "size": 5, "strategy": "language"}}})
 
-    languages = ["russian", "french", "spanish", "german", "english"]
+    themes_called = []
     monkeypatch.setattr(
         library, "program_themes",
-        lambda strategy: [{"language": l, "n": 20} for l in languages]
-        if strategy == "language" else [],
-    )
-    # Each language query returns two distinct fake tracks so the block is kept.
-    def fake_query(languages=None, search="", limit=200, random_order=False, **kw):
-        if not languages:
-            return []
-        return [
-            {"id": 1, "path": "/x/1.mp3", "title": f"t1-{languages[0]}",
-             "artist": "A", "album": "Al", "genre": "G", "year": "2000",
-             "duration": 10.0},
-            {"id": 2, "path": "/x/2.mp3", "title": f"t2-{languages[0]}",
-             "artist": "A", "album": "Al", "genre": "G", "year": "2000",
-             "duration": 10.0},
-        ]
-
-    monkeypatch.setattr(library, "query_tracks", fake_query)
-
-    sched = Scheduler()
-    items = sched._build_programs(3)
-    assert items, "expected at least one program block"
-    kinds = {it["program"]["kind"] for it in items if it.get("program")}
-    assert kinds == {"language"}
-    labels = [it["program"]["label"] for it in items if it.get("program")]
-    assert all(label in LANGUAGES for label in labels)
-
-
-def test_global_language_filter_reaches_flat_refill(monkeypatch):
-    # A global language selection must be passed straight through to the
-    # track query on the flat (non-program) path.
-    calls = []
-
-    def fake_query(search="", genres=None, artists=None, languages=None,
-                    limit=200, random_order=False, **kw):
-        calls.append({"languages": languages, "genres": genres})
-        # Return a non-empty result so the no-filter fallback is not triggered
-        # (it would otherwise mask the filtered call we are asserting on).
-        return [{"id": 1, "path": "/x.mp3", "title": "t", "artist": "A",
-                 "album": "Al", "genre": "G", "year": "2000", "duration": 10.0}]
-
-    monkeypatch.setattr(library, "query_tracks", fake_query)
-    config.save_config({"playback": {
-        "genres": [], "artists": [], "shuffle": True,
-        "languages": ["russian", "german"]}})
-    sched = Scheduler()
-    sched.refill(10)
-    # The first (filtered) call must carry the selected languages.
-    assert calls, "query_tracks was never called"
-    assert calls[0]["languages"] == ["russian", "german"]
-
-
-def test_global_language_filter_anded_into_programs(monkeypatch):
-    # When programs are on, the global language filter is AND-ed into each
-    # per-theme query (so a Russian-themed run is further narrowed to the
-    # selected languages), not used as the sole selector.
-    captured = []
-
-    def fake_query(languages=None, search="", limit=200, random_order=False, **kw):
-        if languages:
-            captured.append(list(languages))
-        return [
+        lambda strategy: themes_called.append(strategy) or [])
+    monkeypatch.setattr(
+        library, "query_tracks",
+        lambda **kw: [
             {"id": 1, "path": "/x/1.mp3", "title": "t", "artist": "A",
              "album": "Al", "genre": "G", "year": "2000", "duration": 10.0},
             {"id": 2, "path": "/x/2.mp3", "title": "t2", "artist": "A",
              "album": "Al", "genre": "G", "year": "2000", "duration": 10.0},
-        ]
+        ])
 
-    monkeypatch.setattr(library, "query_tracks", fake_query)
-    monkeypatch.setattr(
-        library, "program_themes",
-        lambda strategy: [{"language": l, "n": 20}
-                          for l in ["russian", "french"]] if strategy == "language" else [],
-    )
-    config.save_config({"playback": {
-        "genres": [], "artists": [], "shuffle": True,
-        "languages": ["russian"],
-        "program": {"enabled": True, "size": 5, "strategy": "language"}}})
     sched = Scheduler()
-    sched._build_programs(2)
-    # The russian-themed run is narrowed to russian; french-themed run has no
-    # russian tracks so its query still carries the AND-ed filter.
-    assert all("russian" in langs for langs in captured)
-    assert captured, "expected at least one program query"
+    items = sched._build_programs(3)
+    # No language themes exist, so nothing is built; the important assertion
+    # is that program_themes was consulted with the coerced "genre" strategy.
+    assert themes_called == ["genre"]
+    for it in items:
+        assert it["program"]["kind"] != "language"

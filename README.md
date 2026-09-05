@@ -80,15 +80,15 @@ cd virtual-dj
 `run.sh` is the canonical launcher. It:
 
 1. creates a Python venv (`.venv`) if missing and installs `requirements.txt`;
-2. downloads the two default Piper voices the app needs (English + Russian)
-   into `data/voices/` — so the DJ can speak on a clean clone;
+2. downloads the default Piper voice the app needs (`dj.voice`) into
+   `data/voices/` — so the DJ can speak on a clean clone;
 3. launches the server on `0.0.0.0:8420` (override with `--host`/`--port`).
 
 To run the server directly instead: `python -m app.main --host 0.0.0.0 --port 8420`.
 
 > No network at install time? The app still starts — voice download is
 > best-effort and retries at runtime. You can fetch voices any time from the
-> web UI (DJ Settings → any voice picker → **Test**), or with
+> web UI (DJ Settings → Voice picker → **Test**), or with
 > `python -m app.voices [--all]` (or `python -m app.voices en_US-amy-medium`).
 
 Then open **http://localhost:8420**, set your music folder in the Library
@@ -110,9 +110,8 @@ rarely need to edit it by hand.
 
 The Piper voice models are large binary files (git-ignored) stored in
 `data/voices/`. On a **fresh install they are downloaded automatically** — the
-English default (`en_US-amy-medium`) and the Russian default
-(`ru_RU-irina-medium`, used for Russian-language tracks) are fetched on first
-run, and the web UI can download any other curated voice on demand.
+configured default (`dj.voice`, `en_US-amy-medium`) is fetched on first run,
+and the web UI can download any other curated voice on demand.
 
 Any Piper voice works — drop the `.onnx` + `.onnx.json` pair in `data/voices/`
 and pick it in the DJ Settings panel. To grab them manually:
@@ -127,6 +126,13 @@ The full catalogue (Amy, Lessac, LibriTTS-R, Ryan, Bryce, plus the Russian
 Irina/Denis/Dmitri/Ruslan) is listed in `app/dj.py` (`VOICE_PROFILES`); every
 one is downloadable from the same HuggingFace repo via the web UI or
 `python -m app.voices --all`.
+
+**The chosen voice sets the DJ's language.** English voices (`en_US-*`,
+`en_GB-*`) make the DJ speak English; picking a Russian voice (Irina, Denis,
+Dmitri, Ruslan) makes the DJ speak Russian — intros are written in Russian and
+spoken natively, with no transliteration. There is no separate "Russian voice"
+setting and no per-song language detection: the whole station speaks the
+language of the voice you select in DJ Settings.
 
 ## Listening
 
@@ -153,8 +159,8 @@ docker compose up -d --build
 
 Then open **http://localhost:8420**.
 
-On first start the container **auto-downloads the default voice models**
-(English + Russian, ~190 MB) into the volume; the DJ can speak out of the box.
+On first start the container **auto-downloads the default voice model**
+(English, ~110 MB) into the volume; the DJ can speak out of the box.
 It also **auto-scans `/music` on first boot** (the container's `music_dir`
 defaults to `/music`, which is where your host library is mounted), so the
 station indexes your music with no setup. If `/music` is empty or unmounted,

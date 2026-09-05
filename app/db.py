@@ -115,7 +115,6 @@ _ADDED_COLUMNS = (
     ("tracks", "meta_source", "TEXT"),
     ("tracks", "ai_resolved", "INTEGER NOT NULL DEFAULT 0"),
     ("tracks", "ai_genre", "INTEGER NOT NULL DEFAULT 0"),
-    ("tracks", "language", "TEXT NOT NULL DEFAULT 'english'"),
 )
 
 
@@ -137,16 +136,19 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE TABLE IF NOT EXISTS ai_lookups ("
         "query TEXT PRIMARY KEY, result TEXT NOT NULL, "
-        "fetched_at REAL DEFAULT (strftime('%s','now')))"
+        "fetched_at REAL DEFAULT (strftime('%s','now')));"
     )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_tracks_language ON tracks(language)"
-    )
-    # Cache of artist country-of-origin (MusicBrainz), keyed by artist name.
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS artist_origin ("
-        "artist TEXT PRIMARY KEY, country TEXT NOT NULL DEFAULT '')"
-    )
+    # Per-song language detection was removed as unreliable (the DJ language
+    # is now a property of the chosen voice, not of each track). Drop the
+    # leftover column, its index, and the artist-origin cache table from
+    # databases created by older releases.
+    track_cols = {
+        row["name"] for row in conn.execute("PRAGMA table_info(tracks)")
+    }
+    if "language" in track_cols:
+        conn.execute("DROP INDEX IF EXISTS idx_tracks_language")
+        conn.execute("ALTER TABLE tracks DROP COLUMN language")
+    conn.execute("DROP TABLE IF EXISTS artist_origin")
 
 
 def close() -> None:

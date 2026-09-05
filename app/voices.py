@@ -3,14 +3,13 @@
 Piper voice models are large (~80-110 MB each) binary files that live in
 ``data/voices/`` and are intentionally git-ignored. A fresh clone therefore
 ships with **no** voices, and the DJ cannot speak until at least the default
-English voice (and, for Russian tracks, the default Russian voice) is present.
+voice (``dj.voice``) is present.
 
 This module downloads voices from the public ``rhasspy/piper-voices`` Hugging
 Face repo on demand. Two paths are supported:
 
-* ``ensure_default_voices()`` -- called at startup; downloads the two default
-  voices the app needs to function (``dj.voice`` and ``dj.russian_voice`` from
-  config) if they are missing. Best-effort and never fatal: if there is no
+* ``ensure_default_voices()`` -- called at startup; downloads the configured
+  ``dj.voice`` if it is missing. Best-effort and never fatal: if there is no
   network at boot, the app still starts (the DJ just stays silent until a
   voice is fetched later).
 * ``download_voice(name)`` / ``download_voices(names)`` -- fetch specific
@@ -120,22 +119,18 @@ def download_voices(voices: Iterable[str], timeout: float = 180.0) -> list[str]:
 
 
 def ensure_default_voices(timeout: float = 180.0) -> list[str]:
-    """Best-effort download of the voices the app needs at minimum.
+    """Best-effort download of the voice the app needs at minimum.
 
-    Fetches ``dj.voice`` and ``dj.russian_voice`` from config if they are not
-    already present. Never raises -- a missing network at boot must not stop
-    the station from starting; the DJ simply stays silent until a voice is
-    fetched (manually or via the web UI).
+    Fetches the configured ``dj.voice`` if it is not already present. Never
+    raises -- a missing network at boot must not stop the station from
+    starting; the DJ simply stays silent until a voice is fetched (manually or
+    via the web UI).
     """
-    needed = []
-    for key in ("dj.voice", "dj.russian_voice"):
-        voice = config.get(key)
-        if voice and voice_model_path(voice) is None:
-            needed.append(voice)
-    if not needed:
+    voice = config.get("dj.voice")
+    if not voice or voice_model_path(voice) is not None:
         return []
-    log.info("first-run voice setup: fetching %s", ", ".join(needed))
-    return download_voices(needed, timeout=timeout)
+    log.info("first-run voice setup: fetching %s", voice)
+    return download_voices([voice], timeout=timeout)
 
 
 def main() -> None:
@@ -159,7 +154,7 @@ def main() -> None:
     if args.all:
         targets = [p["id"] for p in dj.VOICE_PROFILES]
     if not targets:
-        targets = [config.get("dj.voice"), config.get("dj.russian_voice")]
+        targets = [config.get("dj.voice")]
     targets = [t for t in targets if t]
 
     if not targets:

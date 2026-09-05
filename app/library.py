@@ -368,26 +368,6 @@ def scan_library(music_dir: str | None = None, full: bool = False,
             meta = read_metadata(path, root=root, allow_web=use_web)
             STATUS.scanned += 1
 
-            from . import language as _language
-            from . import enrich as _enrich
-            artist = (meta.get("artist") or "").strip()
-            # Resolve the artist's country-of-origin and use it as a tiebreaker
-            # so bands whose name is clearly from a language but whose titles
-            # are not (e.g. Téléphone) are grouped correctly instead of falling
-            # back to English.
-            #   * A name with a language-diacritic triggers a (cached, throttled)
-            #     MusicBrainz lookup -- that is the genuinely ambiguous set.
-            #   * Any other name only reuses an origin already in the cache
-            #     (e.g. an unaccented "Telephone" reusing "Téléphone" -> France),
-            #     so we never hammer the API for obvious English artists.
-            country = None
-            if artist:
-                if _language._looks_like_non_english_name(artist):
-                    country = _enrich.artist_country(artist)
-                else:
-                    country = _enrich.artist_country_cached(artist)
-            meta["language"] = _language.classify_track(meta, artist_country=country)
-
             with STATUS.lock:
                 source = meta.get("meta_source")
                 if source == "tags":
@@ -415,26 +395,25 @@ def scan_library(music_dir: str | None = None, full: bool = False,
                 conn.execute(
                     "INSERT INTO tracks(path,title,artist,album,genre,year,duration,"
                     "mtime,size,missing,excluded,exclude_reason,meta_source,"
-                    "ai_resolved,ai_genre,language) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,0,?,?,?,?,?,?)",
+                    "ai_resolved,ai_genre) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,0,?,?,?,?,?)",
                     (spath, meta["title"], meta["artist"], meta["album"],
                      meta["genre"], meta["year"], meta["duration"],
                      stat.st_mtime, stat.st_size,
                      meta["excluded"], meta["exclude_reason"], meta["meta_source"],
-                     meta["ai_resolved"], meta["ai_genre"], meta["language"]),
+                     meta["ai_resolved"], meta["ai_genre"]),
                 )
                 STATUS.added += 1
             else:
                 conn.execute(
                     "UPDATE tracks SET title=?,artist=?,album=?,genre=?,year=?,"
                     "duration=?,mtime=?,size=?,missing=0,excluded=?,"
-                    "exclude_reason=?,meta_source=?,ai_resolved=?,ai_genre=?,"
-                    "language=? "
+                    "exclude_reason=?,meta_source=?,ai_resolved=?,ai_genre=? "
                     "WHERE id=?",
                     (meta["title"], meta["artist"], meta["album"], meta["genre"],
                      meta["year"], meta["duration"], stat.st_mtime, stat.st_size,
                      meta["excluded"], meta["exclude_reason"], meta["meta_source"],
-                     meta["ai_resolved"], meta["ai_genre"], meta["language"], prior[0]),
+                     meta["ai_resolved"], meta["ai_genre"], prior[0]),
                 )
                 STATUS.updated += 1
 
@@ -594,17 +573,6 @@ def list_genres() -> list[dict[str, Any]]:
     return db.rows_to_dicts(rows)
 
 
-def list_languages(limit: int = 50) -> list[dict[str, Any]]:
-    """Distinct song languages with track counts, for program grouping."""
-    rows = db.connect().execute(
-        "SELECT language, COUNT(*) AS n FROM tracks "
-        "WHERE missing = 0 AND excluded = 0 "
-        "GROUP BY language ORDER BY n DESC LIMIT ?",
-        (limit,),
-    ).fetchall()
-    return [{"language": r["language"], "n": r["n"]} for r in rows]
-
-
 def list_artists(limit: int = 500) -> list[dict[str, Any]]:
     rows = db.connect().execute(
         "SELECT COALESCE(NULLIF(TRIM(artist),''),'Unknown') AS artist, COUNT(*) AS n "
@@ -635,8 +603,6 @@ def program_themes(strategy: str = "genre") -> list[dict[str, Any]]:
         return list_artists(limit=200)
     if strategy == "decade":
         return list_decades()
-    if strategy == "language":
-        return list_languages()
     return list_genres()
 
 
@@ -644,7 +610,6 @@ def query_tracks(
     search: str = "",
     genres: list[str] | None = None,
     artists: list[str] | None = None,
-    languages: list[str] | None = None,
     decade: int | None = None,
     limit: int = 200,
     offset: int = 0,
@@ -680,11 +645,6 @@ def query_tracks(
         where.append(f"artist IN ({placeholders})")
         params += artists
 
-    if languages:
-        placeholders = ",".join("?" * len(languages))
-        where.append(f"language IN ({placeholders})")
-        params += languages
-
     if decade:
         lo = int(decade)
         hi = lo + 9
@@ -693,7 +653,7 @@ def query_tracks(
 
     order = "RANDOM()" if random_order else "artist COLLATE NOCASE, album, title"
     sql = (
-        "SELECT id, path, title, artist, album, genre, year, duration, language "
+        "SELECT id, path, title, artist, album, genre, year, duration "
         "FROM tracks "
         f"WHERE {' AND '.join(where)} ORDER BY {order} LIMIT ? OFFSET ?"
     )

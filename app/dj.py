@@ -81,23 +81,18 @@ def _spell_dates(text: str) -> str:
     return _YEAR_RE.sub(lambda m: _int_to_words(int(m.group(0))), text)
 
 
-# Years in a Russian-language DJ break must be spelled in Russian words so the
-# Russian voice reads them as a year, not a string of numerals.
-# (Removed: the Russian Piper voice reads year numerals natively, so dates are
-# left exactly as written in the script and are NOT converted to words.)
-
-
 # ---------------------------------------------------------------------------
 # Russian (Cyrillic) transliteration for TTS.
 #
-# The bundled voices are English (en_US-*). Piper cannot pronounce Cyrillic
-# glyphs, so a Russian artist/song name fed to it verbatim comes out as
-# garbled noise. We transliterate to a Latin spelling that an ENGLISH voice
-# reads with roughly Russian pronunciation, so the DJ says something like
-# "Agata Kristi" / "Zemfira" instead of mangling the characters.
+# The bundled English voices (en_US-*) cannot pronounce Cyrillic glyphs, so a
+# Russian artist/song name fed to them verbatim comes out as garbled noise.
+# We transliterate to a Latin spelling that an ENGLISH voice reads with
+# roughly Russian pronunciation, so the DJ says something like "Agata Kristi"
+# / "Zemfira" instead of mangling the characters.
 #
-# This is applied ONLY on the audio path (synthesize), so the on-screen DJ
-# text keeps the original, readable Cyrillic.
+# This is applied ONLY on the audio path (synthesize) and ONLY when the chosen
+# voice is English: a Russian voice (ru_RU-*) reads Cyrillic natively, so the
+# text is passed through verbatim for it.
 #
 # WHY THIS MAP (and not scholarly/ISO-9 transliteration):
 #   Scholarly transliteration (ISO 9 / Library of Congress) is built for
@@ -204,6 +199,23 @@ def available_voices() -> list[str]:
     return sorted(p.stem for p in voices_dir.glob("*.onnx"))
 
 
+def voice_language(voice_id: str | None) -> str:
+    """Language bucket of a voice id: ``"russian"`` or ``"english"``.
+
+    Per-song language detection was removed; the DJ's language is now a
+    property of the chosen voice. Curated ids resolve via ``VOICE_PROFILES``;
+    any other installed ``ru_RU-*``/``ru-*`` voice counts as Russian, all else
+    English.
+    """
+    vid = (voice_id or "").strip()
+    if not vid:
+        return "english"
+    for p in VOICE_PROFILES:
+        if p["id"] == vid:
+            return p.get("lang") or "english"
+    return "russian" if vid.lower().startswith(("ru_", "ru-")) else "english"
+
+
 def _clean_script(text: str, max_sentences: int,
                   language: str | None = None) -> str:
     text = _THINK_RE.sub("", text or "")
@@ -245,8 +257,6 @@ def fallback_script(track: dict[str, Any],
                 base = f"Шоу, посвящённое {label}. {base}"
             elif kind == "decade":
                 base = f"Отправляемся в {label}. {base}"
-            elif kind == "language":
-                base = f"Звучит подборка {label} музыки. {base}"
         # Leave years/dates as digits (the Russian voice reads them natively).
         return base
     # English (default) fallback path.
@@ -297,8 +307,14 @@ def _facts_block(track: dict[str, Any], facts: dict[str, Any]) -> str:
 
 
 def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = None,
-                    program: dict[str, Any] | None = None) -> str:
-    """Ask the local LLM for an on-air intro; fall back to a template."""
+                    program: dict[str, Any] | None = None,
+                    voice: str | None = None) -> str:
+    """Ask the local LLM for an on-air intro; fall back to a template.
+
+    The DJ's language follows the voice that will speak the line: pass
+    ``voice`` (or leave None for the configured ``dj.voice``) and the script is
+    generated in that voice's language (Russian voices -> Russian script).
+    """
     max_sentences = config.randint_range(
         "dj.sent_min", "dj.sent_max",
         config.DEFAULTS["dj"]["sent_min"], config.DEFAULTS["dj"]["sent_max"])
@@ -308,7 +324,7 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
     except Exception as exc:
         log.debug("enrichment failed: %s", exc)
 
-    language = (track.get("language") or "").strip().lower()
+    language = voice_language(voice or config.get("dj.voice"))
     is_russian = language == "russian"
 
     if not config.get("llm.enabled", True):
@@ -344,18 +360,13 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
                 f"\nThis song opens a trip back to the {label}. Set the era before "
                 f"the intro."
             )
-        elif kind == "language":
-            program_line = (
-                f"\nThis song opens a set of {label} music. Welcome the listeners "
-                f"into that language's vibe before introducing the track."
-            )
 
     lang_line = ""
     if is_russian:
         # The Russian voice speaks Russian natively; the intro must be written
-        # in Russian so the DJ actually talks in Russian for Russian songs.
-        # Two pronunciation aids for the TTS engine, which otherwise guesses
-        # stress and silently swallows Ё:
+        # in Russian so the DJ actually talks in Russian. Two pronunciation
+        # aids for the TTS engine, which otherwise guesses stress and silently
+        # swallows Ё:
         #   * place an acute stress mark (´) on the stressed vowel of EVERY
         #     word (e.g. приве́т, музыка́льный, золото́й) so it is pronounced right;
         #   * always write Ё (ё) wherever the word actually contains it — never
@@ -439,23 +450,23 @@ def _cache_path(text: str, voice: str, speed: float, noise_scale: float) -> Path
 
 def synthesize(text: str, voice: str | None = None,
                speed: float | None = None,
-               noise_scale: float | None = None,
-               language: str | None = None) -> Path | None:
+               noise_scale: float | None = None) -> Path | None:
     """Render ``text`` to an mp3 with Piper. Returns None on failure.
 
-    The voice is chosen by ``language``: Russian tracks use the dedicated
-    ``dj.russian_voice`` (which speaks Cyrillic natively, so no transliteration
-    is applied), everything else uses ``dj.voice`` and gets the Cyrillic ->
-    Latin transliteration so the English voice can read Russian names.
+    The voice (``voice`` or the configured ``dj.voice``) determines the
+    language: a Russian voice speaks Cyrillic natively (no transliteration, no
+    year->words), everything else is treated as English text for the English
+    voices and gets the Cyrillic -> Latin transliteration so the voice can read
+    Russian names.
     """
     text = (text or "").strip()
     if not text:
         return None
+    voice = voice or config.get("dj.voice", "en_US-amy-medium")
+    language = voice_language(voice)
     # English voices mis-read bare numerals as digits, so years are spelled out
-    # as words. The Russian voice, however, reads year numerals natively and
-    # spells them as Russian words only when they appear as digits in the audio
-    # anyway -- so we leave Russian-text dates exactly as written (digits) and
-    # do NOT convert them. Convert only for the non-Russian (English) path.
+    # as words. The Russian voice, however, reads year numerals natively, so we
+    # leave Russian-text dates exactly as written (digits).
     if language != "russian":
         text = _spell_dates(text)
     # Russian (Cyrillic) names cannot be spoken by the English voices — render
@@ -465,10 +476,6 @@ def synthesize(text: str, voice: str | None = None,
     if language != "russian":
         text = _transliterate_cyrillic(text)
 
-    if language == "russian":
-        voice = voice or config.get("dj.russian_voice", "ru_RU-irina-medium")
-    else:
-        voice = voice or config.get("dj.voice", "en_US-amy-medium")
     speed = float(speed if speed is not None else config.get("dj.speed", 1.0))
     speed = max(0.5, min(speed, 2.0))
     noise_scale = float(noise_scale if noise_scale is not None
@@ -552,8 +559,7 @@ def prepare_break(track: dict[str, Any],
     script = generate_script(track, previous, program=program)
     if not script:
         return None
-    language = (track.get("language") or "").strip().lower() or None
-    audio = synthesize(script, language=language)
+    audio = synthesize(script)
     if audio is None:
         return None
     duration = audio_duration(audio)
@@ -662,15 +668,16 @@ def tts_health() -> dict[str, Any]:
 
 __all__ = [
     "generate_script", "synthesize", "prepare_break", "fallback_script",
-    "available_voices", "voice_profiles", "llm_health", "tts_health",
-    "recent_scripts", "audio_duration", "json", "_spell_dates",
+    "available_voices", "voice_profiles", "voice_language", "llm_health",
+    "tts_health", "recent_scripts", "audio_duration", "json", "_spell_dates",
 ]
 
 # Human-readable descriptions of the bundled voices, with notes from community
 # feedback about which read most naturally. The DJ picker in the web UI shows
 # these so you can pick a voice by character, not just by a model filename.
-# ``lang`` marks the voice's language so the UI can split the English and
-# Russian pickers (the Russian voice is used only for Russian-language tracks).
+# ``lang`` marks the voice's language: the DJ speaks the language of the
+# *chosen* voice (English voices -> English breaks, Russian voices -> Russian
+# breaks). The web UI shows all voices in one picker.
 VOICE_PROFILES: list[dict[str, str]] = [
     {
         "id": "en_GB-alan-medium",
@@ -765,29 +772,29 @@ VOICE_PROFILES: list[dict[str, str]] = [
         "name": "Irina",
         "gender": "female",
         "lang": "russian",
-        "note": "Russian voice. Used for Russian-language tracks; speaks "
-                "Cyrillic natively (no transliteration).",
+        "note": "Russian voice. Selecting it makes the DJ speak Russian "
+                "(native Cyrillic, no transliteration).",
     },
     {
         "id": "ru_RU-denis-medium",
         "name": "Denis",
         "gender": "male",
         "lang": "russian",
-        "note": "Russian voice (male). Native Cyrillic; no transliteration.",
+        "note": "Russian voice (male). Selecting it makes the DJ speak Russian.",
     },
     {
         "id": "ru_RU-dmitri-medium",
         "name": "Dmitri",
         "gender": "male",
         "lang": "russian",
-        "note": "Russian voice (male). Native Cyrillic; no transliteration.",
+        "note": "Russian voice (male). Selecting it makes the DJ speak Russian.",
     },
     {
         "id": "ru_RU-ruslan-medium",
         "name": "Ruslan",
         "gender": "male",
         "lang": "russian",
-        "note": "Russian voice (male). Native Cyrillic; no transliteration.",
+        "note": "Russian voice (male). Selecting it makes the DJ speak Russian.",
     },
 ]
 
@@ -795,7 +802,8 @@ VOICE_PROFILES: list[dict[str, str]] = [
 def voice_profiles(lang: str | None = None) -> list[dict[str, str]]:
     """Voice catalogue (id, name, gender, lang, intonation note) for the UI.
 
-    Pass ``lang="russian"`` (or "english") to filter to one language's picker.
+    ``lang`` optionally filters to one language; without it the full catalogue
+    (English + Russian voices together) is returned for the single picker.
     """
     installed = set(available_voices())
     known = {p["id"] for p in VOICE_PROFILES}
@@ -811,10 +819,10 @@ def voice_profiles(lang: str | None = None) -> list[dict[str, str]]:
     # curated entries are named: a US/UK prefix and no quality suffix, so the
     # picker never shows a raw model filename like en_US-lessac-medium.
     for v in available_voices():
-        if v not in known and (lang is None or lang == "english"):
+        if v not in known and (lang is None or voice_language(v) == lang):
             profiles.append({
                 "id": v, "name": _humanize_voice_name(v), "gender": "?",
-                "lang": "english", "note": "", "installed": True,
+                "lang": voice_language(v), "note": "", "installed": True,
             })
     return profiles
 

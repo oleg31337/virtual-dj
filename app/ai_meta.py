@@ -54,7 +54,7 @@ _SYSTEM_RECOVER = (
     "You recover metadata for an MP3 whose ID3 tags are corrupt. You are given "
     "a guessed artist and title (often derived from the filename). Return ONLY "
     "valid JSON of the form {\"artist\": str, \"title\": str, \"album\": str|null, "
-    "\"language\": \"latin\"|\"cyrillic\"|\"other\", \"confident\": bool}. "
+    "\"confident\": bool}. "
     "Rules: keep the artist and title clean and split correctly; if the name is "
     "in Cyrillic, provide a romanised/latin-spelled artist and title for an "
     "English-speaking DJ but keep the original meaning; set confident=false if "
@@ -182,19 +182,19 @@ def recover_names(artist_guess: str | None, title_guess: str | None,
                  album_guess: str | None = None,
                  path: str | None = None,
                  use_cache: bool = True) -> dict[str, Any]:
-    """Recover clean artist/title/album (+ language) from a messy guess.
+    """Recover clean artist/title/album from a messy guess.
 
     Used when ID3 tags are corrupt: the path guess is fed to the LLM which
     splits/normalises it and, for Cyrillic names, supplies a romanised form so
-    the English-speaking DJ can still announce it. Returns a dict with keys
-    ``artist``, ``title``, ``album`` (each str|None), ``language`` and
-    ``confident`` (bool). Always returns a dict.
+    the DJ can still announce it. Returns a dict with keys ``artist``,
+    ``title``, ``album`` (each str|None) and ``confident`` (bool). Always
+    returns a dict.
     """
     artist_guess = (artist_guess or "").strip()
     title_guess = (title_guess or "").strip()
     if not (artist_guess or title_guess):
         return {"artist": None, "title": None, "album": None,
-                "language": "other", "confident": False}
+                "confident": False}
     key = f"n|{artist_guess.casefold()}|{title_guess.casefold()}|{(album_guess or '').casefold()}"
     if use_cache:
         cached = _cache_get("ai_lookups", key)
@@ -213,7 +213,7 @@ def recover_names(artist_guess: str | None, title_guess: str | None,
                         max_tokens=160)
     result: dict[str, Any] = {
         "artist": None, "title": None, "album": None,
-        "language": "other", "confident": False,
+        "confident": False,
     }
     if text:
         m = re.search(r"\{.*\}", text, re.DOTALL)
@@ -223,7 +223,6 @@ def recover_names(artist_guess: str | None, title_guess: str | None,
                 result["artist"] = (data.get("artist") or None) if data.get("artist") else None
                 result["title"] = (data.get("title") or None) if data.get("title") else None
                 result["album"] = (data.get("album") or None) if data.get("album") else None
-                result["language"] = str(data.get("language") or "other")
                 result["confident"] = bool(data.get("confident"))
             except (ValueError, TypeError):
                 log.debug("AI name recovery returned unparseable JSON: %s", text[:120])

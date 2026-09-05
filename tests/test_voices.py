@@ -91,7 +91,6 @@ def test_download_voice_missing_json_is_non_fatal(monkeypatch):
 
 def test_ensure_default_voices_fetches_missing(monkeypatch):
     monkeypatch.setitem(config.DEFAULTS["dj"], "voice", "en_US-amy-medium")
-    monkeypatch.setitem(config.DEFAULTS["dj"], "russian_voice", "ru_RU-irina-medium")
 
     captured = {}
 
@@ -104,7 +103,7 @@ def test_ensure_default_voices_fetches_missing(monkeypatch):
 
     monkeypatch.setattr(voices.httpx, "stream", _FakeClient().stream)
     done = voices.ensure_default_voices()
-    assert set(done) == {"en_US-amy-medium", "ru_RU-irina-medium"}
+    assert done == ["en_US-amy-medium"]
     # Re-running finds them already present -> no network.
     done2 = voices.ensure_default_voices()
     assert done2 == []
