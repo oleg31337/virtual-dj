@@ -136,13 +136,20 @@ language of the voice you select in DJ Settings.
 
 ## Listening
 
+External players (Winamp / VLC / Sonos) consume the **Icecast mount**, which the
+app relays into a managed Icecast2 server running in the same process/container:
+
 | Player  | How |
 |---------|-----|
-| VLC     | Media → Open Network Stream → `http://<host>:8420/stream.mp3` |
-| Winamp  | File → Play URL → same URL |
-| Sonos   | Add a radio station by URL in the S2 app |
-| Browser | Just open `http://<host>:8420` and hit **Listen** |
+| Winamp  | File → Play URL → `http://<host>:8008/virtualdj` |
+| VLC     | Media → Open Network Stream → `http://<host>:8008/virtualdj` |
+| Sonos   | Add a radio station by URL in the S2 app → same URL |
+| Browser | Just open `http://<host>:8420` and hit **Listen** (uses `/stream.mp3`) |
 | CLI     | `mpv http://<host>:8420/stream.mp3` |
+
+Port `8008` is the default Icecast port (change `ICECAST_PORT` in `.env`), and
+`virtualdj` is the default mount (change `ICECAST_MOUNT`). The browser player
+uses the app's own `/stream.mp3`; only external players need the Icecast mount.
 
 ## Running with Docker
 
@@ -170,13 +177,17 @@ the **Rescan** button in the Library panel (or change the path there).
 
 ### What the container does for you
 
-- **Non-root** (`vdj` user), **read-only root filesystem**, **all Linux
-  capabilities dropped**, `no-new-privileges` enabled — a hardened default.
+- **Runs as root on purpose**: Icecast2 must start as root so its `<changeowner>`
+  can drop to `nobody` — MP3 source mounts only serve when that privilege drop
+  happens. The single image owns Icecast end-to-end (renders `icecast.xml` from
+  `data/config.json`, supervises the daemon, relays the stream into it), so the
+  read-only-rootfs / cap-drop hardening of the old split stack does not apply.
 - **Healthcheck** against `/api/health`; the container reports `healthy` once
   the app is serving, and `restart: unless-stopped` keeps it up.
-- A small `tmpfs` at `/tmp`; only `/data` is writable (the named volume).
+- Application code is read-only; all mutable state lives under `/data` (the
+  named volume) and `/tmp` (icecast logs / runtime files).
 - Music is mounted read-only at `/music` (override with the `music_dir` config
-  or the `VDJ_MUSIC_DIR` env if you want a different in-container path).
+  in the web UI if you want a different in-container path).
 
 ### Tuning (`.env`)
 
@@ -186,6 +197,11 @@ the **Rescan** button in the Library panel (or change the path there).
 | `MUSIC_DIR` | `/mnt/mp3` | **Host** path to your music (mounted `:ro` at `/music`) |
 | `VDJ_LOG_LEVEL` | `info` | Log verbosity |
 | `VDJ_NO_VOICE_DOWNLOAD` | `0` | `1` = skip the first-run voice download |
+| `VDJ_ICECAST_ENABLED` | `1` | `0` disables Icecast delivery (browser player still works) |
+| `ICECAST_PORT` | `8008` | Icecast listen **and** published host port (both sides of the mapping — change together) |
+| `ICECAST_MOUNT` | `virtualdj` | Mountpoint external players open (`http://<host>:<port>/<mount>`) |
+| `ICECAST_SOURCE_PASSWORD` | `hackme` | Relay password the app's pusher uses to connect to Icecast |
+| `ICECAST_PUBLIC_HOST` | _blank_ | Host shown in the web UI's stream URL (blank = derive from the browser) |
 | `VDJ_OLLAMA_URL` | _unset_ | Ollama endpoint (e.g. `http://host-gateway:11434` for host Ollama) |
 | `VDJ_OLLAMA_MODEL` | _unset_ | Model for DJ scripts |
 

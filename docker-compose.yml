@@ -22,7 +22,7 @@ services:
     build: .
     image: virtual-dj:latest
     container_name: virtual-dj
-    # Auto-download the default Piper voices on first run. Set to "1" to skip
+    # Auto-download the default Piper voice on first run. Set to "1" to skip
     # (e.g. if you pre-populate /data/voices or have no outbound network).
     environment:
       VDJ_NO_VOICE_DOWNLOAD: "${VDJ_NO_VOICE_DOWNLOAD:-0}"

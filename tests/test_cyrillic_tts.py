@@ -7,7 +7,6 @@ path. The on-screen DJ text (and the LLM script) keep the original Cyrillic so
 the listener can read the real name.
 """
 
-import sys
 from app import dj
 
 

@@ -78,7 +78,6 @@ class IcecastPusher:
         port = int(config.get("icecast.port", 8008))
         mount = config.get("icecast.mount", "virtualdj")
         password = config.get("icecast.source_password", "hackme")
-        bitrate = int(config.get("stream.bitrate_kbps", 128))
         app_port = int(os.environ.get("VDJ_PORT", "8420"))
         source = _PUSH_SOURCE_URL.format(port=app_port)
         # Icecast requires the source to declare a Content-Type. ffmpeg's

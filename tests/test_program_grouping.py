@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from app import config, db, library, scheduler
+from app import config, db, scheduler
 
 
 @pytest.fixture

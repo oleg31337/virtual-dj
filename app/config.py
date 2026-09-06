@@ -35,9 +35,6 @@ DEFAULTS: dict[str, Any] = {
     },
     "dj": {
         "enabled": True,
-        # Speak before 1 out of every N tracks. 1 = every track.
-        "every_n_tracks": 3,
-        "max_sentences": 3,
         "style": "warm, witty late-night radio host",
         # The DJ voice. Any curated voice (English or Russian) can be chosen;
         # the voice's language decides the DJ's language (a Russian voice makes
@@ -60,7 +57,6 @@ DEFAULTS: dict[str, Any] = {
         "sent_max": 3,
         # Gain applied to the DJ voice segment, in dB.
         "gain_db": 0.0,
-        "intro_music_duck_db": -8.0,
         "prefetch_depth": 3,
     },
     "llm": {
@@ -77,11 +73,10 @@ DEFAULTS: dict[str, Any] = {
         "retries": 2,
     },
     "ai": {
-        # Use the local LLM to fill genres web search couldn't, and to recover
-        # artist/title from corrupt tags. "unknown genre" is never acceptable
-        # for a playable track, so the AI is the guaranteed last resort.
+        # Use the local LLM to fill genres web search couldn't. "unknown genre"
+        # is never acceptable for a playable track, so the AI is the guaranteed
+        # last resort.
         "free_text_genre": True,
-        "name_recovery": True,
     },
     "enrich": {
         # Look up extra facts on MusicBrainz / Wikipedia.

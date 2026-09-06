@@ -7,10 +7,6 @@ and the ``voice_model_path`` resolver.
 
 from __future__ import annotations
 
-import io
-
-import pytest
-
 from app import config, voices
 
 

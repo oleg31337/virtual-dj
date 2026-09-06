@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from app import config, db, library, textq
+from app import db, library, textq
 from tests.conftest import make_mp3
 
 

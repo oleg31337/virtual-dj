@@ -340,23 +340,9 @@ def api_scan_status():
     return library.STATUS.snapshot()
 
 
-@app.get("/api/library/excluded")
-def api_excluded(limit: int = 200, offset: int = 0, reason: str = ""):
-    """Tracks skipped as unidentifiable, with the reason for each."""
-    return {
-        "stats": library.library_stats(),
-        "tracks": library.excluded_tracks(limit, offset, reason or None),
-    }
-
-
 @app.get("/api/library/genres")
 def api_genres():
     return library.list_genres()
-
-
-@app.get("/api/library/artists")
-def api_artists(limit: int = 300):
-    return library.list_artists(limit)
 
 
 @app.get("/api/library/tracks")
@@ -493,11 +479,6 @@ def api_llm_test(req: LLMTestRequest):
 
 # --- DJ --------------------------------------------------------------------
 
-@app.get("/api/dj/scripts")
-def api_dj_scripts(limit: int = 20):
-    return dj.recent_scripts(limit)
-
-
 @app.get("/api/dj/voices")
 def api_dj_voices():
     return {
@@ -535,15 +516,6 @@ def api_dj_voices_download(req: VoiceDownloadRequest):
         "failed": [t for t in targets if t not in done],
         "available": dj.available_voices(),
     }
-
-
-@app.get("/api/dj/voices/ensure")
-def api_dj_voices_ensure():
-    """Best-effort fetch of the default voices if missing (used at startup)."""
-    from . import voices as voice_mgr
-
-    done = voice_mgr.ensure_default_voices()
-    return {"downloaded": done, "available": dj.available_voices()}
 
 
 class PreviewRequest(BaseModel):

@@ -6,10 +6,7 @@ import subprocess
 import threading
 import time
 
-import pytest
-
-from app import config, library
-from app.scheduler import Scheduler
+from app import config
 from app.stream import CLIENT_BUFFER_CHUNKS, Broadcaster, Listener
 
 

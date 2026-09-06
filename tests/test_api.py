@@ -64,11 +64,6 @@ def test_genres_endpoint(client):
     assert {"Rock", "Pop"} <= genres
 
 
-def test_artists_endpoint(client):
-    artists = {a["artist"] for a in client.get("/api/library/artists").json()}
-    assert "Band One" in artists
-
-
 def test_config_get_and_patch(client):
     assert client.get("/api/config").json()["dj"]["enabled"] is True
     updated = client.put("/api/config", json={"dj": {"talk_min": 1, "talk_max": 6}}).json()

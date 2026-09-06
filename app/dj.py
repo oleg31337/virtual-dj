@@ -576,16 +576,6 @@ def prepare_break(track: dict[str, Any],
     return {"text": script, "audio_path": str(audio), "duration": duration}
 
 
-def recent_scripts(limit: int = 20) -> list[dict[str, Any]]:
-    rows = db.connect().execute(
-        "SELECT d.id, d.text, d.duration, d.created_at, t.title, t.artist "
-        "FROM dj_scripts d LEFT JOIN tracks t ON t.id = d.track_id "
-        "ORDER BY d.created_at DESC LIMIT ?",
-        (limit,),
-    ).fetchall()
-    return db.rows_to_dicts(rows)
-
-
 def llm_health() -> dict[str, Any]:
     base_url = str(config.get("llm.base_url", "")).rstrip("/")
     if not base_url:
@@ -669,7 +659,7 @@ def tts_health() -> dict[str, Any]:
 __all__ = [
     "generate_script", "synthesize", "prepare_break", "fallback_script",
     "available_voices", "voice_profiles", "voice_language", "llm_health",
-    "tts_health", "recent_scripts", "audio_duration", "json", "_spell_dates",
+    "tts_health", "audio_duration", "json", "_spell_dates",
 ]
 
 # Human-readable descriptions of the bundled voices, with notes from community

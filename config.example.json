@@ -10,8 +10,7 @@
   },
 
   "ai": {
-    "free_text_genre": true,
-    "name_recovery": true
+    "free_text_genre": true
   },
 
   "dj": {
@@ -28,6 +27,15 @@
   "stream": {
     "bitrate_kbps": 128,
     "station_name": "Virtual DJ"
+  },
+
+  "icecast": {
+    "_comment": "Icecast delivery for external players (Winamp / VLC / Sonos). The app runs a managed icecast2 and relays the stream into it. In Docker these come from the .env ICECAST_* / VDJ_ICECAST_* vars; on bare metal set them here. public_port must equal port for the single-container setup.",
+    "enabled": true,
+    "port": 8008,
+    "mount": "virtualdj",
+    "public_port": 8008,
+    "public_host": ""
   },
 
   "enrich": {
