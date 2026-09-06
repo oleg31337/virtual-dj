@@ -160,6 +160,20 @@ def is_usable(text: str | None) -> bool:
     return not is_corrupt(text)
 
 
+def is_artist_label_junk(text: str | None) -> bool:
+    """True for the literal labels rippers write into the artist field.
+
+    Only exact placeholder WORDS count — including the bare labels
+    'artist'/'artists' (capitalised or not) that CD-rip tools write for
+    anonymous tracks — never short alphanumeric real artist names (U2, 311,
+    A1, L7), which look placeholder-ish to the pattern rules but are real.
+    """
+    if not text:
+        return True
+    cleaned = strip_decorations(text).casefold()
+    return cleaned in _PLACEHOLDER_WORDS or cleaned in ("artist", "artists")
+
+
 def rejection_reason(artist: str | None, title: str | None) -> str | None:
     """Why this track cannot be announced, or None when it is fine.
 
@@ -341,5 +355,5 @@ def guess_from_path(path: Path, root: Path | None = None) -> dict[str, str | Non
 __all__ = [
     "clean_name", "strip_decorations", "guess_from_path", "is_usable",
     "is_corrupt", "is_placeholder", "has_non_latin_script",
-    "looks_like_mojibake", "rejection_reason",
+    "looks_like_mojibake", "rejection_reason", "is_artist_label_junk",
 ]

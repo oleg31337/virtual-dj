@@ -37,16 +37,14 @@ Point VLC, Winamp, Sonos, or any browser at the stream URL and it just plays.
   fact-constrained to keep the DJ from making things up.
 - **Self-repairing metadata** — when a file has no usable tags, the scanner
   guesses artist/title from the filename and folder, then **confirms the guess
-  on the web** (MusicBrainz + iTunes, fully cached). Tracks that are still
-- **Self-repairing metadata** — when a file has no usable tags, the scanner
-  guesses artist/title from the filename and folder, then **confirms the guess
-  on the web** (MusicBrainz + iTunes, fully cached). Tracks that are still
-  unidentifiable, or whose tags are corrupt (mojibake / garbage), are skipped
-  from playlists and reported as `unknown:` in the Library panel.
-- **Non-Latin? Kept, not skipped.** Cyrillic, Greek, Japanese and other scripts
-  are valid track names — the scanner keeps them, recovers a romanised form
-  when the tags are corrupt (using the local LLM), and lets the DJ announce
-  them. Only genuinely corrupt text (mis-decoded encoding) is rejected.
+  on the web** (MusicBrainz + iTunes, fully cached). Anything still unnamed is
+  registered by its file name with `Unknown` as the artist — **no file is ever
+  kept out of playlists for having bad tags**.
+- **Broad format support** — MP3, FLAC, OGG/Opus, M4A/MP4, WAV and **WMA**
+  (ASF tags included) are all scanned, tagged and streamed.
+- **Non-Latin? Kept.** Cyrillic, Greek, Japanese and other scripts are valid
+  track names — the scanner keeps them, recovers a romanised form when the
+  tags are corrupt (using the local LLM), and lets the DJ announce them.
 - **Every track gets a genre.** Web lookups provide a genre when they can; for
   the rest, the local LLM is the guaranteed second opinion. No playable track
   is left with an unknown genre, so themed playlists work for the whole library.

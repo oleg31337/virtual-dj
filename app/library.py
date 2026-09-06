@@ -13,9 +13,11 @@ is announceable:
    search is the first source of a genre; when it comes up empty the local
    model fills it in, so no playable track is left with an unknown genre.
 
-Anything still unidentifiable, or too corrupt to trust even after AI recovery,
-is marked ``excluded``: it stays in the database so the scan report can account
-for it, but no playlist will ever select it.
+Anything still unidentifiable is no longer excluded (user directive): the
+track is registered by its file name with ``Unknown`` as the artist so every
+audio file in the folder is playable. ``excluded`` stays in the schema for
+compat (rows excluded by older scans self-heal on rescan) but a current scan
+never sets it.
 """
 
 from __future__ import annotations
@@ -38,11 +40,18 @@ log = logging.getLogger(__name__)
 AUDIO_EXTS = {".mp3", ".flac", ".ogg", ".oga", ".m4a", ".mp4", ".wav", ".opus", ".wma"}
 
 _TAG_KEYS = {
-    "title": ("title", "TIT2", "\xa9nam"),
-    "artist": ("artist", "TPE1", "\xa9ART", "albumartist", "TPE2"),
-    "album": ("album", "TALB", "\xa9alb"),
-    "genre": ("genre", "TCON", "\xa9gen"),
-    "year": ("date", "TDRC", "TYER", "\xa9day", "year"),
+    # Format families each expose their own keys. mutagen's easy mode maps
+    # MP3/MP4/FLAC/Ogg to the lowercase names; mutagen has NO easy mode for
+    # ASF (.wma), so File(easy=True) falls back to a raw ASF object whose
+    # attributes carry ASF's own names ("Title", "Author", "WM/...").
+    # Appending the ASF keys keeps them inert for the other formats (their
+    # tags objects simply have no such key) while making .wma tags readable.
+    "title": ("title", "TIT2", "\xa9nam", "Title"),
+    "artist": ("artist", "TPE1", "\xa9ART", "albumartist", "TPE2",
+               "Author", "WM/AlbumArtist"),
+    "album": ("album", "TALB", "\xa9alb", "WM/AlbumTitle"),
+    "genre": ("genre", "TCON", "\xa9gen", "WM/Genre"),
+    "year": ("date", "TDRC", "TYER", "\xa9day", "year", "WM/Year"),
 }
 
 # Human-readable labels for the "unknown:" stats block.
@@ -144,9 +153,10 @@ def read_metadata(path: Path, root: Path | None = None,
                   allow_web: bool = False) -> dict[str, Any]:
     """Resolve metadata for one audio file: tags, then path, then the web.
 
-    Never raises for a malformed file. The returned dict always carries
-    ``excluded``/``exclude_reason`` so the caller can record why a track will
-    not be played, and ``meta_source`` describing where the names came from.
+    Never raises for a malformed file. Tracks whose names cannot be resolved
+    are registered by their file name with ``Unknown`` as the artist (never
+    excluded — every file stays playable). ``meta_source`` records where the
+    names came from.
     """
     meta: dict[str, Any] = {
         "title": None, "artist": None, "album": None,
@@ -280,10 +290,31 @@ def read_metadata(path: Path, root: Path | None = None,
                 meta["ai_genre"] = 1
 
     if reason is not None:
-        meta["excluded"] = 1
-        meta["exclude_reason"] = reason
-        if not meta.get("meta_source"):
-            meta["meta_source"] = "none"
+        # The track ended with no usable identity (missing title/artist, or
+        # placeholder-quality text). We NEVER exclude a file for that (user
+        # directive): it is registered by its file name with "Unknown" as the
+        # artist, so it stays in the library and can be played. The structured
+        # path guess is preferred over the bare stem — a file named
+        # "311 - Down.mp3" keeps artist "311" and title "Down" rather than
+        # being flattened to one blob — and only genuinely EMPTY fields are
+        # filled: a non-empty name that merely looks placeholder-ish (U2, 311,
+        # "Track 01") is kept as the best available identity.
+        guess: dict[str, str | None] = {}
+        if not (meta.get("title") or "").strip() \
+                or not (meta.get("artist") or "").strip():
+            guess = textq.guess_from_path(path, root)
+        filled = False
+        if not (meta.get("title") or "").strip():
+            stem_title = textq.strip_leading_junk(textq.clean_name(path.stem))
+            meta["title"] = (guess.get("title") or "").strip() \
+                or stem_title or path.stem
+            filled = True
+        if not (meta.get("artist") or "").strip() \
+                or textq.is_artist_label_junk(meta.get("artist")):
+            meta["artist"] = (guess.get("artist") or "").strip() or "Unknown"
+            filled = True
+        if filled and not meta.get("meta_source"):
+            meta["meta_source"] = "path"
     return meta
 
 
@@ -300,12 +331,13 @@ def scan_library(music_dir: str | None = None, full: bool = False,
                  use_web: bool | None = None) -> dict[str, Any]:
     """Index every audio file under ``music_dir``.
 
-    Files whose size and mtime are unchanged are skipped unless ``full``.
+    Files whose size and mtime are unchanged are skipped unless ``full``
+    (rows excluded by an older scan are always re-identified).
     Tracks that vanished from disk are removed from the database (along with
     their history), so the library always mirrors the folder on disk; new
-    files are added. Tracks that cannot be identified well enough to announce
-    are flagged ``excluded`` with a reason (they stay for the report but are
-    never playable).
+    files are added. A file whose names cannot be identified is registered by
+    its file name with ``Unknown`` as the artist — nothing is excluded from
+    playback for having poor tags.
     """
     root = Path(music_dir or config.get("music_dir", "")).expanduser()
     if use_web is None:
@@ -339,8 +371,10 @@ def scan_library(music_dir: str | None = None, full: bool = False,
             return STATUS.snapshot()
 
         existing = {
-            row["path"]: (row["id"], row["mtime"], row["size"])
-            for row in conn.execute("SELECT id, path, mtime, size FROM tracks")
+            row["path"]: (row["id"], row["mtime"], row["size"], row["excluded"])
+            for row in conn.execute(
+                "SELECT id, path, mtime, size, excluded FROM tracks"
+            )
         }
         seen: set[str] = set()
 
@@ -359,6 +393,10 @@ def scan_library(music_dir: str | None = None, full: bool = False,
                 and not full
                 and prior[1] == stat.st_mtime
                 and prior[2] == stat.st_size
+                # Rows excluded under an older scan (before the "never exclude,
+                # register by file name" policy) are re-identified on every
+                # rescan so they self-heal without needing a full scan.
+                and not prior[3]
             )
             if unchanged:
                 if prior:  # clear a stale missing flag

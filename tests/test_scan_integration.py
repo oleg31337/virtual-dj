@@ -1,6 +1,7 @@
 """Integration test: scanning a small temp library applies the three-stage
 metadata resolution, keeps non-Latin tracks (Cyrillic is now playable), and
-excludes only corrupt / unidentifiable ones.
+registers files whose names cannot be identified by their file name with an
+"Unknown" artist — nothing is excluded from playback for poor tags.
 
 The web-confirmation and local-AI stages are stubbed so the test never
 touches the network or the real model.
@@ -41,7 +42,8 @@ def temp_lib(tmp_path, monkeypatch):
     # No tags, named "Artist - Title" -> path guess, confirmed on web.
     (music / "Guess Artist - Guess Song.mp3").write_bytes(b"x")
 
-    # No usable title -> excluded (no_title).
+    # No usable title or artist -> registered by file name, artist "Unknown"
+    # (never excluded — every file stays playable).
     (music / "Just A Folder").mkdir()
     (music / "Just A Folder" / "Track 03.mp3").write_bytes(b"x")
 
@@ -66,20 +68,22 @@ def temp_lib(tmp_path, monkeypatch):
     return music
 
 
-def test_scan_classifies_and_excludes(temp_lib, monkeypatch):
+def test_scan_classifies_and_never_excludes(temp_lib, monkeypatch):
     snap = library.scan_library(str(temp_lib), full=True, use_web=True)
     assert snap["error"] is None
     assert snap["scanned"] == 6
 
     stats = library.library_stats()
-    # playable: tagged(1) + path-guess kept(1) + Cyrillic kept(1)
-    #           + "Garbage" kept as clean guess(1) + folder layout(1) = 5
-    assert stats["playable"] == 5, stats
-    assert stats["excluded"] == 1, stats
-    # Cyrillic and unconfirmed-but-clean guesses are no longer excluded.
+    # All six files are playable — the unidentifiable one is registered by its
+    # file name with "Unknown" as the artist instead of being excluded:
+    # tagged(1) + path-guess kept(1) + Unknown-by-filename(1) + Cyrillic(1)
+    #           + "Garbage" kept as clean guess(1) + folder layout(1) = 6
+    assert stats["playable"] == 6, stats
+    assert stats["excluded"] == 0, stats
+    # Cyrillic and unconfirmed-but-clean guesses are playable too.
     assert "non_latin" not in stats["unknown_reasons"], stats
     assert "unconfirmed" not in stats["unknown_reasons"], stats
-    assert stats["unknown_reasons"].get("no_title") == 1
+    assert not stats["unknown_reasons"], stats
 
     # The web-confirmed path-guess got its genre from the stub.
     rows = library.query_tracks(genres=["Rock"])
@@ -94,16 +98,13 @@ def test_scan_classifies_and_excludes(temp_lib, monkeypatch):
     assert garb, "clean filename guess should remain playable"
     assert garb[0]["artist"] == "Bad Band"
 
-    # Excluded tracks are reachable only via excluded_tracks().
-    exc = library.excluded_tracks()
-    assert len(exc) == 1
-    reasons = {e["exclude_reason"] for e in exc}
-    assert reasons == {"no_title"}
-
-    # And never enter a normal playlist query.
-    ids_exc = {e["id"] for e in exc}
-    playlist_ids = {r["id"] for r in library.query_tracks(limit=1000)}
-    assert not (ids_exc & playlist_ids)
+    # The unidentifiable file is registered by file name with artist
+    # "Unknown" and appears in normal playlist queries (nothing is excluded).
+    unk = library.query_tracks(search="Track 03")
+    assert unk, "file without usable names must still be playable"
+    assert unk[0]["artist"] == "Unknown"
+    assert unk[0]["title"] == "Track 03"
+    assert library.excluded_tracks() == []
 
 
 def test_scan_sources_recorded(temp_lib):

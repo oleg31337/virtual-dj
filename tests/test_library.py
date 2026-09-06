@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 from app import db, library, textq
@@ -172,3 +173,154 @@ def test_truncated_paren_tag_is_cleaned(music_dir, has_ffmpeg):
     library.scan_library(str(music_dir))
     track = library.query_tracks(search="Success")[0]
     assert track["title"] == "Success"
+
+
+# --- .wma / ASF tag reading ------------------------------------------------
+
+def _make_wma(path: Path, tags: dict[str, str] | None = None) -> Path:
+    """Render a real tiny .wma with ffmpeg and write ASF tags via mutagen."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+         "-c:a", "wmav2", "-ar", "44100", "-ac", "1", str(path)],
+        check=True, capture_output=True, timeout=60)
+    if tags:
+        from mutagen.asf import ASF
+        asf = ASF(str(path))
+        for key, value in tags.items():
+            asf.tags[key] = [value]
+        asf.save()
+    return path
+
+
+def test_wma_tags_are_read_from_asf(tmp_path, has_ffmpeg):
+    # mutagen has no easy mode for ASF, so a .wma's tags must be read through
+    # the raw ASF keys ("Title", "Author", "WM/...").
+    p = _make_wma(
+        tmp_path / "w" / "sample.wma",
+        {"Title": "Alpha W", "Author": "Wma Band", "WM/AlbumTitle": "First",
+         "WM/Genre": "Jazz", "WM/Year": "2001"},
+    )
+    m = library.read_metadata(p, root=tmp_path, allow_web=False)
+    assert m["title"] == "Alpha W"
+    assert m["artist"] == "Wma Band"
+    assert m["album"] == "First"
+    assert m["genre"] == "Jazz"
+    assert m["year"] == "2001"
+    assert m["meta_source"] == "tags"
+    assert m["excluded"] == 0
+    assert m["duration"] and m["duration"] > 0.5
+
+
+def test_wma_file_is_scanned_and_playable(tmp_path, has_ffmpeg, monkeypatch):
+    _make_wma(tmp_path / "wma" / "01 - Wma Song.wma",
+              {"Title": "Wma Song", "Author": "Wma Band"})
+    _make_wma(tmp_path / "wma" / "02 - Another.wma",
+              {"Title": "Another", "Author": "Wma Band"})
+    monkeypatch.setattr(library.websearch, "confirm_track",
+                        lambda a, t, use_cache=True: {"confirmed": True,
+                        "genre": "Rock", "confidence": 0.9, "sources": ["stub"],
+                        "artist": a, "title": t})
+    result = library.scan_library(str(tmp_path / "wma"))
+    assert result["error"] is None
+    assert result["added"] == 2
+    rows = library.query_tracks(search="Wma Song")
+    assert len(rows) == 1
+    assert rows[0]["artist"] == "Wma Band"
+    assert rows[0]["title"] == "Wma Song"
+
+
+def test_asf_tag_aliases_map_without_real_file(monkeypatch):
+    """The ASF key aliases work against a raw ASF-style tags object."""
+    class FakeAudio:
+        tags = {"Title": ["stub title"], "Author": ["Stub Artist"],
+                "WM/AlbumTitle": ["Stub Album"], "WM/Genre": ["Blues"],
+                "WM/Year": ["1977"]}
+        info = type("Info", (), {"length": 12.0})()
+
+    monkeypatch.setattr(library, "MutagenFile",
+                        lambda path, easy=True: FakeAudio())
+    m = library.read_metadata(Path("/tmp/x/Stub File.wma"),
+                              allow_web=False)
+    assert m["title"] == "stub title"
+    assert m["artist"] == "Stub Artist"
+    assert m["album"] == "Stub Album"
+    assert m["genre"] == "Blues"
+    assert m["year"] == "1977"
+    assert m["meta_source"] == "tags"
+
+
+# --- unidentifiable files are registered, never excluded -------------------
+
+def test_unidentifiable_file_registered_by_filename(monkeypatch, tmp_path):
+    # No tags at all and a filename that yields no usable artist/title:
+    # the file must stay playable as "Unknown - <file name>".
+    monkeypatch.setattr(library, "MutagenFile", lambda path, easy=True: None)
+    p = tmp_path / "Just A Folder" / "Track 03.wma"
+    m = library.read_metadata(p, root=tmp_path, allow_web=False)
+    assert m["excluded"] == 0
+    assert m["exclude_reason"] is None
+    assert m["artist"] == "Unknown"
+    assert m["title"] == "Track 03"
+    assert m["meta_source"] == "path"
+
+
+def test_short_numeric_artist_name_is_kept(monkeypatch):
+    # A real artist like "311", "U2" or "A1" fails the placeholder heuristics
+    # (pure numbers / single letter) but must NEVER be overwritten with
+    # "Unknown": only genuinely empty fields get the fallback.
+    class FakeAudio:
+        tags = {"title": ["Down"], "artist": ["311"]}
+        info = type("Info", (), {"length": 200.0})()
+
+    monkeypatch.setattr(library, "MutagenFile",
+                        lambda path, easy=True: FakeAudio())
+    monkeypatch.setattr(library.ai_meta, "recover_names",
+                        lambda *a, **k: {"confident": False})
+    m = library.read_metadata(Path("/mnt/mp3/311 - Down.mp3"),
+                              root=Path("/mnt/mp3"), allow_web=False)
+    assert m["excluded"] == 0
+    assert m["artist"] == "311"
+    assert m["title"] == "Down"
+
+
+def test_junk_artist_label_becomes_unknown(monkeypatch, tmp_path):
+    # CD rippers tag anonymous tracks with artist="artist" — that literal
+    # label must not survive as an artist name; the file registers under
+    # "Unknown" with its (junk) title kept so it stays playable.
+    class FakeAudio:
+        tags = {"title": ["Track 01"], "artist": ["artist"]}
+        info = type("Info", (), {"length": 200.0})()
+
+    monkeypatch.setattr(library, "MutagenFile",
+                        lambda path, easy=True: FakeAudio())
+    monkeypatch.setattr(library.ai_meta, "recover_names",
+                        lambda *a, **k: {"confident": False})
+    m = library.read_metadata(tmp_path / "01 - Track 01.mp3",
+                              root=tmp_path, allow_web=False)
+    assert m["excluded"] == 0
+    assert m["artist"] == "Unknown"
+    assert m["title"] == "Track 01"
+
+
+def test_excluded_rows_self_heal_on_rescan(music_dir, has_ffmpeg, monkeypatch):
+    # Simulate a row excluded by an older scan: an ordinary (incremental)
+    # rescan must re-identify it instead of skipping the unchanged file.
+    monkeypatch.setattr(library.websearch, "confirm_track",
+                        lambda a, t, use_cache=True: {"confirmed": False,
+                        "genre": None, "confidence": 0.0, "sources": []})
+    library.scan_library(str(music_dir))
+    conn = db.connect()
+    row = conn.execute("SELECT id, path FROM tracks WHERE title='Gamma'").fetchone()
+    assert row is not None
+    conn.execute("UPDATE tracks SET excluded=1, exclude_reason='no_title', "
+                 "title=NULL, artist=NULL WHERE id=?", (row["id"],))
+    conn.commit()
+    library.scan_library(str(music_dir))  # incremental, not full
+    fixed = db.connect().execute(
+        "SELECT title, artist, excluded FROM tracks WHERE title='Gamma'"
+    ).fetchone()
+    assert fixed, "previously-excluded row must be re-identified on rescan"
+    assert fixed["excluded"] == 0
+    assert fixed["artist"] == "Band Three"
