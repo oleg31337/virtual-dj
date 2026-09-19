@@ -78,6 +78,34 @@ DEFAULTS: dict[str, Any] = {
         # last resort.
         "free_text_genre": True,
     },
+    # Loudness normalization (ReplayGain-style, EBU R128). Every track is
+    # measured ONCE (integrated loudness + true peak) and then played with a
+    # fixed gain, so loud songs are pulled down and quiet ones lifted to one
+    # common target instead of being ridden dynamically within the song.
+    # Measurement runs in the background at low priority; a track that has not
+    # been measured yet keeps the legacy dynamic loudnorm chain.
+    "loudness": {
+        # Off = everything keeps the legacy dynamic loudnorm chain (the exact
+        # behaviour before this feature existed).
+        "enabled": True,
+        # Perceived-loudness target for music. -16 LUFS ≈ what the old
+        # dynamic loudnorm chain produced, so overall level does not shift.
+        "target_lufs": -16.0,
+        # Ceiling for the true (inter-sample) peak after the gain is applied.
+        "true_peak_ceiling": -1.5,
+        # Never boost a quiet track by more than this — it would amplify hiss,
+        # room noise and fade-in silence.
+        "max_boost_db": 6.0,
+        # Never attenuate more than this.
+        "min_gain_db": -12.0,
+        # Seconds analyzed from the START of each file (0 = analyze the whole
+        # file). The head of a track is the cheapest representative sample.
+        "window_seconds": 120,
+        # Parallel ffmpeg analyses (each one is single-threaded).
+        "workers": 6,
+        # Start draining the queue at boot and after every library scan.
+        "autostart": True,
+    },
     "enrich": {
         # Look up extra facts on MusicBrainz / Wikipedia.
         "enabled": True,

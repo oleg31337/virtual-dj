@@ -34,6 +34,14 @@ def isolated_data(tmp_path, monkeypatch):
     db.close()
     config.ensure_dirs()
     db.init_db()
+    # Loudness analysis starts automatically after a scan in production, but
+    # that would spawn real ffmpeg workers from every scan in the suite and
+    # leak the (process-wide) analyzer counters across tests. Tests that want
+    # it call loudness.ANALYZER.start() explicitly. Injected into DEFAULTS (not
+    # via save_config) so the config cache stays cold — several tests patch
+    # DEFAULTS and expect it to be read on first load.
+    monkeypatch.setitem(config.DEFAULTS.setdefault("loudness", {}),
+                        "autostart", False)
     yield data_dir
     db.close()
 

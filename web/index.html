@@ -69,6 +69,50 @@
   </section>
 
   <section class="card">
+    <h3>Volume normalization</h3>
+    <p class="dim">Every song is measured once (EBU R128 loudness + true peak) and
+      then played at its own fixed gain: loud tracks are pulled down, quiet ones
+      lifted, and the level inside a song is never touched. Unmeasured tracks
+      keep the old dynamic behaviour until the background pass reaches them.</p>
+    <label class="field">
+      <span><input type="checkbox" id="loudness-enabled" checked />
+        Enable static volume normalization</span>
+    </label>
+    <div class="row">
+      <label class="field inline"><span>Target</span>
+        <input type="number" id="loudness-target" min="-30" max="-6" step="0.5" value="-16" />
+        <span class="dim">LUFS</span></label>
+      <label class="field inline"><span>Peak ceiling</span>
+        <input type="number" id="loudness-tp" min="-6" max="0" step="0.1" value="-1.5" />
+        <span class="dim">dBTP</span></label>
+    </div>
+    <div class="row">
+      <label class="field inline"><span>Max boost</span>
+        <input type="number" id="loudness-boost" min="0" max="18" step="0.5" value="6" />
+        <span class="dim">dB</span></label>
+      <label class="field inline"><span>Max cut</span>
+        <input type="number" id="loudness-min" min="-30" max="0" step="0.5" value="-12" />
+        <span class="dim">dB</span></label>
+    </div>
+    <div class="row">
+      <label class="field inline"><span>Analyze first</span>
+        <input type="number" id="loudness-window" min="0" max="900" step="10" value="120" />
+        <span class="dim">s (0 = whole file)</span></label>
+      <label class="field inline"><span>Workers</span>
+        <input type="number" id="loudness-workers" min="1" max="16" step="1" value="6" /></label>
+    </div>
+    <button id="save-loudness" class="primary">Save volume settings</button>
+    <div class="row">
+      <button id="loudness-analyze">Analyze library</button>
+      <button id="loudness-stop">Stop</button>
+      <button id="loudness-reset" class="ghost">Re-analyze everything</button>
+    </div>
+    <div class="progress"><div id="loudness-bar"></div></div>
+    <div class="meta dim" id="loudness-status">—</div>
+    <div class="meta dim" id="loudness-current"></div>
+  </section>
+
+  <section class="card">
     <h3>LLM configuration <span class="dim">(talking DJ)</span></h3>
     <p class="dim">Points the DJ at an Ollama instance for script generation.
       Saved values here override the <code>.env</code> settings.</p>

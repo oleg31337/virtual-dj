@@ -25,6 +25,23 @@ const fmtTime = (s) => {
   return `${m}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 };
 
+// Loudness figures for the library list. gain_db is null until the background
+// analyzer has measured the track (which then still plays via the dynamic
+// fallback), so null must render as "pending", never as "0 dB".
+const fmtGain = (g) => {
+  const n = Number(g);
+  if (!Number.isFinite(n) || g === null) return '–';
+  return `${n > 0 ? '+' : ''}${n.toFixed(1)} dB`;
+};
+const fmtLufs = (v) => {
+  const n = Number(v);
+  return Number.isFinite(n) && v !== null ? `${n.toFixed(1)} LUFS` : 'not measured';
+};
+const fmtEta = (sec) => {
+  const m = Math.max(0, Math.round(sec / 60));
+  return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
+};
+
 /* ---------- audio player ---------- */
 
 let audio = null;
@@ -180,7 +197,9 @@ async function loadTracks(search) {
     div.innerHTML =
       `<div class="t"><div>${esc(tr.title || tr.path.split('/').pop())}</div>` +
       `<div class="a">${esc(tr.artist || 'Unknown')}</div></div>` +
-      `<div class="x">${fmtTime(tr.duration)}</div>`;
+      `<div class="x"><span class="${tr.gain_db === null || tr.gain_db === undefined ? 'dim' : 'gain'}"` +
+      ` title="${tr.gain_db === null || tr.gain_db === undefined ? 'not measured yet — plays with the dynamic fallback' : 'static gain applied at broadcast'}` +
+      ` (${fmtLufs(tr.lufs_i)})">${fmtGain(tr.gain_db)}</span> ${fmtTime(tr.duration)}</div>`;
     div.onclick = () => {
       if (state.selected.has(tr.id)) state.selected.delete(tr.id);
       else state.selected.add(tr.id);
@@ -317,6 +336,18 @@ async function loadConfig() {
   const ns = cfg.dj?.noise_scale ?? 0.667;
   $('dj-noise').value = Math.round(ns * 100);
   $('expr-val').textContent = ns.toFixed(2);
+
+  // Volume normalization card (the running pass reports through
+  // pollLoudness; only the settings are populated here so a live update
+  // never clobbers what the user is typing).
+  const lo = cfg.loudness || {};
+  $('loudness-enabled').checked = lo.enabled ?? true;
+  $('loudness-target').value = lo.target_lufs ?? -16;
+  $('loudness-tp').value = lo.true_peak_ceiling ?? -1.5;
+  $('loudness-boost').value = lo.max_boost_db ?? 6;
+  $('loudness-min').value = lo.min_gain_db ?? -12;
+  $('loudness-window').value = lo.window_seconds ?? 120;
+  $('loudness-workers').value = lo.workers ?? 6;
 }
 
 async function loadLLMConfig() {
@@ -490,6 +521,50 @@ async function pollScan() {
     el.className = 'meta dim';
     loadGenres(); loadHealth(); loadLibraryStats();
   }
+}
+
+/* ---------- volume normalization ---------- */
+
+function renderLoudness(s) {
+  const el = $('loudness-status');
+  if (!el || !s) return;
+  const done = Number(s.done) || 0;
+  const total = Number(s.total) || 0;
+  const queue = Number(s.queue) || 0;
+  const pct = total ? Math.min(100, Math.round((done / total) * 100))
+                    : (queue ? 0 : 100);
+  $('loudness-bar').style.width = `${pct}%`;
+
+  const parts = [];
+  if (s.running) parts.push(`analyzing… ${done}/${total} (${pct}%)`);
+  else if (queue) parts.push(`${queue} track${queue === 1 ? '' : 's'} waiting to be measured`);
+  else parts.push('every track measured');
+  if (s.failed) parts.push(`${s.failed} unmeasurable (keep the dynamic fallback)`);
+  if (s.missing) parts.push(`${s.missing} gone from disk (a rescan cleans those up)`);
+  if (s.running && s.eta_seconds) parts.push(`~${fmtEta(s.eta_seconds)} left`);
+  if (!s.enabled) parts.push('normalization is OFF — using the old dynamic chain');
+  if (s.error) parts.push(`⚠ ${s.error}`);
+  el.textContent = parts.join(' · ');
+  el.className = 'meta ' + (s.error ? 'warn' : (s.enabled ? 'ok' : 'dim'));
+  $('loudness-current').textContent = s.current
+    ? `last analyzed: ${s.current}` : '';
+}
+
+async function loadLoudness() {
+  try {
+    renderLoudness(await api('/api/loudness/status'));
+  } catch (e) { /* ignore */ }
+}
+
+async function pollLoudness() {
+  let s = null;
+  try {
+    s = await api('/api/loudness/status');
+  } catch (e) {
+    return;
+  }
+  renderLoudness(s);
+  if (s.running) setTimeout(pollLoudness, 2000);
 }
 
 /* ---------- wiring ---------- */
@@ -821,6 +896,44 @@ function wire() {
     await api('/api/presets', { method: 'POST', body: JSON.stringify({ name }) });
     $('preset-name').value = ''; loadPresets();
   };
+
+  // Volume normalization card.
+  $('save-loudness').onclick = async () => {
+    const num = (id, fallback) => {
+      const v = Number($(id).value);
+      return Number.isFinite(v) ? v : fallback;
+    };
+    await api('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({
+        loudness: {
+          enabled: $('loudness-enabled').checked,
+          target_lufs: num('loudness-target', -16),
+          true_peak_ceiling: num('loudness-tp', -1.5),
+          max_boost_db: num('loudness-boost', 6),
+          min_gain_db: num('loudness-min', -12),
+          window_seconds: Math.round(num('loudness-window', 120)),
+          workers: Math.round(num('loudness-workers', 6)),
+        },
+      }),
+    });
+    await loadConfig();
+    pollLoudness();
+  };
+  $('loudness-analyze').onclick = async () => {
+    await api('/api/loudness/analyze', { method: 'POST', body: '{}' });
+    pollLoudness();
+  };
+  $('loudness-stop').onclick = async () => {
+    await api('/api/loudness/stop', { method: 'POST', body: '{}' });
+    pollLoudness();
+  };
+  $('loudness-reset').onclick = async () => {
+    if (!confirm('Forget every loudness measurement and measure the whole '
+                 + 'library again?')) return;
+    await api('/api/loudness/reset', { method: 'POST', body: '{}' });
+    pollLoudness();
+  };
 }
 
 async function init() {
@@ -835,8 +948,10 @@ async function init() {
     safe(loadGenres()), safe(loadTracks('')),
     safe(loadQueue()), safe(loadPresets()), safe(loadHistory()),
     safe(loadHealth()), safe(loadPrograms()), safe(loadLLMConfig()),
+    safe(loadLoudness()),
   ]);
   pollScan();
+  pollLoudness();
   connectWS();
   loadIcecastStatus();
   setInterval(loadHistory, 30000);

@@ -52,6 +52,12 @@ Point VLC, Winamp, Sonos, or any browser at the stream URL and it just plays.
   tracks sharing a genre, an artist, or a decade — with the DJ announcing each
   vibe switch before the next block. Program size and grouping strategy are
   adjustable in `playback.program` (config or web UI).
+- **Even volume across the whole library.** Every track is measured once
+  (EBU R128 loudness + true peak) and then streamed at its own fixed gain, so
+  loud songs are pulled down and quiet ones lifted — without the level being
+  ridden inside a song. The measurement pass runs in the background at low
+  priority, is resumable, and can be watched and tuned in the *Volume
+  normalization* card (see [Volume normalization](#volume-normalization)).
 - **Web control panel** — live now-playing, library browser/search, genre
   filters, queue editing, presets, and DJ settings. Includes a browser player.
 - **Your library, untouched** — the scanner only ever reads your music files.
@@ -234,6 +240,67 @@ A few env vars override the defaults at first boot, useful for containers:
 | `VDJ_HOST` | `0.0.0.0` | Bind address |
 | `VDJ_LOG_LEVEL` | `info` | Log verbosity |
 | `VDJ_NO_VOICE_DOWNLOAD` | `0` | Set to `1` to skip the first-run voice download |
+
+## Volume normalization
+
+A real library spans a wide loudness range — 17 dB between the quietest and the
+loudest file in the library this was built against — so a plain shuffle makes
+loud tracks jump out and quiet ones disappear. Virtual DJ measures every track
+once and then streams it at its own fixed gain:
+
+```
+gain = target_lufs − integrated_lufs                  # −16 − (−20.1) = +4.1 dB
+gain = min(gain, true_peak_ceiling − true_peak_dbfs)  # never clip
+gain = clamp(gain, min_gain_db, max_boost_db)         # never shout
+```
+
+Measurement is EBU R128 (`ffmpeg -af ebur128=peak=true`) over the **first 120
+seconds** of each file — the cheapest representative sample — and the result
+(integrated LUFS, true peak, gain) is cached per track, so each file is measured
+once and re-measured only when the file or the settings change. On the reference
+host that is ~165 ms per file with 6 workers: a **~25 minute one-off pass for an
+8,800-file library**, and effectively nothing afterwards for new files.
+
+The pass is **background and gradual**: a small nice'd worker pool drains the
+"not measured yet" queue while the station keeps streaming, and each track
+starts using its gain the moment it has been measured. Tracks not measured yet
+(and everything with the feature switched off) keep the legacy dynamic
+`loudnorm` chain, so volume never gets *worse* during the pass. Because the
+queue is a database query, restarting the app resumes the pass instead of
+starting over.
+
+The web UI's **Volume normalization** card shows progress, the ETA and the last
+analyzed file, and puts each track's measured gain next to it in the library
+list.
+
+| Setting (`loudness.*` in `data/config.json`) | Default | Meaning |
+|---|---|---|
+| `enabled` | `true` | `false` = everything keeps the dynamic `loudnorm` chain |
+| `target_lufs` | `-16` | Perceived-loudness target for music |
+| `true_peak_ceiling` | `-1.5` | Post-gain true-peak ceiling (dBTP) |
+| `max_boost_db` | `6` | Never amplify a quiet track more than this |
+| `min_gain_db` | `-12` | Never attenuate a track more than this |
+| `window_seconds` | `120` | Seconds analyzed from the START of a file (0 = whole file) |
+| `workers` | `6` | Parallel analyses (each one is single-threaded) |
+| `autostart` | `true` | Drain the queue at boot and after every scan |
+
+Notes:
+
+- The analyzed window is part of the measurement id stored per track, so
+  changing `window_seconds` re-queues the whole library rather than mixing two
+  different estimates. "Re-analyze everything" in the card does the same on
+  demand.
+- A shorter window is faster but noisier: on the reference library a 60 s
+  mid-track window estimates a track's loudness within ~0.8 dB on average,
+  while the first 120 s averages ~1.4 dB (up to ~4 dB on tracks that start with
+  a long quiet intro). Set `window_seconds: 0` to measure whole files exactly.
+- Files that cannot be decoded (or are silent) are marked measured with no gain:
+  they keep the dynamic fallback and are never retried in a loop.
+- A row whose file is gone from disk (a stale index) is stamped the same way and
+  counted separately in the card — the next rescan removes such rows entirely.
+- The DJ voice is deliberately excluded: every spoken clip comes from the same
+  Piper model, so its level is already consistent, and `dj.gain_db` remains the
+  artistic trim. Music now meets it at a known target instead.
 
 ## Running as a service
 

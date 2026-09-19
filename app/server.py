@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from . import config, db, dj, library, websearch, ai_meta
 from . import icecast as icecast_mod
 from . import icecast_server as icecast_server_mod
+from . import loudness
 from .scheduler import SCHEDULER
 from .stream import BROADCASTER
 
@@ -65,9 +66,13 @@ async def lifespan(app: FastAPI):
     # Managed Icecast server (bundled) must be up before the pusher feeds it.
     icecast_server_mod.SERVER.start()
     icecast_mod.PUSHER.start()
+    # Drain the loudness queue in the background at low priority. New files
+    # added by a scan re-trigger it; switching it off here is harmless.
+    loudness.autostart()
     try:
         yield
     finally:
+        loudness.ANALYZER.stop(timeout_s=3.0)
         icecast_mod.PUSHER.stop()
         icecast_server_mod.SERVER.stop()
         BROADCASTER.stop()
@@ -216,6 +221,7 @@ def api_status():
         "now_playing": BROADCASTER.state(),
         "library": library.library_stats(),
         "scan": library.STATUS.snapshot(),
+        "loudness": loudness.ANALYZER.status(),
         "config": config.load_config(),
     }
 
@@ -338,6 +344,36 @@ def api_scan(req: ScanRequest):
 @app.get("/api/library/scan")
 def api_scan_status():
     return library.STATUS.snapshot()
+
+
+# --- loudness (volume normalization) ---------------------------------------
+
+class LoudnessRequest(BaseModel):
+    workers: int | None = None
+
+
+@app.get("/api/loudness/status")
+def api_loudness_status():
+    return loudness.ANALYZER.status()
+
+
+@app.post("/api/loudness/analyze")
+def api_loudness_analyze(req: LoudnessRequest | None = None):
+    """Start (or resume) the background measurement pass."""
+    return loudness.analyze_in_background(req.workers if req else None)
+
+
+@app.post("/api/loudness/stop")
+def api_loudness_stop():
+    return loudness.ANALYZER.stop()
+
+
+@app.post("/api/loudness/reset")
+def api_loudness_reset():
+    """Forget every measurement so the next pass re-analyzes the library."""
+    loudness.ANALYZER.stop()
+    return {"reset": loudness.ANALYZER.reset(),
+            "status": loudness.ANALYZER.status()}
 
 
 @app.get("/api/library/genres")

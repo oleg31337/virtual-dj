@@ -304,6 +304,28 @@ def test_junk_artist_label_becomes_unknown(monkeypatch, tmp_path):
     assert m["title"] == "Track 01"
 
 
+def test_rescan_leaves_no_open_write_transaction(music_dir, has_ffmpeg):
+    """A rescan of an UNCHANGED library must not hold SQLite's write lock.
+
+    The unchanged-file branch used to run an UPDATE without committing, which
+    kept an implicit write transaction open for the rest of the walk — every
+    other writer (the loudness analyzer, play history) then failed with
+    "database is locked" for the whole scan.
+    """
+    import sqlite3
+    from app import config
+
+    library.scan_library(str(music_dir))          # first pass inserts
+    library.scan_library(str(music_dir))          # second pass: all unchanged
+
+    other = sqlite3.connect(config.DB_PATH, timeout=2)   # a separate connection
+    try:
+        other.execute("UPDATE tracks SET missing=0")
+        other.commit()
+    finally:
+        other.close()
+
+
 def test_excluded_rows_self_heal_on_rescan(music_dir, has_ffmpeg, monkeypatch):
     # Simulate a row excluded by an older scan: an ordinary (incremental)
     # rescan must re-identify it instead of skipping the unchanged file.

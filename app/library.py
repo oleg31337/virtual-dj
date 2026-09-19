@@ -371,9 +371,10 @@ def scan_library(music_dir: str | None = None, full: bool = False,
             return STATUS.snapshot()
 
         existing = {
-            row["path"]: (row["id"], row["mtime"], row["size"], row["excluded"])
+            row["path"]: (row["id"], row["mtime"], row["size"], row["excluded"],
+                          row["missing"])
             for row in conn.execute(
-                "SELECT id, path, mtime, size, excluded FROM tracks"
+                "SELECT id, path, mtime, size, excluded, missing FROM tracks"
             )
         }
         seen: set[str] = set()
@@ -398,9 +399,17 @@ def scan_library(music_dir: str | None = None, full: bool = False,
                 # rescan so they self-heal without needing a full scan.
                 and not prior[3]
             )
-            if unchanged:
-                if prior:  # clear a stale missing flag
-                    conn.execute("UPDATE tracks SET missing=0 WHERE id=?", (prior[0],))
+            if unchanged and prior is not None:
+                if prior[4]:  # a row from an old scan is still flagged missing
+                    conn.execute("UPDATE tracks SET missing=0 WHERE id=?",
+                                 (prior[0],))
+                    # Commit here too: leaving an implicit write transaction
+                    # open across the rest of the walk holds SQLite's write
+                    # lock for the whole scan and blocks every other writer
+                    # (the loudness analyzer, play history) with "database is
+                    # locked". Only rows actually flagged do this, so a rescan
+                    # of an unchanged library performs no writes at all.
+                    conn.commit()
                 continue
 
             meta = read_metadata(path, root=root, allow_web=use_web)
@@ -524,6 +533,14 @@ def scan_library(music_dir: str | None = None, full: bool = False,
             STATUS.finished_at = time.time()
             STATUS.current_dir = ""
             STATUS.phase = "idle"
+        # Newly indexed files have no loudness measurement yet; draining that
+        # queue is a separate, low-priority background pass (imported lazily to
+        # keep the module graph acyclic).
+        try:
+            from . import loudness
+            loudness.autostart()
+        except Exception as exc:  # noqa: BLE001 - never fail a scan over this
+            log.debug("loudness autostart after scan skipped (%s)", exc)
     return STATUS.snapshot()
 
 
@@ -691,7 +708,8 @@ def query_tracks(
 
     order = "RANDOM()" if random_order else "artist COLLATE NOCASE, album, title"
     sql = (
-        "SELECT id, path, title, artist, album, genre, year, duration "
+        "SELECT id, path, title, artist, album, genre, year, duration, "
+        "gain_db, lufs_i "
         "FROM tracks "
         f"WHERE {' AND '.join(where)} ORDER BY {order} LIMIT ? OFFSET ?"
     )

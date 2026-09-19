@@ -22,7 +22,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Callable
 
-from . import config, db
+from . import config, db, loudness
 from .scheduler import SCHEDULER
 from . import icecast_metadata
 
@@ -229,11 +229,31 @@ class Broadcaster:
 
     # --- encoding ---------------------------------------------------------
 
-    def _encode_args(self, path: str, extra_filters: list[str] | None = None) -> list[str]:
+    @staticmethod
+    def _gain_filter(gain_db: float | None) -> str:
+        """The audio filter that sets this track's level.
+
+        A track measured by ``app/loudness.py`` plays at its own fixed gain —
+        deterministic, transparent, and correct from the first second. Anything
+        not measured yet (and everything with normalization switched off) keeps
+        the legacy dynamic ``loudnorm`` chain, which normalizes on the fly:
+        it rides the level inside a song and ramps in at every track start.
+        """
+        cfg = loudness.settings()
+        if cfg["enabled"] and gain_db is not None:
+            try:
+                return f"volume={float(gain_db):.2f}dB"
+            except (TypeError, ValueError):
+                pass
+        return (f"loudnorm=I={cfg['target_lufs']}:"
+                f"TP={cfg['true_peak_ceiling']}:LRA=11")
+
+    def _encode_args(self, path: str, extra_filters: list[str] | None = None,
+                     gain_db: float | None = None) -> list[str]:
         bitrate = int(config.get("stream.bitrate_kbps", 128))
         rate = int(config.get("stream.sample_rate", 44100))
         channels = int(config.get("stream.channels", 2))
-        filters = ["loudnorm=I=-16:TP=-1.5:LRA=11"] + (extra_filters or [])
+        filters = [self._gain_filter(gain_db)] + (extra_filters or [])
         return [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
             "-i", path,
@@ -255,7 +275,13 @@ class Broadcaster:
             return False
 
         self._skip.clear()
-        args = self._encode_args(path)
+        # Music plays at its measured static gain; the DJ voice keeps the
+        # dynamic chain (every clip comes from the same Piper model, so its
+        # level is already consistent and dj.gain_db remains the trim).
+        gain_db = None
+        if kind == "track":
+            gain_db = (meta.get("track") or {}).get("gain_db")
+        args = self._encode_args(path, gain_db=gain_db)
         try:
             proc = subprocess.Popen(
                 args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

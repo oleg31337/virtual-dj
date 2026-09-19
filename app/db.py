@@ -115,6 +115,14 @@ _ADDED_COLUMNS = (
     ("tracks", "meta_source", "TEXT"),
     ("tracks", "ai_resolved", "INTEGER NOT NULL DEFAULT 0"),
     ("tracks", "ai_genre", "INTEGER NOT NULL DEFAULT 0"),
+    # Loudness normalization (EBU R128). ``gain_db`` is the static gain the
+    # broadcaster applies; NULL means "not measured yet" so playback falls
+    # back to the dynamic loudnorm chain.
+    ("tracks", "lufs_i", "REAL"),
+    ("tracks", "true_peak_dbfs", "REAL"),
+    ("tracks", "gain_db", "REAL"),
+    ("tracks", "loudness_analyzed_at", "REAL"),
+    ("tracks", "loudness_algo", "TEXT"),
 )
 
 
@@ -131,6 +139,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_tracks_playable "
         "ON tracks(missing, excluded)"
+    )
+    # The loudness analyzer scans "everything not measured yet" on every
+    # tick/claim, so the queue predicate gets an index of its own.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tracks_loudness "
+        "ON tracks(loudness_analyzed_at)"
     )
     # ai_lookups may not exist on databases created before this release.
     conn.execute(

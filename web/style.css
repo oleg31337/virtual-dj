@@ -54,6 +54,8 @@ main {
 .progress { height: 5px; background: #232838; border-radius: 3px;
             margin: 12px 0 6px; overflow: hidden; }
 #np-bar { height: 100%; width: 0; background: var(--accent); transition: width .4s linear; }
+#loudness-bar { height: 100%; width: 0; background: var(--accent2); transition: width .3s linear; }
+.gain { color: var(--accent2); font-variant-numeric: tabular-nums; }
 button {
   background: var(--card2); color: var(--fg); border: 1px solid var(--border);
   padding: 7px 13px; border-radius: 6px; cursor: pointer; font-size: 13px;
@@ -69,6 +71,13 @@ input[type=text], select, textarea {
   border-radius: 6px; padding: 7px 10px; font-size: 13px; width: 100%;
   box-sizing: border-box;
 }
+input[type=number] {
+  background: #10141d; color: var(--fg); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 8px; font-size: 13px; width: 88px;
+  box-sizing: border-box;
+}
+/* .field.inline > input would otherwise force width:auto on these */
+.field.inline > input[type=number] { width: 88px; }
 .field .dual { display: flex; gap: 18px; margin-top: 6px; }
 .field .dual > span { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
 .field .dual input[type=range] { width: 110px; }

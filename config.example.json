@@ -29,6 +29,18 @@
     "station_name": "Virtual DJ"
   },
 
+  "loudness": {
+    "_comment": "Per-track volume normalization (EBU R128). Each track is measured once in the background, then played at a fixed gain so loud songs are pulled down and quiet ones lifted. enabled=false keeps the legacy dynamic loudnorm chain. window_seconds is how much of the START of each file is analyzed (0 = the whole file); changing it re-measures the library.",
+    "enabled": true,
+    "target_lufs": -16.0,
+    "true_peak_ceiling": -1.5,
+    "max_boost_db": 6.0,
+    "min_gain_db": -12.0,
+    "window_seconds": 120,
+    "workers": 6,
+    "autostart": true
+  },
+
   "icecast": {
     "_comment": "Icecast delivery for external players (Winamp / VLC / Sonos). The app runs a managed icecast2 and relays the stream into it. In Docker these come from the .env ICECAST_* / VDJ_ICECAST_* vars; on bare metal set them here. public_port must equal port for the single-container setup.",
     "enabled": true,
