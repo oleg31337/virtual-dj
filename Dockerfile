@@ -28,7 +28,11 @@ ENV PYTHONUNBUFFERED=1 \
     VDJ_MUSIC_DIR=/music \
     # Listen on all interfaces by default inside the container.
     VDJ_HOST=0.0.0.0 \
-    VDJ_PORT=8420
+    VDJ_PORT=8420 \
+    # Parallel loudness analyses (background measurement pass). 2 keeps the
+    # container responsive; raise it near the core count for a faster first
+    # pass. Overridable at runtime from the web UI (data/config.json wins).
+    VDJ_LOUDNESS_WORKERS=2
 
 # ffmpeg (decode/transcode + the icecast pusher) + libgomp1 (onnxruntime/Piper
 # OpenMP backend) + icecast2 (streaming server). Installed WITH recommends:

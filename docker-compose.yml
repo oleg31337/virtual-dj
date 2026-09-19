@@ -46,6 +46,14 @@ services:
       # both of these at runtime; a saved value in data/config.json wins.
       VDJ_OLLAMA_URL: "${VDJ_OLLAMA_URL:-}"
       VDJ_OLLAMA_MODEL: "${VDJ_OLLAMA_MODEL:-}"
+      # Loudness-normalization parallelism (one ffmpeg per worker). The
+      # background measurement pass runs while the station streams, so the
+      # default stays modest; raise it toward your CPU core count for a faster
+      # first pass (measured on a 6-core host, 8,800 files: ~1 h at 2 workers,
+      # ~28 min at 4, ~24 min at 6 — scaling flattens past 4). The web UI's
+      # "Volume normalization" card can override it at runtime — a value saved
+      # in data/config.json wins.
+      VDJ_LOUDNESS_WORKERS: "${VDJ_LOUDNESS_WORKERS:-2}"
     ports:
       # Web UI / app API.
       - "${HTTP_PORT:-8420}:8420"

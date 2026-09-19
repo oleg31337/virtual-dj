@@ -240,6 +240,7 @@ A few env vars override the defaults at first boot, useful for containers:
 | `VDJ_HOST` | `0.0.0.0` | Bind address |
 | `VDJ_LOG_LEVEL` | `info` | Log verbosity |
 | `VDJ_NO_VOICE_DOWNLOAD` | `0` | Set to `1` to skip the first-run voice download |
+| `VDJ_LOUDNESS_WORKERS` | `2` | Parallel loudness analyses (raise near your core count for a faster first pass) |
 
 ## Volume normalization
 
@@ -257,9 +258,12 @@ gain = clamp(gain, min_gain_db, max_boost_db)         # never shout
 Measurement is EBU R128 (`ffmpeg -af ebur128=peak=true`) over the **first 120
 seconds** of each file — the cheapest representative sample — and the result
 (integrated LUFS, true peak, gain) is cached per track, so each file is measured
-once and re-measured only when the file or the settings change. On the reference
-host that is ~165 ms per file with 6 workers: a **~25 minute one-off pass for an
-8,800-file library**, and effectively nothing afterwards for new files.
+once and re-measured only when the file or the settings change. Measured on the
+reference host, one file takes ~390 ms at the default 2 workers and ~170 ms at
+6; for an 8,800-file library that is a **one-off pass of ~1 hour at 2 workers**
+(or ~25–30 minutes at 4–6 — scaling flattens past 4), and effectively nothing
+afterwards for new files. Set `VDJ_LOUDNESS_WORKERS` in `.env` (or the card's
+*Workers* field) to change it.
 
 The pass is **background and gradual**: a small nice'd worker pool drains the
 "not measured yet" queue while the station keeps streaming, and each track
@@ -281,7 +285,7 @@ list.
 | `max_boost_db` | `6` | Never amplify a quiet track more than this |
 | `min_gain_db` | `-12` | Never attenuate a track more than this |
 | `window_seconds` | `120` | Seconds analyzed from the START of a file (0 = whole file) |
-| `workers` | `6` | Parallel analyses (each one is single-threaded) |
+| `workers` | `2` | Parallel analyses (each one is single-threaded); set `VDJ_LOUDNESS_WORKERS` in `.env` |
 | `autostart` | `true` | Drain the queue at boot and after every scan |
 
 Notes:

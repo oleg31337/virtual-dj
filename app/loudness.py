@@ -71,7 +71,8 @@ def settings() -> dict[str, Any]:
         "max_boost_db": _clamped("loudness.max_boost_db", 6.0, 0.0, 18.0),
         "min_gain_db": _clamped("loudness.min_gain_db", -12.0, -30.0, 0.0),
         "window_seconds": int(_clamped("loudness.window_seconds", 120, 0, 900)),
-        "workers": int(_clamped("loudness.workers", 6, 1, 16)),
+        # Fallback default mirrors config.DEFAULTS (VDJ_LOUDNESS_WORKERS=2).
+        "workers": int(_clamped("loudness.workers", 2, 1, 16)),
         "autostart": bool(config.get("loudness.autostart", True)),
     }
 

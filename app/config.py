@@ -23,6 +23,21 @@ VOICES_DIR = DATA_DIR / "voices"
 CONFIG_PATH = DATA_DIR / "config.json"
 DB_PATH = Path(os.environ.get("VDJ_DB_PATH", DATA_DIR / "vdj.sqlite3"))
 
+
+def _env_int(name: str, default: int) -> int:
+    """Read an integer knob from the environment, never raising.
+
+    Compose usually forwards ``"${VAR:-}"``, which yields an EMPTY string when
+    the variable is unset — ``int("")`` would crash the app at import time, so
+    an unset/empty/junk value falls back to ``default``.
+    """
+    raw = (os.environ.get(name) or "").strip()
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 DEFAULTS: dict[str, Any] = {
     # Where to look for music. Set it in the web UI (Library panel), or
     # override at first boot with VDJ_MUSIC_DIR.
@@ -101,8 +116,14 @@ DEFAULTS: dict[str, Any] = {
         # Seconds analyzed from the START of each file (0 = analyze the whole
         # file). The head of a track is the cheapest representative sample.
         "window_seconds": 120,
-        # Parallel ffmpeg analyses (each one is single-threaded).
-        "workers": 6,
+        # Parallel ffmpeg analyses (each one is single-threaded). Default 2
+        # keeps the box responsive while the station streams; set
+        # VDJ_LOUDNESS_WORKERS in .env / docker-compose.yml (or the web card)
+        # to finish a big library faster — measured on a 6-core host for 8,800
+        # files: ~1 h at 2 workers, ~28 min at 4, ~24 min at 6. A value saved by
+        # the web UI into data/config.json wins over the .env default (same
+        # precedence as the LLM settings).
+        "workers": _env_int("VDJ_LOUDNESS_WORKERS", 2),
         # Start draining the queue at boot and after every library scan.
         "autostart": True,
     },

@@ -30,14 +30,14 @@
   },
 
   "loudness": {
-    "_comment": "Per-track volume normalization (EBU R128). Each track is measured once in the background, then played at a fixed gain so loud songs are pulled down and quiet ones lifted. enabled=false keeps the legacy dynamic loudnorm chain. window_seconds is how much of the START of each file is analyzed (0 = the whole file); changing it re-measures the library.",
+    "_comment": "Per-track volume normalization (EBU R128). Each track is measured once in the background, then played at a fixed gain so loud songs are pulled down and quiet ones lifted. enabled=false keeps the legacy dynamic loudnorm chain. window_seconds is how much of the START of each file is analyzed (0 = the whole file); changing it re-measures the library. workers defaults to 2 and can also be set with VDJ_LOUDNESS_WORKERS in .env (raise it near your core count for a faster first pass).",
     "enabled": true,
     "target_lufs": -16.0,
     "true_peak_ceiling": -1.5,
     "max_boost_db": 6.0,
     "min_gain_db": -12.0,
     "window_seconds": 120,
-    "workers": 6,
+    "workers": 2,
     "autostart": true
   },
 

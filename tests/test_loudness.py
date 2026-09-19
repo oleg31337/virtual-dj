@@ -61,6 +61,37 @@ def test_settings_are_clamped_against_a_silly_config():
     assert s["window_seconds"] >= 0
 
 
+def test_worker_count_defaults_to_two(monkeypatch):
+    """Requirement: without a .env / config value, analysis uses 2 workers."""
+    monkeypatch.delenv("VDJ_LOUDNESS_WORKERS", raising=False)
+    assert config.DEFAULTS["loudness"]["workers"] == 2
+    config.save_config({"loudness": {"workers": "lots"}})   # junk in config
+    assert loudness.settings()["workers"] == 2              # -> same default
+
+
+def test_workers_env_var_is_read_and_tolerates_junk(monkeypatch):
+    """`VDJ_LOUDNESS_WORKERS` (compose forwards "${VAR:-}") must never crash
+    the app, and must be honoured when it holds a real number."""
+    monkeypatch.delenv("VDJ_TEST_WORKERS", raising=False)
+    assert config._env_int("VDJ_TEST_WORKERS", 2) == 2      # unset
+    monkeypatch.setenv("VDJ_TEST_WORKERS", "")
+    assert config._env_int("VDJ_TEST_WORKERS", 2) == 2      # empty string
+    monkeypatch.setenv("VDJ_TEST_WORKERS", "  ")
+    assert config._env_int("VDJ_TEST_WORKERS", 2) == 2      # whitespace
+    monkeypatch.setenv("VDJ_TEST_WORKERS", "six")
+    assert config._env_int("VDJ_TEST_WORKERS", 2) == 2      # junk
+    monkeypatch.setenv("VDJ_TEST_WORKERS", "4")
+    assert config._env_int("VDJ_TEST_WORKERS", 2) == 4      # honoured
+
+
+def test_stored_workers_win_over_the_env_default(monkeypatch):
+    """Precedence (same as the LLM settings): the web card's saved value in
+    data/config.json beats the .env default."""
+    monkeypatch.setenv("VDJ_LOUDNESS_WORKERS", "8")
+    config.save_config({"loudness": {"workers": 3}})
+    assert loudness.settings()["workers"] == 3
+
+
 # --- measurement (real ffmpeg) ---------------------------------------------
 
 
