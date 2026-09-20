@@ -218,6 +218,27 @@ class Analyzer:
         ).fetchone()
         return int(row["n"] or 0)
 
+    def library_counts(self) -> dict[str, int]:
+        """Library-scoped numbers for the UI (a run's counters reset on restart,
+        so progress must be derived from the database, not from this object).
+
+        ``library_measured`` counts stamped rows; ``library_graded`` counts the
+        ones that actually produced a usable gain (the difference is files that
+        are unreadable or gone from disk, which keep the dynamic fallback).
+        """
+        row = db.connect().execute(
+            "SELECT COUNT(*) AS total, "
+            "SUM(CASE WHEN loudness_analyzed_at IS NOT NULL THEN 1 ELSE 0 END) "
+            "  AS measured, "
+            "SUM(CASE WHEN gain_db IS NOT NULL THEN 1 ELSE 0 END) AS graded "
+            "FROM tracks WHERE excluded = 0"
+        ).fetchone()
+        return {
+            "library_total": int(row["total"] or 0),
+            "library_measured": int(row["measured"] or 0),
+            "library_graded": int(row["graded"] or 0),
+        }
+
     def _claim(self) -> dict[str, Any] | None:
         """Atomically reserve the next unmeasured track for this worker."""
         algo = algo_for(settings()["window_seconds"])
@@ -425,6 +446,9 @@ class Analyzer:
                 "eta_seconds": eta,
                 "error": self.error,
                 "queue": self.queue_size(),
+                # Library-scoped progress (survives restarts, drives the card's
+                # bar + "X of Y measured" line).
+                **self.library_counts(),
                 "settings": cfg,
             }
 

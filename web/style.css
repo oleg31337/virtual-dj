@@ -61,6 +61,8 @@ button {
   padding: 7px 13px; border-radius: 6px; cursor: pointer; font-size: 13px;
 }
 button:hover { border-color: var(--accent); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+button:disabled:hover { border-color: var(--border); }
 button.primary { background: var(--accent); color: #1a1206; border-color: var(--accent);
                  font-weight: 600; }
 button.ghost { background: transparent; color: var(--accent2);

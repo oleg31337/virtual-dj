@@ -273,9 +273,19 @@ starts using its gain the moment it has been measured. Tracks not measured yet
 queue is a database query, restarting the app resumes the pass instead of
 starting over.
 
-The web UI's **Volume normalization** card shows progress, the ETA and the last
-analyzed file, and puts each track's measured gain next to it in the library
-list.
+The web UI's **Volume normalization** card shows library-wide progress
+(`6,772 of 10,158 measured (67%)` with a live bar, the ETA and the last analyzed
+file) and puts each track's measured gain next to it in the library list. Its
+buttons do different things:
+
+| button | what it does |
+|---|---|
+| **Measure missing (N)** | analyzes only the tracks that have no measurement yet (new files, or a pass that never finished). Shows the pending count; disabled when there is nothing to do. |
+| **Stop** | pauses the pass after the file being analyzed; it resumes where it left off. |
+| **Re-analyze all** | *discards* every existing measurement and measures the whole library again (only needed after changing the analyzed window, or to refresh stale results). Asks for confirmation first. |
+
+The pass also keeps running across restarts: progress lives in the database, not
+in memory, so a container restart resumes the backlog instead of losing it.
 
 | Setting (`loudness.*` in `data/config.json`) | Default | Meaning |
 |---|---|---|

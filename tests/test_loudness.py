@@ -262,6 +262,12 @@ def test_loudness_status_endpoint(loudness_client):
     assert body["enabled"] is True
     assert body["queue"] == 3
     assert body["settings"]["target_lufs"] == -16.0
+    # Library-scoped progress: the card's bar/status line must work even when no
+    # run has happened in this process (a run's counters reset on restart).
+    assert body["library_total"] == 3
+    assert body["library_measured"] == 0
+    assert body["library_graded"] == 0
+    assert body["done"] == 0 and body["total"] == 0
     # The UI's main status payload carries it too.
     assert "loudness" in loudness_client.get("/api/status").json()
 
@@ -291,6 +297,10 @@ def test_analyze_stop_reset_endpoints(loudness_client, has_ffmpeg):
     status = loudness_client.get("/api/loudness/status").json()
     assert status["analyzed"] == 3
     assert status["queue"] == 0
+    # Library progress reflects the finished pass (this is what the card shows).
+    assert status["library_total"] == 3
+    assert status["library_measured"] == 3
+    assert status["library_graded"] == 3
 
     # Measured gains are visible to the library list the UI renders.
     tracks = loudness_client.get("/api/library/tracks").json()

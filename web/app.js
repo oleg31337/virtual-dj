@@ -41,6 +41,7 @@ const fmtEta = (sec) => {
   const m = Math.max(0, Math.round(sec / 60));
   return m >= 60 ? `${Math.floor(m / 60)}h ${m % 60}m` : `${m}m`;
 };
+const fmtNum = (n) => Number(n || 0).toLocaleString();
 
 /* ---------- audio player ---------- */
 
@@ -520,6 +521,9 @@ async function pollScan() {
       : 'idle';
     el.className = 'meta dim';
     loadGenres(); loadHealth(); loadLibraryStats();
+    // A scan can add files that still need a loudness measurement — refresh
+    // the volume card so its backlog count is never stale.
+    loadLoudness();
   }
 }
 
@@ -528,26 +532,51 @@ async function pollScan() {
 function renderLoudness(s) {
   const el = $('loudness-status');
   if (!el || !s) return;
-  const done = Number(s.done) || 0;
-  const total = Number(s.total) || 0;
-  const queue = Number(s.queue) || 0;
-  const pct = total ? Math.min(100, Math.round((done / total) * 100))
-                    : (queue ? 0 : 100);
+  const total = Number(s.library_total) || 0;
+  const measured = Number(s.library_measured) || 0;
+  const pending = Number(s.queue) || 0;
+  const ungraded = Math.max(0, measured - (Number(s.library_graded) || 0));
+
+  // The bar is LIBRARY progress (measured / playable), not progress of the
+  // current run: a run's counters reset whenever the app restarts, which used
+  // to leave the bar stuck at 0% while thousands of tracks were still pending.
+  const pct = total ? Math.min(100, Math.round((measured / total) * 100)) : 0;
   $('loudness-bar').style.width = `${pct}%`;
 
   const parts = [];
-  if (s.running) parts.push(`analyzing… ${done}/${total} (${pct}%)`);
-  else if (queue) parts.push(`${queue} track${queue === 1 ? '' : 's'} waiting to be measured`);
-  else parts.push('every track measured');
-  if (s.failed) parts.push(`${s.failed} unmeasurable (keep the dynamic fallback)`);
-  if (s.missing) parts.push(`${s.missing} gone from disk (a rescan cleans those up)`);
-  if (s.running && s.eta_seconds) parts.push(`~${fmtEta(s.eta_seconds)} left`);
+  if (s.running) {
+    parts.push(`measuring… ${fmtNum(measured)} of ${fmtNum(total)} tracks done (${pct}%)`);
+    if (pending) {
+      parts.push(`${fmtNum(pending)} left${s.eta_seconds ? ` · ~${fmtEta(s.eta_seconds)} remaining` : ''}`);
+    } else {
+      parts.push('finishing the last file');
+    }
+  } else if (pending) {
+    parts.push(`${fmtNum(measured)} of ${fmtNum(total)} measured (${pct}%)`);
+    parts.push(`${fmtNum(pending)} never measured — press “Measure missing”`);
+  } else if (total) {
+    parts.push(`all ${fmtNum(total)} tracks measured`);
+  } else {
+    parts.push('no tracks in the library yet — run a library scan first');
+  }
+  if (ungraded) parts.push(`${fmtNum(ungraded)} unmeasurable (they keep the dynamic fallback)`);
+  if (s.missing) parts.push(`${fmtNum(s.missing)} gone from disk (a rescan cleans those up)`);
   if (!s.enabled) parts.push('normalization is OFF — using the old dynamic chain');
   if (s.error) parts.push(`⚠ ${s.error}`);
   el.textContent = parts.join(' · ');
-  el.className = 'meta ' + (s.error ? 'warn' : (s.enabled ? 'ok' : 'dim'));
-  $('loudness-current').textContent = s.current
-    ? `last analyzed: ${s.current}` : '';
+  el.className = 'meta ' + (s.error ? 'warn' : 'dim');
+  $('loudness-current').textContent = s.current ? `last analyzed: ${s.current}` : '';
+
+  // Button affordances: the count makes "Measure missing" obviously different
+  // from "Re-analyze all", and a no-op click is impossible.
+  const analyze = $('loudness-analyze');
+  analyze.textContent = pending ? `Measure missing (${fmtNum(pending)})` : 'Measure missing';
+  analyze.disabled = pending === 0;
+  analyze.title = pending
+    ? `${pending} tracks have no measurement yet (new files, or never reached)`
+    : 'nothing pending — every track has a measurement';
+  $('loudness-stop').disabled = !s.running;
+  $('loudness-reset').disabled = measured === 0;
 }
 
 async function loadLoudness() {
@@ -564,7 +593,11 @@ async function pollLoudness() {
     return;
   }
   renderLoudness(s);
+  // Keep polling while a pass runs (2 s) and while a backlog exists (5 s), so
+  // the numbers stay truthful after a scan adds files while nothing is running.
+  const pending = Number(s.queue) || 0;
   if (s.running) setTimeout(pollLoudness, 2000);
+  else if (pending) setTimeout(pollLoudness, 5000);
 }
 
 /* ---------- wiring ---------- */
@@ -929,8 +962,15 @@ function wire() {
     pollLoudness();
   };
   $('loudness-reset').onclick = async () => {
-    if (!confirm('Forget every loudness measurement and measure the whole '
-                 + 'library again?')) return;
+    const st = await api('/api/loudness/status').catch(() => null);
+    const n = st ? Number(st.library_measured) || 0 : 0;
+    // Spell out the difference from "Measure missing": this one DISCARDS the
+    // measurements the library already has and redoes all of them.
+    if (!confirm(`Discard all ${n} measurements and measure the whole library `
+                 + 'again?\n\nOnly needed after changing the analyzed window, or '
+                 + 'to refresh stale results. New/unmeasured tracks are covered by '
+                 + '"Measure missing" instead. Playback continues normally while '
+                 + 'this runs.')) return;
     await api('/api/loudness/reset', { method: 'POST', body: '{}' });
     pollLoudness();
   };
