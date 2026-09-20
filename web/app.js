@@ -15,6 +15,7 @@ const state = {
   config: null,
   selected: new Set(),
   activeGenres: new Set(),
+  programData: null,
   tracks: [],
   playing: false,
 };
@@ -330,6 +331,7 @@ async function loadConfig() {
   $('program-enabled').checked = !!(cfg.playback?.program?.enabled ?? true);
   $('program-size').value = cfg.playback?.program?.size ?? 6;
   $('program-size-val').textContent = $('program-size').value;
+  $('program-limit').value = cfg.playback?.program?.limit ?? 20;
   $('program-strategy-sel').value = cfg.playback?.program?.strategy ?? 'genre';
   // Voice + prosody controls.
   $('dj-speed').value = Math.round((cfg.dj?.speed ?? 1.0) * 100);
@@ -459,27 +461,82 @@ async function loadHealth() {
 async function loadPrograms() {
   try {
     const p = await api('/api/programs');
+    state.programData = p;
     $('program-strategy').textContent =
       `(${{ genre: 'by genre', artist: 'by artist', decade: 'by decade' }[p.strategy] || p.strategy})`;
-    const themes = (p.themes || []).slice(0, 12);
+    $('program-limit').value = p.limit;
+    const themes = p.themes || [];
+    const box = $('programs');
     if (!themes.length) {
-      $('programs').innerHTML = '<div class="dim">No themes available yet.</div>';
+      box.innerHTML = '<div class="dim">No themes with enough tracks yet.</div>';
+      renderProgramSummary();
       return;
     }
-    $('programs').innerHTML = themes.map((t) => {
-      const kind = p.strategy === 'artist' ? 'artist'
-                 : p.strategy === 'decade' ? 'decade' : 'genre';
-      let label;
-      if (p.strategy === 'decade') {
-        label = `${t.decade}s`;
-      } else {
-        label = t.genre || t.artist || t.label || '?';
-      }
-      return `<div class="program-chip" data-kind="${esc(kind)}">`
-        + `<span class="pc-label">${esc(label)}</span>`
+    box.innerHTML = themes.map((t) => {
+      const value = t[p.strategy];
+      return `<div class="program-chip${t.disabled ? ' off' : ''}"`
+        + ` data-kind="${esc(p.strategy)}"`
+        + ` data-value="${esc(String(value))}"`
+        + ` title="${t.disabled ? 'switched off — click to play it' : 'playing — click to switch off'}">`
+        + `<span class="pc-label">${esc(t.label)}</span>`
         + `<span class="pc-n">${t.n}</span></div>`;
     }).join('');
+    for (const chip of box.querySelectorAll('.program-chip')) {
+      chip.onclick = () => {
+        chip.classList.toggle('off');
+        renderProgramSummary();
+      };
+    }
+    renderProgramSummary();
   } catch (e) { /* ignore */ }
+}
+
+/* Which themes are switched OFF right now, read straight off the chips so the
+ * summary and the save always agree with what the user sees. */
+function disabledProgramThemes() {
+  const off = [];
+  for (const chip of document.querySelectorAll('#programs .program-chip.off')) {
+    off.push(chip.dataset.value);
+  }
+  const data = state.programData;
+  if (!data) return { [ 'genre' ]: [], artist: [], decade: [] };
+  // Decades are numeric in the saved config; keep the round-trip stable.
+  const values = data.strategy === 'decade' ? off.map(Number) : off;
+  return {
+    genre: data.strategy === 'genre' ? values : (data.disabled?.genre || []),
+    artist: data.strategy === 'artist' ? values : (data.disabled?.artist || []),
+    decade: data.strategy === 'decade' ? values : (data.disabled?.decade || []),
+  };
+}
+
+function renderProgramSummary() {
+  const data = state.programData;
+  const el = $('programs-summary');
+  if (!data || !el) return;
+  const chips = document.querySelectorAll('#programs .program-chip');
+  const off = document.querySelectorAll('#programs .program-chip.off').length;
+  const on = chips.length - off;
+  const offTracks = [...document.querySelectorAll('#programs .program-chip.off')]
+    .reduce((n, c) => n + Number(c.querySelector('.pc-n')?.textContent || 0), 0);
+  const reachable = Math.max(0, (data.candidate_tracks || 0) - offTracks);
+  const lib = Number(data.library_tracks) || 0;
+  const parts = [];
+  if (!on) {
+    // Not silence: the rotation is empty, so the queue falls back to a flat
+    // shuffle — still excluding everything switched off, including the themes
+    // that sit outside the top-N list.
+    parts.push('⚠ no theme selected — programs stop and the queue falls back to a '
+      + 'flat shuffle of the remaining tracks');
+  } else {
+    parts.push(`${on} of ${chips.length} themes on`);
+    if (lib) parts.push(`${fmtNum(reachable)} of ${fmtNum(lib)} tracks reachable (${Math.round(100 * reachable / lib)}%)`);
+  }
+  if (data.eligible > chips.length) {
+    parts.push(`${data.eligible - chips.length} smaller themes outside the top ${data.limit}`);
+  }
+  if (off) parts.push(`${off} switched off — they stay out of the queue in every mode`);
+  el.textContent = parts.join(' · ');
+  el.className = 'meta ' + (on ? 'dim' : 'warn');
 }
 
 async function loadLibraryStats() {
@@ -846,11 +903,21 @@ function wire() {
             enabled: $('program-enabled').checked,
             size: Number($('program-size').value),
             strategy: $('program-strategy-sel').value,
+            limit: Math.max(1, Number($('program-limit').value) || 20),
+            // Stored as the exclusion set, so a theme that shows up later (a
+            // new genre after a scan) starts ON.
+            disabled: disabledProgramThemes(),
           },
         },
       }),
     });
     await loadPrograms();
+  };
+  $('program-select-all').onclick = () => {
+    for (const chip of document.querySelectorAll('#programs .program-chip')) {
+      chip.classList.remove('off');
+    }
+    renderProgramSummary();
   };
   $('program-size').oninput = (e) =>
     ($('program-size-val').textContent = e.target.value);

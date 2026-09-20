@@ -123,7 +123,13 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
   display: flex; align-items: center; gap: 8px;
   padding: 6px 12px; border-radius: 16px; background: var(--card2);
   border: 1px solid var(--border); font-size: 13px;
+  cursor: pointer; user-select: none;
 }
+.program-chip:hover { border-color: var(--accent); }
+/* Switched off in the card: struck through, and (per the backend) excluded
+   from the queue in every program strategy, not just the active one. */
+.program-chip.off { opacity: .45; }
+.program-chip.off .pc-label { text-decoration: line-through; }
 .program-chip[data-kind="genre"] { border-left: 3px solid var(--accent); }
 .program-chip[data-kind="artist"] { border-left: 3px solid #b388ff; }
 .program-chip[data-kind="decade"] { border-left: 3px solid #6ee7a0; }

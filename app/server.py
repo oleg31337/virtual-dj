@@ -240,11 +240,45 @@ def api_health():
 
 @app.get("/api/programs")
 def api_programs():
-    """Candidate themes for program grouping (genres/artists/decades)."""
+    """The program rotation: the themes the queue groups into, biggest first.
+
+    Returns the SAME list the scheduler builds from (``library.program_selection``)
+    so the checkboxes in the Programs card are authoritative — plus the coverage
+    numbers behind the card's summary line, which make the effect of the
+    ``playback.program.limit`` cutoff visible.
+    """
     strategy = str(config.get("playback.program.strategy", "genre"))
     if strategy not in ("genre", "artist", "decade"):
         strategy = "genre"  # "language" was removed; degrade to genre.
-    return {"strategy": strategy, "themes": library.program_themes(strategy)}
+    size = max(2, int(config.get("playback.program.size", 6) or 6))
+    limit = max(1, int(config.get("playback.program.limit", 20) or 20))
+    sel = library.program_selection(strategy, size, limit)
+    disabled = set(library.disabled_programs(strategy))
+    key = strategy if strategy in ("genre", "artist") else "decade"
+    value_of = library.norm_theme_value
+    themes = []
+    for t in sel["candidates"]:
+        value = value_of(strategy, t.get(key))
+        themes.append({
+            key: value,
+            "label": f"{value}s" if strategy == "decade" else value,
+            "n": t.get("n", 0),
+            "disabled": value in disabled,
+        })
+    return {
+        "strategy": strategy,
+        "size": size,
+        "limit": limit,
+        "eligible": sel["eligible"],
+        "themes": themes,
+        "selected": sum(1 for t in themes if not t["disabled"]),
+        "selected_tracks": sel["selected_tracks"],
+        "candidate_tracks": sel["candidate_tracks"],
+        "available_tracks": sel["available_tracks"],
+        "library_tracks": sel["library_tracks"],
+        "disabled": {s: library.disabled_programs(s)
+                     for s in ("genre", "artist", "decade")},
+    }
 
 
 @app.get("/api/icecast/status")

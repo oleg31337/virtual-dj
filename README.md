@@ -50,8 +50,11 @@ Point VLC, Winamp, Sonos, or any browser at the stream URL and it just plays.
   is left with an unknown genre, so themed playlists work for the whole library.
 - **Themed programs.** The queue is grouped into DJ-style "programs" — runs of
   tracks sharing a genre, an artist, or a decade — with the DJ announcing each
-  vibe switch before the next block. Program size and grouping strategy are
-  adjustable in `playback.program` (config or web UI).
+  vibe switch before the next block. The *Programs* card lists the themes
+  (biggest by track count first) and every one of them can be switched off with
+  a click: switched-off themes never reach the queue, in any strategy. Program
+  size, grouping strategy and how many themes take part are adjustable in
+  `playback.program` (config or web UI).
 - **Even volume across the whole library.** Every track is measured once
   (EBU R128 loudness + true peak) and then streamed at its own fixed gain, so
   loud songs are pulled down and quiet ones lifted — without the level being

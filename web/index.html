@@ -174,8 +174,10 @@
   <section class="card">
     <h3>Programs <span class="dim" id="program-strategy"></span></h3>
     <p class="dim">The DJ groups the queue into themed runs and announces each
-      switch — like a real host. This is what's coming up.</p>
+      switch — like a real host. Click a theme to switch it off (everything is
+      on by default); switched-off themes never reach the queue.</p>
     <div id="programs" class="programs"></div>
+    <div class="meta dim" id="programs-summary">—</div>
     <div class="row">
       <label class="field inline">
         <input type="checkbox" id="program-enabled" checked /> Group into programs
@@ -185,15 +187,21 @@
       <span>Tracks per program: <b id="program-size-val">6</b></span>
       <input type="range" id="program-size" min="2" max="20" value="6" />
     </label>
-    <label class="field">
-      <span>Theme by</span>
-      <select id="program-strategy-sel">
-        <option value="genre">Genre</option>
-        <option value="artist">Artist</option>
-        <option value="decade">Decade</option>
-      </select>
-    </label>
+    <div class="row">
+      <label class="field inline"><span>Themes to play</span>
+        <input type="number" id="program-limit" min="1" max="500" step="1" value="20" />
+        <span class="dim">top by track count</span></label>
+      <label class="field inline"><span>Theme by</span>
+        <select id="program-strategy-sel">
+          <option value="genre">Genre</option>
+          <option value="artist">Artist</option>
+          <option value="decade">Decade</option>
+        </select>
+      </label>
+    </div>
     <button id="save-program" class="primary">Save programs</button>
+    <button id="program-select-all" class="ghost"
+            title="Switch every theme back on">All on</button>
   </section>
 
   <section class="card">

@@ -655,10 +655,92 @@ def list_decades() -> list[dict[str, Any]]:
 def program_themes(strategy: str = "genre") -> list[dict[str, Any]]:
     """Candidate themes for program grouping, by the chosen strategy."""
     if strategy == "artist":
-        return list_artists(limit=200)
+        # Artists are queried with a cap since a big library has thousands; it
+        # matches the Programs card's "Themes to play" maximum so the rotation
+        # can actually reach the number a user can type there.
+        return list_artists(limit=500)
     if strategy == "decade":
         return list_decades()
     return list_genres()
+
+
+def norm_theme_value(strategy: str, value: Any) -> Any:
+    """Normalize a theme value for comparing config against theme rows.
+
+    Decades are ints (the API/JSON round-trip keeps them ints), the other two
+    dimensions are trimmed strings. An unusable decade becomes -1, which can
+    never match a real theme.
+    """
+    if strategy == "decade":
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return -1
+    if value is None:
+        return "Unknown"
+    return str(value).strip() or "Unknown"
+
+
+def disabled_programs(strategy: str) -> list[Any]:
+    """Theme values switched OFF in the Programs card for ``strategy``."""
+    raw = config.get(f"playback.program.disabled.{strategy}", []) or []
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [norm_theme_value(strategy, v) for v in raw]
+
+
+def program_exclusions() -> dict[str, list[Any]]:
+    """Every disabled theme, across ALL strategies, for `query_tracks`.
+
+    A theme switched off in the card must not slip back in through another
+    strategy's program (a banned artist inside a genre program, say), so these
+    are applied to every track query the queue builder makes.
+    """
+    return {
+        "exclude_genres": disabled_programs("genre"),
+        "exclude_artists": disabled_programs("artist"),
+        "exclude_decades": disabled_programs("decade"),
+    }
+
+
+def program_selection(strategy: str, size: int, limit: int) -> dict[str, Any]:
+    """The program rotation + the numbers the Programs card displays.
+
+    One function feeds both the scheduler and ``GET /api/programs`` so the list
+    a user switches off in the browser is exactly the list the queue uses.
+
+    Themes with fewer than ``size`` tracks are not eligible (a shorter run could
+    not fill a program). The ``limit`` cutoff is applied FIRST, to the biggest
+    themes, giving a stable universe of candidates; the disabled ones are then
+    removed from the ACTIVE rotation. Order matters: disabling a theme must not
+    pull the 21st-biggest theme into the list, or the card's rows would shuffle
+    every time something is switched off.
+    """
+    size = max(2, int(size))
+    limit = max(1, int(limit))
+    themes = program_themes(strategy)
+    eligible = [t for t in themes if int(t.get("n", 0) or 0) >= size]
+    candidates = eligible[:limit]
+    disabled = set(disabled_programs(strategy))
+    value_of = lambda t: norm_theme_value(strategy, t.get(strategy))  # noqa: E731
+    kept = [t for t in candidates if value_of(t) not in disabled]
+    total_row = db.connect().execute(
+        "SELECT COUNT(*) AS n FROM tracks WHERE missing = 0 AND excluded = 0"
+    ).fetchone()
+    return {
+        "strategy": strategy,
+        "size": size,
+        "limit": limit,
+        "eligible": len(eligible),
+        "candidates": candidates,
+        "candidate_values": [value_of(t) for t in candidates],
+        "themes": kept,
+        "values": [value_of(t) for t in kept],
+        "selected_tracks": sum(int(t.get("n", 0) or 0) for t in kept),
+        "candidate_tracks": sum(int(t.get("n", 0) or 0) for t in candidates),
+        "available_tracks": sum(int(t.get("n", 0) or 0) for t in eligible),
+        "library_tracks": int(total_row["n"] or 0),
+    }
 
 
 def query_tracks(
@@ -670,6 +752,9 @@ def query_tracks(
     offset: int = 0,
     random_order: bool = False,
     include_excluded: bool = False,
+    exclude_genres: list[str] | None = None,
+    exclude_artists: list[str] | None = None,
+    exclude_decades: list[int] | None = None,
 ) -> list[dict[str, Any]]:
     # Excluded tracks are never playlist material — the DJ cannot announce
     # them. They are only reachable via ``excluded_tracks()`` for reporting.
@@ -705,6 +790,38 @@ def query_tracks(
         hi = lo + 9
         where.append("(year IS NOT NULL AND CAST(year AS INTEGER) BETWEEN ? AND ?)")
         params += [lo, hi]
+
+    # Programs switched OFF in the web card must not reach the playlist through
+    # ANY path, so exclusions are applied here (the one place every queue fill
+    # goes through) rather than only when that dimension is the active strategy.
+    # Every clause is NULL-safe: a bare `genre NOT LIKE ?` is NULL for a
+    # NULL genre and would silently drop those rows too.
+    if exclude_genres:
+        for genre in exclude_genres:
+            if str(genre) == "Unknown":
+                where.append("(genre IS NOT NULL AND TRIM(genre) <> '')")
+            else:
+                where.append("(genre IS NULL OR genre NOT LIKE ?)")
+                params.append(f"%{genre}%")
+
+    if exclude_artists:
+        placeholders = ",".join("?" * len(exclude_artists))
+        where.append(
+            "IFNULL(NULLIF(TRIM(artist), ''), 'Unknown') NOT IN "
+            f"({placeholders})"
+        )
+        params += list(exclude_artists)
+
+    if exclude_decades:
+        placeholders = ",".join("?" * len(exclude_decades))
+        # Tracks with no usable year have no decade theme, so a decade filter
+        # must never exclude them (CAST of a non-numeric year yields 0, which
+        # matches no real decade).
+        where.append(
+            "(year IS NULL OR TRIM(year) = '' "
+            f"OR (CAST(year AS INTEGER) / 10) * 10 NOT IN ({placeholders}))"
+        )
+        params += [int(d) for d in exclude_decades]
 
     order = "RANDOM()" if random_order else "artist COLLATE NOCASE, album, title"
     sql = (

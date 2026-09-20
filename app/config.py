@@ -159,6 +159,19 @@ DEFAULTS: dict[str, Any] = {
             # How programs are themed: "genre" (same genre), "artist" (same
             # artist run), or "decade" (same era).
             "strategy": "genre",
+            # How many themes are eligible for programs, biggest by track count
+            # first. The Programs card lists exactly these, so switching one off
+            # there is authoritative. 20 keeps the card readable; raise it to
+            # widen the rotation — artists hold far fewer tracks each than
+            # genres, so a low limit covers much less of the library in
+            # "artist" mode (measured: top 20 = 86% of candidate tracks in
+            # genre mode but 39% in artist mode).
+            "limit": 20,
+            # Themes switched OFF in the Programs card, per strategy. Stored as
+            # the EXCLUSION set (not the selected set) so a theme that first
+            # appears later — a new genre after a scan, a new decade — starts
+            # ENABLED, which is the documented default.
+            "disabled": {"genre": [], "artist": [], "decade": []},
         },
     },
     # Icecast delivery. When enabled, the app runs a *managed* Icecast2 server

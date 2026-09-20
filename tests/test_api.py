@@ -164,3 +164,44 @@ def test_stream_endpoint_is_registered(client):
     unbounded response, so it is exercised against a real uvicorn server."""
     routes = {getattr(r, "path", None) for r in client.app.routes}
     assert "/stream.mp3" in routes
+
+
+def test_programs_endpoint_exposes_the_switchable_selection(client):
+    """The Programs card's payload: the rotation, each theme's on/off state, and
+    the coverage numbers behind its summary line."""
+    # A program theme needs at least `size` tracks, so give the tiny scanned
+    # library two real genres and lower the program size.
+    conn = db.connect()
+    for genre in ("AAA", "BBB"):
+        for n in range(3):
+            conn.execute(
+                "INSERT INTO tracks(path,title,artist,album,genre,year,duration,"
+                "mtime,size,missing,excluded,meta_source) VALUES(?,?,?,?,?,?,?,?,?,"
+                "0,0,'tags')",
+                (f"/m/{genre}/{n}.mp3", f"{genre} {n}", f"{genre} Band", "Al",
+                 genre, "1999", 200.0, 1, 1),
+            )
+    conn.commit()
+    client.put("/api/config", json={"playback": {"program": {"size": 2}}})
+
+    body = client.get("/api/programs").json()
+    assert body["strategy"] == "genre"
+    assert body["limit"] == 20
+    assert body["size"] == 2
+    labels = [t["label"] for t in body["themes"]]
+    assert "AAA" in labels and "BBB" in labels
+    assert all(t["disabled"] is False for t in body["themes"])
+    assert body["selected"] == len(body["themes"])
+    assert body["candidate_tracks"] >= 6
+    assert body["library_tracks"] >= 6
+
+    # Switching one off through the same PUT the card uses must round-trip.
+    label = "AAA"
+    resp = client.put("/api/config", json={"playback": {"program": {
+        "disabled": {"genre": [label], "artist": [], "decade": []}}}})
+    assert resp.status_code in (200, 204)
+    after = client.get("/api/programs").json()
+    off = [t for t in after["themes"] if t["label"] == label]
+    assert off and off[0]["disabled"] is True
+    assert after["selected"] == len(after["themes"]) - 1
+    assert after["disabled"]["genre"] == [label]

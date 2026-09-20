@@ -18,6 +18,22 @@ from . import config, dj, library
 log = logging.getLogger(__name__)
 
 
+def _genre_matches(theme_genre: Any, term: Any) -> bool:
+    """Does a theme's genre satisfy one entry of the Genres-card filter?
+
+    Mirrors ``query_tracks``'s lenient matching (``genre LIKE '%term%'``, plus
+    the ``Unknown`` = genre-less convention) so narrowing the theme list and
+    querying the tracks can never disagree.
+    """
+    genre = str(theme_genre if theme_genre not in (None, "") else "Unknown")
+    wanted = str(term or "").strip()
+    if not wanted:
+        return False
+    if wanted == "Unknown":
+        return genre == "Unknown"
+    return wanted.lower() in genre.lower()
+
+
 class Scheduler:
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -87,6 +103,10 @@ class Scheduler:
         artist, or decade, per ``playback.program.strategy``). The first track
         of every program after the first carries a ``program`` theme and
         ``dj_requested=True`` so the DJ announces the vibe switch before it.
+
+        The rotation is ``library.program_selection`` — the SAME list the
+        Programs card shows, so a theme switched off in the browser is switched
+        off here too.
         """
         playback = config.get("playback", {}) or {}
         prog = playback.get("program", {}) or {}
@@ -96,18 +116,34 @@ class Scheduler:
         # coerce any leftover saved value so it degrades to genre grouping.
         if strategy not in ("genre", "artist", "decade"):
             strategy = "genre"
+        limit = max(1, int(prog.get("limit", 20) or 20))
         search = playback.get("search", "") or ""
         genres_filter = playback.get("genres") or None
         artists_filter = playback.get("artists") or None
+        excludes = library.program_exclusions()
 
-        themes = library.program_themes(strategy)
-        themes = [t for t in themes if t.get("n", 0) >= size]
+        themes = library.program_selection(strategy, size, limit)["themes"]
+        themes = list(themes)
         # NOTE: the global genre/artist filters do NOT pre-filter this theme
-        # list. A theme carries only its own dimension (genre themes have no
-        # `artist` key, etc.), so filtering the list by the wrong dimension
-        # empties it and silently falls back to a flat shuffle. Instead we
-        # carry the filters into each theme's track query below, where they
-        # are AND-ed correctly.
+        # list when they are on a DIFFERENT dimension. A theme carries only its
+        # own dimension (genre themes have no `artist` key, etc.), so filtering
+        # the list by the wrong dimension empties it and silently falls back to
+        # a flat shuffle. Cross-dimension filters are carried into each theme's
+        # track query below, where they are AND-ed correctly.
+        #
+        # A filter on the SAME dimension as the theme is different: it must
+        # NARROW the rotation. Putting it in the same `genres=[...]` list as the
+        # theme's own genre OR-ed the two, so a "Punk" program kept playing Punk
+        # tracks while only "Electronic" was selected in the Genres card
+        # (caught by live validation — see tests for the regression).
+        if strategy == "genre" and genres_filter:
+            themes = [t for t in themes
+                      if any(_genre_matches(t.get("genre"), f)
+                             for f in genres_filter)]
+        if strategy == "artist" and artists_filter:
+            wanted = {str(a).strip().lower() for a in artists_filter}
+            themes = [t for t in themes
+                      if str(t.get("artist") or "").strip().lower() in wanted]
         if not themes:
             return []
 
@@ -120,19 +156,20 @@ class Scheduler:
             if programs_made >= count:
                 break
             if strategy == "genre":
-                kwargs = {"genres": [theme["genre"]], "search": search}
+                kwargs: dict[str, Any] = {"genres": [theme["genre"]], "search": search}
             elif strategy == "artist":
                 kwargs = {"artists": [theme["artist"]], "search": search}
             else:  # decade
                 kwargs = {"decade": int(theme["decade"]), "search": search}
-            # Apply global genre/artist filters to the track pool for this
-            # theme. AND-ing here means e.g. "Artist" theme + genre filter
-            # yields that artist's tracks in that genre (skipped if none).
-            if genres_filter:
-                kwargs["genres"] = (kwargs.get("genres") or []) + list(genres_filter)
-            if artists_filter:
-                kwargs["artists"] = (kwargs.get("artists") or []) + list(artists_filter)
-            tracks = library.query_tracks(limit=size, random_order=True, **kwargs)
+            # Filters from the OTHER dimensions still apply (AND): e.g. an
+            # "Artist" theme + genre filter yields that artist's tracks in that
+            # genre (the program is skipped if there are none).
+            if genres_filter and strategy != "genre":
+                kwargs["genres"] = list(genres_filter)
+            if artists_filter and strategy != "artist":
+                kwargs["artists"] = list(artists_filter)
+            tracks = library.query_tracks(
+                limit=size, random_order=True, **kwargs, **excludes)
             if len(tracks) < 2:
                 continue
             program = {
@@ -172,16 +209,20 @@ class Scheduler:
                 return len(items)
             # No theme had enough tracks (tiny library) — fall through to flat.
 
+        excludes: dict[str, Any] = library.program_exclusions()
         tracks = library.query_tracks(
             search=playback.get("search", "") or "",
             genres=playback.get("genres") or None,
             artists=playback.get("artists") or None,
             limit=count,
             random_order=bool(playback.get("shuffle", True)),
+            **excludes,
         )
-        if not tracks:
+        if not tracks and not any(excludes.values()):
             # Filters matched nothing — fall back to the whole library so the
-            # stream never goes silent.
+            # stream never goes silent. Deliberately NOT applied when themes
+            # were switched off: resurrecting the whole library would play
+            # exactly what the user asked not to hear.
             tracks = library.query_tracks(limit=count, random_order=True)
         if not tracks:
             return 0
