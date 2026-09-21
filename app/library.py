@@ -639,11 +639,19 @@ def list_artists(limit: int = 500) -> list[dict[str, Any]]:
 
 
 def list_decades() -> list[dict[str, Any]]:
-    """Distinct release decades with track counts, for program theming."""
+    """Distinct release decades with track counts, for program theming.
+
+    Only plausible years count: an unparseable year CASTs to 0 (a "0s" program
+    of junk) and a two-digit year like "90" becomes decade 90 ("90s"). The real
+    library had 105 such tracks in "0s" — a themed program nobody wants. Rather
+    than guessing what "90" means, implausible buckets are dropped; those tracks
+    stay fully playable in the flat queue and in genre/artist programs.
+    """
     rows = db.connect().execute(
         "SELECT (CAST(year AS INTEGER) / 10) * 10 AS decade, COUNT(*) AS n "
         "FROM tracks WHERE missing=0 AND excluded=0 "
         "AND year IS NOT NULL AND TRIM(year) <> '' "
+        "AND CAST(year AS INTEGER) BETWEEN 1900 AND 2099 "
         "GROUP BY decade ORDER BY n DESC"
     ).fetchall()
     return [

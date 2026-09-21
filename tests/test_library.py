@@ -346,3 +346,34 @@ def test_excluded_rows_self_heal_on_rescan(music_dir, has_ffmpeg, monkeypatch):
     assert fixed, "previously-excluded row must be re-identified on rescan"
     assert fixed["excluded"] == 0
     assert fixed["artist"] == "Band Three"
+
+
+def test_decade_themes_skip_implausible_years(isolated_data):
+    """A '0s' or '90s' program of unparseable/two-digit years is junk.
+
+    Live library check found 105 tracks in a "0s" theme (years that CAST to 0)
+    and 4 in "90s" (two-digit year "90"). Those themes must not be offered, and
+    the affected tracks must stay playable elsewhere (no exclusion).
+    """
+    conn = db.connect()
+    rows = [
+        ("/m/a.mp3", "Real 1994", "1994"),
+        ("/m/b.mp3", "Real 2003", "2003"),
+        ("/m/c.mp3", "Two-digit", "90"),
+        ("/m/d.mp3", "Junk", "unknown"),
+        ("/m/e.mp3", "Empty", ""),
+        ("/m/f.mp3", "Null", None),
+    ]
+    for path, title, year in rows:
+        conn.execute(
+            "INSERT INTO tracks(path,title,artist,album,genre,year,duration,"
+            "mtime,size,missing,excluded,meta_source) VALUES(?,?,?,?,?,?,?,?,?,"
+            "0,0,'tags')",
+            (path, title, "A", "Al", "Rock", year, 200.0, 1, 1),
+        )
+    conn.commit()
+    decades = {d["decade"] for d in library.list_decades()}
+    assert decades == {1990, 2000}
+    # The odd-year tracks are still in the playable pool.
+    titles = {t["title"] for t in library.query_tracks(limit=50)}
+    assert {"Two-digit", "Junk", "Empty", "Null"} <= titles
