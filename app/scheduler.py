@@ -17,6 +17,12 @@ from . import config, dj, library
 
 log = logging.getLogger(__name__)
 
+# How many times the prefetch worker tries to prepare one DJ break before
+# giving up on it. Each attempt is an LLM call (+Piper), and the loop re-runs
+# every 5 s and on every refill — so an unbounded retry means the model is hit
+# every few seconds forever when preparation keeps failing.
+MAX_BREAK_ATTEMPTS = 3
+
 
 def _genre_matches(theme_genre: Any, term: Any) -> bool:
     """Does a theme's genre satisfy one entry of the Genres-card filter?
@@ -39,6 +45,7 @@ class Scheduler:
         self._lock = threading.RLock()
         self._queue: list[dict[str, Any]] = []
         self._prepared: dict[int, dict[str, Any]] = {}   # queue item uid -> break
+        self._attempts: dict[int, int] = {}              # uid -> failed attempts
         self._uid = 0
         self._track_counter = 0
         # Tracks remaining until the next DJ break. When it reaches 0 the next
@@ -296,6 +303,7 @@ class Scheduler:
         with self._lock:
             self._queue.clear()
             self._prepared.clear()
+            self._attempts.clear()
 
     def replace(self, track_ids: list[int]) -> int:
         self.clear()
@@ -322,6 +330,7 @@ class Scheduler:
             item = self._queue.pop(0)
             due = self._dj_due(item, 0)
             prepared = self._prepared.pop(item["uid"], None)
+            self._attempts.pop(item["uid"], None)
             self._track_counter += 1
             self._previous = item["track"]
             program = item.get("program")
@@ -376,11 +385,19 @@ class Scheduler:
             with self._lock:
                 if uid in self._prepared:
                     continue
+                attempts = self._attempts.get(uid, 0)
             # The talk decision is already stamped on the item at enqueue time
             # (see _wrap); just read it. A forced program-start (dj_requested
             # explicitly True) or a rolled-interval hit both count.
             explicit = item.get("dj_requested")
             if not explicit:
+                continue
+            if attempts >= MAX_BREAK_ATTEMPTS:
+                # Preparation keeps failing (LLM down, TTS broken): stop asking.
+                # Retrying this item every wake (the loop runs every 5 s and on
+                # every refill) meant an LLM call every few seconds forever —
+                # that is what saturated the user's Ollama. The station plays on
+                # without the spoken break rather than hammering the model.
                 continue
             prior = upcoming[index - 1]["track"] if index else previous
             started = time.monotonic()
@@ -389,10 +406,19 @@ class Scheduler:
             if prepared:
                 with self._lock:
                     self._prepared[uid] = prepared
+                    self._attempts.pop(uid, None)
                 log.info(
                     "prepared DJ break for %s - %s in %.1fs (%.1fs audio)",
                     item["track"].get("artist"), item["track"].get("title"),
                     time.monotonic() - started, prepared.get("duration", 0.0),
+                )
+            else:
+                with self._lock:
+                    self._attempts[uid] = attempts + 1
+                log.warning(
+                    "DJ break preparation failed for %s - %s (attempt %d/%d)",
+                    item["track"].get("artist"), item["track"].get("title"),
+                    attempts + 1, MAX_BREAK_ATTEMPTS,
                 )
 
     def status(self) -> dict[str, Any]:

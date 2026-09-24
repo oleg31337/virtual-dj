@@ -158,6 +158,24 @@ Port `8008` is the default Icecast port (change `ICECAST_PORT` in `.env`), and
 `virtualdj` is the default mount (change `ICECAST_MOUNT`). The browser player
 uses the app's own `/stream.mp3`; only external players need the Icecast mount.
 
+## If the music library is not mounted
+
+The app watches playback, not just the database: a queued file that cannot be
+opened is flagged (`missing = 1`, so it is never queued again) and the station
+stops rather than spinning.
+
+If the music share is unmounted (or moved), you get a clear warning in the
+**Now playing** card — *"N queued files in a row could not be played … is the
+music library mounted?"* — and the app backs off progressively (up to 30 s
+between attempts) instead of burning through the queue. Remount the share, then
+run a **library scan** to restore the affected tracks (the scan clears the flag
+for files that are back and removes the rows for files that are gone).
+
+Without those guards an unmounted share is pathological: every miss returns
+instantly, so the queue is consumed at ~700 items/second and re-filled forever —
+and because each refill stamps new DJ talks, the DJ LLM gets called continuously
+(measured: ~34,000 queue items and 13 LLM calls a minute, indefinitely).
+
 ## Running with Docker
 
 The app ships a `Dockerfile` and `docker-compose.yml`. Everything the app

@@ -35,6 +35,11 @@ CLIENT_BUFFER_CHUNKS = 512
 # seconds of cushion so players (VLC's default 1s network cache) never
 # underrun on jitter, track boundaries or encoder spawns.
 MAX_AHEAD_SECONDS = 3.0
+# Consecutive unplayable files before the broadcast loop starts backing off.
+# Below it a few bad files are just skipped; at/above it the station treats the
+# library as unavailable (share not mounted) and slows to a crawl, so a mass of
+# missing files can never spin the CPU or hammer the DJ LLM with refills.
+FAILURE_BREAKER = 5
 # On connect we replay this much of the recent broadcast to the new listener
 # (Icecast's "burst"), so its player can fill its buffer instantly.
 BURST_SECONDS = 3.0
@@ -158,6 +163,11 @@ class Broadcaster:
         self._listeners_changed: list[Callable[[], None]] = []
         self._on_change: list[Callable[[dict[str, Any]], None]] = []
         self._started_stream_at: float | None = None
+        # Circuit breaker for a library that cannot be played at all (share not
+        # mounted, folder moved): consecutive failures + the message shown in
+        # the UI. Without it the loop spins at ~1000 pops/s.
+        self._consecutive_failures = 0
+        self._playback_error: str | None = None
 
     # --- listener registry ------------------------------------------------
 
@@ -268,10 +278,56 @@ class Broadcaster:
     def _bytes_per_second(self) -> float:
         return int(config.get("stream.bitrate_kbps", 128)) * 1000.0 / 8.0
 
+    def _note_unplayable(self, path: str, kind: str, meta: dict[str, Any]) -> None:
+        """Take a track whose file is gone out of the playable pool.
+
+        A missing file makes ``_play_file`` return instantly, so without this the
+        broadcast loop consumes the whole queue in a fraction of a second,
+        refills, and repeats — forever. Every refill also stamps new DJ talks,
+        so the LLM gets hammered while the station plays nothing. Flagging the
+        row (``missing = 1``) removes it from ``query_tracks`` so each dead file
+        costs exactly one attempt; a rescan then deletes the row properly.
+        """
+        if kind != "track":
+            return  # a missing DJ clip is a cache artifact, not a library row
+        track_id = (meta.get("track") or {}).get("id")
+        if not track_id:
+            return
+        try:
+            db.mark_missing(int(track_id))
+        except Exception:
+            log.debug("could not flag missing track %s", track_id, exc_info=True)
+
+    def _register_failure(self, path: str) -> float:
+        """Count a consecutive playback failure; return how long to back off.
+
+        Returns 0 while below the breaker threshold. Past it, the delay grows
+        exponentially (capped), which stops a mass-missing library from
+        spinning the CPU, spamming the log and re-triggering refills (and thus
+        DJ-break LLM calls) thousands of times per minute.
+        """
+        self._consecutive_failures += 1
+        if self._consecutive_failures < FAILURE_BREAKER:
+            return 0.0
+        self._playback_error = (
+            f"{self._consecutive_failures} queued files in a row could not be "
+            f"played (last: {Path(path).name}) — is the music library mounted?"
+        )
+        log.error("playback stalled: %s", self._playback_error)
+        return min(2.0 ** (self._consecutive_failures - FAILURE_BREAKER), 30.0)
+
+    def _register_success(self) -> None:
+        if self._consecutive_failures or self._playback_error:
+            log.info("playback recovered after %d failed file(s)",
+                     self._consecutive_failures)
+        self._consecutive_failures = 0
+        self._playback_error = None
+
     def _play_file(self, path: str, kind: str, meta: dict[str, Any]) -> bool:
         """Stream one file to all listeners, paced in real time."""
         if not Path(path).exists():
             log.warning("missing media file: %s", path)
+            self._note_unplayable(path, kind, meta)
             return False
 
         self._skip.clear()
@@ -438,10 +494,19 @@ class Broadcaster:
                      "program": program},
                 )
                 if played:
+                    self._register_success()
                     try:
                         db.record_play(track.get("id"))
                     except Exception:
                         log.debug("could not record play", exc_info=True)
+                else:
+                    # Back off once files keep failing: a missing library used to
+                    # let this loop consume thousands of queue items per second
+                    # (refill → new DJ talks → LLM storm) while playing nothing.
+                    backoff = self._register_failure(track["path"])
+                    if backoff:
+                        if self._stop.wait(backoff):
+                            break
             except Exception:
                 log.exception("broadcast loop error; continuing")
                 time.sleep(1)
@@ -496,6 +561,9 @@ class Broadcaster:
             "duration": now.get("duration"),
             "paused": self.paused,
             "listeners": self.listener_count(),
+            # Set when queued files keep failing to play (library not mounted /
+            # moved). The UI shows this as a warning instead of looking idle.
+            "error": self._playback_error,
             "uptime": (round(time.time() - self._started_stream_at, 1)
                        if self._started_stream_at else None),
             "scheduler": SCHEDULER.status(),

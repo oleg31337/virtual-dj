@@ -84,6 +84,17 @@ function renderState(s) {
   $('np-artist').textContent = t ? (t.artist || 'Unknown artist') : '';
   $('np-album').textContent = t ? [t.album, t.genre, t.year].filter(Boolean).join(' · ') : '';
   $('np-dj').textContent = s.dj_text || '—';
+  // Playback stalled (files missing / library not mounted): say so loudly
+  // instead of showing a silent IDLE while the queue churns.
+  const warn = $('playback-warn');
+  if (warn) {
+    if (s.error) {
+      warn.textContent = `⚠ ${s.error}`;
+      warn.hidden = false;
+    } else {
+      warn.hidden = true;
+    }
+  }
   const pct = s.duration && s.elapsed ? Math.min(100, (s.elapsed / s.duration) * 100) : 0;
   $('np-bar').style.width = `${pct}%`;
   $('np-time').textContent = s.duration

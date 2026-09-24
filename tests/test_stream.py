@@ -7,6 +7,7 @@ import threading
 import time
 
 from app import config
+from app import stream as stream_mod
 from app.stream import CLIENT_BUFFER_CHUNKS, Broadcaster, Listener
 
 
@@ -230,3 +231,51 @@ def test_dj_text_shows_for_announced_track_then_clears(music_dir, has_ffmpeg):
         time.sleep(0.1)
     assert b.state()["dj_text"] is None
     b.stop()
+
+
+# --- a library that cannot be played must not spin ---------------------------
+#
+# Live incident: /mnt/mp3 was unmounted, so every queued file was gone. Each
+# miss returned instantly, so the broadcast loop consumed ~34,000 queue items in
+# 45 s, refilled forever (each refill stamping new DJ talks -> LLM calls at
+# ~13/min) while the UI showed a silent IDLE. These tests pin the guards.
+
+def test_missing_track_is_flagged_and_leaves_the_pool(music_dir, has_ffmpeg):
+    from app import db, library
+    library.scan_library(str(music_dir))
+    track = library.query_tracks(limit=1)[0]
+    b = Broadcaster()
+    assert b._play_file("/gone/" + track["path"].split("/")[-1], "track",
+                        {"track": track}) is False
+    # The row is flagged, so query_tracks (which filters missing = 0) never
+    # hands it out again — one attempt per dead file, not thousands.
+    assert db.unplayable_count() >= 1
+    assert track["id"] not in {t["id"] for t in library.query_tracks(limit=50)}
+
+
+def test_dj_clip_failure_does_not_touch_the_library(music_dir, has_ffmpeg):
+    from app import db, library
+    library.scan_library(str(music_dir))
+    track = library.query_tracks(limit=1)[0]
+    before = db.unplayable_count()
+    Broadcaster()._play_file("/gone/break.mp3", "dj", {"track": track})
+    assert db.unplayable_count() == before   # a missing DJ clip is not a library row
+
+
+def test_failure_breaker_backs_off_and_reports_the_error():
+    b = Broadcaster()
+    assert b.state()["error"] is None
+    delays = [b._register_failure("/music/dead.mp3") for _ in range(12)]
+    # Below the threshold there is no delay (a few bad files are just skipped)…
+    assert delays[:stream_mod.FAILURE_BREAKER - 1] == [0.0] * (stream_mod.FAILURE_BREAKER - 1)
+    # …then it grows and is capped, so a mass-missing library cannot spin the
+    # CPU or re-trigger refills thousands of times per minute.
+    past = delays[stream_mod.FAILURE_BREAKER - 1:]
+    assert all(d > 0 for d in past)
+    assert past == sorted(past), "the backoff must never shrink while failing"
+    assert max(past) == 30.0, "the backoff must be capped at 30 s"
+    err = b.state()["error"]
+    assert err and "could not be played" in err and "mounted" in err
+    # Playing something successfully clears it.
+    b._register_success()
+    assert b.state()["error"] is None

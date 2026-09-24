@@ -181,3 +181,48 @@ def test_leftover_language_strategy_degrades_to_genre(monkeypatch):
     assert themes_called == ["genre"]
     for it in items:
         assert it["program"]["kind"] != "language"
+
+
+def test_break_preparation_attempts_are_bounded(music_dir, has_ffmpeg, monkeypatch):
+    """A break that cannot be prepared must not be retried forever.
+
+    The prefetch loop runs every 5 s (and on every refill). Retrying an
+    unpreparable item each time meant an LLM call every few seconds forever —
+    the incident where an unmounted library saturated the DJ model.
+    """
+    from app import dj, scheduler
+    library.scan_library(str(music_dir))
+    sched = Scheduler()
+    sched.refill(6)
+
+    calls = {"n": 0}
+
+    def failing_prepare(*a, **kw):
+        calls["n"] += 1
+        return None
+
+    monkeypatch.setattr(dj, "prepare_break", failing_prepare)
+    # Force every queued item to want a break, so the prefetch loop always has
+    # something to work on.
+    with sched._lock:
+        for item in sched._queue:
+            item["dj_requested"] = True
+
+    for _ in range(10):
+        sched._prefetch_once()
+
+    flagged = len(sched._queue)
+    assert calls["n"] <= flagged * scheduler.MAX_BREAK_ATTEMPTS, (
+        f"prepared {calls['n']} times for {flagged} items — retries are not "
+        "bounded")
+    assert calls["n"] > 0, "the prefetch loop should still try"
+
+
+def test_break_attempts_are_cleared_when_the_queue_is_rebuilt(music_dir, has_ffmpeg):
+    from app import scheduler
+    library.scan_library(str(music_dir))
+    sched = Scheduler()
+    sched.refill(6)
+    sched._attempts[12345] = 2
+    sched.clear()
+    assert sched._attempts == {}

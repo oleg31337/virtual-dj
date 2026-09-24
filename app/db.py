@@ -222,6 +222,31 @@ def delete_preset(name: str) -> bool:
     return cur.rowcount > 0
 
 
+# --- library health --------------------------------------------------------
+
+def mark_missing(track_id: int | None) -> None:
+    """Flag a track whose file could not be played.
+
+    ``query_tracks`` filters ``missing = 0``, so the row immediately leaves the
+    playable pool. Without this, a library whose files vanished (unmounted
+    share, moved folder) makes the broadcaster burn through the whole queue at
+    ~1000 items/s and refill forever — which also hammers the DJ LLM, because
+    every refill stamps new talks. A scan later deletes the row for real.
+    """
+    if track_id is None:
+        return
+    conn = connect()
+    conn.execute("UPDATE tracks SET missing = 1 WHERE id = ?", (int(track_id),))
+    conn.commit()
+
+
+def unplayable_count() -> int:
+    """Rows flagged as missing by playback (not by a scan)."""
+    row = connect().execute(
+        "SELECT COUNT(*) AS n FROM tracks WHERE missing = 1").fetchone()
+    return int(row["n"] or 0)
+
+
 # --- history ---------------------------------------------------------------
 
 def record_play(track_id: int | None) -> None:
