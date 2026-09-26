@@ -344,6 +344,7 @@ async function loadConfig() {
   $('program-size-val').textContent = $('program-size').value;
   $('program-limit').value = cfg.playback?.program?.limit ?? 20;
   $('program-max-consec').value = cfg.playback?.program?.max_consecutive_artist ?? 2;
+  $('repeat-window').value = cfg.playback?.repeat_window ?? 50;
   $('program-strategy-sel').value = cfg.playback?.program?.strategy ?? 'genre';
   // Voice + prosody controls.
   $('dj-speed').value = Math.round((cfg.dj?.speed ?? 1.0) * 100);
@@ -478,6 +479,7 @@ async function loadPrograms() {
       `(${{ genre: 'by genre', artist: 'by artist', decade: 'by decade' }[p.strategy] || p.strategy})`;
     $('program-limit').value = p.limit;
     if (p.max_consecutive_artist) $('program-max-consec').value = p.max_consecutive_artist;
+    if (p.repeat_window !== undefined) $('repeat-window').value = p.repeat_window;
     const themes = p.themes || [];
     const box = $('programs');
     if (!themes.length) {
@@ -552,6 +554,8 @@ function renderProgramSummary() {
   parts.push(cap > 1
     ? `max ${cap} songs in a row by the same artist`
     : 'never two songs in a row by the same artist');
+  const win = Number(data.repeat_window);
+  if (win > 0) parts.push(`no repeat within ${fmtNum(win)} songs`);
   el.textContent = parts.join(' · ');
   el.className = 'meta ' + (on ? 'dim' : 'warn');
 }
@@ -927,6 +931,10 @@ function wire() {
             // new genre after a scan) starts ON.
             disabled: disabledProgramThemes(),
           },
+          // The repeat window applies in every mode (programs or flat), so it
+          // sits beside the program block rather than inside it.
+          repeat_window:
+            Math.min(1000, Math.max(0, Number($('repeat-window').value) || 0)),
         },
       }),
     });

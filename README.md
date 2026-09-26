@@ -65,6 +65,16 @@ Point VLC, Winamp, Sonos, or any browser at the stream URL and it just plays.
   10,158-track library: the longest run drops from 6 songs to 2, while 19 of 20
   genre themes, 20 of 20 artist themes and 8 of 8 decade themes still fill a
   program.
+- **No repeats in an evening.** `playback.repeat_window` (default **50**) keeps
+  every song played in the last N plays — and everything already queued — out of
+  the playlist, in every mode. If the eligible pool is smaller than the window
+  (a narrow artist/genre filter, or a small library) the window shrinks by
+  halves down to 2 songs rather than being dropped, so the station never falls
+  back to "anything goes" (which could repeat a song immediately) and a filter
+  is never silently replaced by the whole library. Measured on a 10,158-track
+  library over 600 songs: with a 50-song window the closest a song ever came
+  back was 64 plays later (211 with a 200-song window). Adjustable in the
+  *Programs* card, `0` disables it.
 - **Even volume across the whole library.** Every track is measured once
   (EBU R128 loudness + true peak) and then streamed at its own fixed gain, so
   loud songs are pulled down and quiet ones lifted — without the level being

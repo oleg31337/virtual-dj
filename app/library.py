@@ -30,7 +30,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 from mutagen import File as MutagenFile
 
@@ -726,6 +726,26 @@ def artist_run_cap() -> int:
         return 2
 
 
+def repeat_window() -> int:
+    """How many recent songs must not repeat (``playback.repeat_window``).
+
+    "Don't play the same song again for at least N songs." 0 disables the rule.
+    Single source of truth, like ``artist_run_cap``: the queue builder and the
+    Programs card read the same number.
+    """
+    playback = config.get("playback", {}) or {}
+    try:
+        return max(0, int(playback.get("repeat_window", 50)))
+    except (TypeError, ValueError):
+        return 50
+
+
+def recent_played_ids(window: int | None = None) -> set[int]:
+    """Track ids played within the last ``window`` plays (the do-not-repeat set)."""
+    span = repeat_window() if window is None else max(0, int(window))
+    return set(db.recent_track_ids(span))
+
+
 def artist_key(track: dict[str, Any] | None) -> str:
     """Normalized artist identity for the "no long artist runs" rule.
 
@@ -854,6 +874,7 @@ def query_tracks(
     exclude_genres: list[str] | None = None,
     exclude_artists: list[str] | None = None,
     exclude_decades: list[int] | None = None,
+    exclude_ids: Iterable[int] | None = None,
 ) -> list[dict[str, Any]]:
     # Excluded tracks are never playlist material — the DJ cannot announce
     # them. They are only reachable via ``excluded_tracks()`` for reporting.
@@ -921,6 +942,11 @@ def query_tracks(
             f"OR (CAST(year AS INTEGER) / 10) * 10 NOT IN ({placeholders}))"
         )
         params += [int(d) for d in exclude_decades]
+
+    if exclude_ids:
+        ids = [int(i) for i in exclude_ids]
+        where.append(f"id NOT IN ({','.join('?' * len(ids))})")
+        params += ids
 
     order = "RANDOM()" if random_order else "artist COLLATE NOCASE, album, title"
     sql = (

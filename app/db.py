@@ -257,6 +257,23 @@ def record_play(track_id: int | None) -> None:
     conn.commit()
 
 
+def recent_track_ids(window: int = 50) -> list[int]:
+    """Ids of the last ``window`` plays, newest first.
+
+    Ordered by the autoincrement ``id`` (true insertion order) rather than
+    ``played_at``, whose one-second resolution ties on fast queues. Repeats are
+    kept: the queue builder just needs the SET of songs it must not play again.
+    """
+    window = int(window)
+    if window <= 0:
+        return []
+    rows = connect().execute(
+        "SELECT track_id FROM history WHERE track_id IS NOT NULL "
+        "ORDER BY id DESC LIMIT ?", (window,),
+    ).fetchall()
+    return [int(r["track_id"]) for r in rows]
+
+
 def recent_history(limit: int = 50) -> list[dict[str, Any]]:
     rows = connect().execute(
         "SELECT h.played_at, t.id, t.title, t.artist, t.album "

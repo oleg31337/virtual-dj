@@ -181,6 +181,12 @@ DEFAULTS: dict[str, Any] = {
             # Set 1 to never repeat an artist back-to-back.
             "max_consecutive_artist": 2,
         },
+        # Don't play the same song again for at least this many songs. The queue
+        # builder keeps the last N plays (and everything already queued) out of
+        # the playlist, so a 10k-track library does not serve the same track
+        # twice in an evening. 0 disables it. Falls back to ignoring the window
+        # when the library is too small to fill the queue otherwise.
+        "repeat_window": 50,
     },
     # Icecast delivery. When enabled, the app runs a *managed* Icecast2 server
     # (bundled in the same container) and a background ffmpeg ("the pusher")

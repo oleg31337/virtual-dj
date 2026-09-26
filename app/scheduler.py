@@ -22,6 +22,9 @@ log = logging.getLogger(__name__)
 # every 5 s and on every refill — so an unbounded retry means the model is hit
 # every few seconds forever when preparation keeps failing.
 MAX_BREAK_ATTEMPTS = 3
+# The repeat window never shrinks below this while the library has anything to
+# play: repeating a song after 2 others is the minimum acceptable quality bar.
+REPEAT_WINDOW_FLOOR = 2
 
 
 def _genre_matches(theme_genre: Any, term: Any) -> bool:
@@ -108,6 +111,43 @@ class Scheduler:
             "program": program,
         }
 
+    def _do_not_repeat(self, window: int | None = None) -> set[int]:
+        """Track ids the next songs must avoid.
+
+        The last ``window`` plays (history, default:
+        ``playback.repeat_window``) plus everything already queued — the queued
+        part also keeps one refill from adding a song the previous refill just
+        added, and is applied even when the window is switched off.
+        """
+        block = library.recent_played_ids(window)
+        with self._lock:
+            block |= {i["track"]["id"] for i in self._queue
+                      if i.get("track", {}).get("id") is not None}
+        return block
+
+    @staticmethod
+    def _repeat_ladder() -> list[int]:
+        """Repeat windows to try, longest first.
+
+        The configured window is used whenever the library can fill the queue.
+        Only when it cannot (a small filtered slice, or every track of a tiny
+        library recently played) does the window shrink — halving, and never
+        below ``REPEAT_WINDOW_FLOOR`` — with 0 as the absolute last resort so a
+        two-track library still has something to play.
+        """
+        window = library.repeat_window()
+        if window <= 0:
+            return [0]
+        ladder: list[int] = []
+        current = window
+        while current >= REPEAT_WINDOW_FLOOR:
+            ladder.append(current)
+            current //= 2
+        if ladder[-1] != REPEAT_WINDOW_FLOOR:
+            ladder.append(REPEAT_WINDOW_FLOOR)
+        ladder.append(0)
+        return ladder
+
     def _tail_artist(self) -> tuple[str | None, int]:
         """Artist of the queue's tail plus how many of its songs run back.
 
@@ -128,7 +168,7 @@ class Scheduler:
                     break
             return artist, run
 
-    def _build_programs(self, count: int) -> list[dict[str, Any]]:
+    def _build_programs(self, count: int, window: int | None = None) -> list[dict[str, Any]]:
         """Build ``count`` themed program items, ordering the queue into runs.
 
         Each program is a contiguous block of tracks sharing a theme (genre,
@@ -185,6 +225,8 @@ class Scheduler:
         max_consec = _artist_run_settings()
         # Carry the artist run in from whatever is already queued.
         run_artist, run_len = self._tail_artist()
+        # Songs that must not come back yet (recently played + already queued).
+        block = self._do_not_repeat(window)
         # Round-robin themes so consecutive programs differ, like a real DJ
         # alternating vibes rather than repeating one.
         for theme in themes:
@@ -209,12 +251,14 @@ class Scheduler:
             want = min(size, max_consec) if strategy == "artist" else size
             # Over-fetch candidates so the interleave has material to work with.
             tracks = library.query_tracks(
-                limit=max(want * 4, want), random_order=True, **kwargs, **excludes)
+                limit=max(want * 4, want), random_order=True, **kwargs, **excludes,
+                exclude_ids=block)
             ordered = library.interleave_artists(
                 tracks, max_consec, run_artist, run_len, want)
             if len(ordered) < want:
-                # Not enough songs for this theme without repeating a band:
-                # skip it and try another program (theme order is randomized).
+                # Not enough songs for this theme without repeating a band (or
+                # every candidate was played recently): skip it and try another
+                # program (theme order is randomized).
                 log.debug("program theme %r skipped: %d/%d tracks under the "
                           "%d-in-a-row rule", theme, len(ordered), want, max_consec)
                 continue
@@ -258,6 +302,24 @@ class Scheduler:
         """
         playback = config.get("playback", {}) or {}
         program_enabled = bool((playback.get("program") or {}).get("enabled", False))
+        # Try the configured repeat window first and only relax it if the
+        # library cannot fill the queue at all — a small slice must degrade to a
+        # shorter window, never to "anything goes" (that let a song repeat
+        # immediately, worse than having no rule).
+        ladder = self._repeat_ladder()
+        for window in ladder:
+            added = self._refill_once(count, window, playback, program_enabled)
+            if added:
+                if window != ladder[0]:
+                    log.info("repeat window relaxed from %d to %d songs "
+                             "(library too small to fill the queue otherwise)",
+                             ladder[0], window)
+                return added
+        return 0
+
+    def _refill_once(self, count: int, window: int, playback: dict[str, Any],
+                     program_enabled: bool) -> int:
+        """One refill attempt with a given repeat window (0 = no window)."""
         if program_enabled:
             prog = playback.get("program") or {}
             size = max(2, int(prog.get("size", 6)))
@@ -267,7 +329,7 @@ class Scheduler:
             # refill still tops the queue up by roughly `count` tracks.
             per = min(size, _artist_run_settings()) if strategy == "artist" else size
             n_programs = max(1, count // max(1, per))
-            items = self._build_programs(n_programs)
+            items = self._build_programs(n_programs, window=window)
             if items:
                 with self._lock:
                     self._queue.extend(items)
@@ -276,20 +338,32 @@ class Scheduler:
             # No theme had enough tracks (tiny library) — fall through to flat.
 
         excludes: dict[str, Any] = library.program_exclusions()
-        tracks = library.query_tracks(
-            search=playback.get("search", "") or "",
-            genres=playback.get("genres") or None,
-            artists=playback.get("artists") or None,
-            limit=count,
-            random_order=bool(playback.get("shuffle", True)),
+        queries: dict[str, Any] = {
+            "search": playback.get("search", "") or "",
+            "genres": playback.get("genres") or None,
+            "artists": playback.get("artists") or None,
+            "limit": count,
+            "random_order": bool(playback.get("shuffle", True)),
             **excludes,
-        )
+        }
+        tracks = library.query_tracks(**queries, exclude_ids=self._do_not_repeat(window))
         if not tracks and not any(excludes.values()):
-            # Filters matched nothing — fall back to the whole library so the
-            # stream never goes silent. Deliberately NOT applied when themes
-            # were switched off: resurrecting the whole library would play
-            # exactly what the user asked not to hear.
-            tracks = library.query_tracks(limit=count, random_order=True)
+            # Distinguish "this filter matches nothing at all" from "the repeat
+            # window ate the filtered pool". Only the former falls back to the
+            # whole library (never silence the station); the latter must not
+            # hijack the filter — the window ladder relaxes it instead, so an
+            # artist/genre selection is never silently replaced by the whole
+            # library.
+            filtered_alone = library.query_tracks(**{**queries, "limit": 1})
+            if not filtered_alone:
+                # Filters matched nothing — fall back to the whole library so the
+                # stream never goes silent. Deliberately NOT applied when themes
+                # were switched off: resurrecting the whole library would play
+                # exactly what the user asked not to hear. The repeat window still
+                # applies here; it is the ladder that relaxes it, not this branch.
+                tracks = library.query_tracks(
+                    limit=count, random_order=True,
+                    exclude_ids=self._do_not_repeat(window))
         if not tracks:
             return 0
         if not playback.get("shuffle", True):

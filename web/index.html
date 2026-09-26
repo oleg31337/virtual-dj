@@ -204,6 +204,9 @@
       <label class="field inline"><span>Same artist in a row</span>
         <input type="number" id="program-max-consec" min="1" max="10" step="1" value="2" />
         <span class="dim">max songs before the DJ moves on</span></label>
+      <label class="field inline"><span>Don't repeat a song for</span>
+        <input type="number" id="repeat-window" min="0" max="1000" step="10" value="50" />
+        <span class="dim">songs (0 = off)</span></label>
     </div>
     <button id="save-program" class="primary">Save programs</button>
     <button id="program-select-all" class="ghost"

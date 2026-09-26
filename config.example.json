@@ -56,6 +56,7 @@
 
   "playback": {
     "shuffle": true,
+    "repeat_window": 50,
     "genres": [],
     "artists": [],
     "search": "",

@@ -271,6 +271,7 @@ def api_programs():
         "size": size,
         "limit": limit,
         "max_consecutive_artist": max_consec,
+        "repeat_window": library.repeat_window(),
         "eligible": sel["eligible"],
         "themes": themes,
         "selected": sum(1 for t in themes if not t["disabled"]),
