@@ -207,6 +207,51 @@ def test_programs_endpoint_exposes_the_switchable_selection(client):
     assert after["disabled"]["genre"] == [label]
 
 
+def test_config_write_refuses_an_unknown_key(client):
+    """A typo'd payload key must fail loudly, not be stored and ignored."""
+    r = client.put("/api/config", json={"playback": {"repeat_windows": 50}})
+    assert r.status_code == 422
+    assert "playback.repeat_windows" in str(r.json())
+    # ...while a valid write still lands, and lands in the file the app reads.
+    assert client.put("/api/config", json={"playback": {"repeat_window": 45}}).status_code == 200
+    try:
+        assert client.get("/api/config").json()["playback"]["repeat_window"] == 45
+    finally:
+        client.put("/api/config", json={"playback": {"repeat_window": 50}})
+
+
+def test_cache_endpoints_report_and_sweep(client):
+    """The Library card's temporary-data row and its "Clean now" button."""
+    stats = client.get("/api/cache").json()
+    assert {"dj_files", "dj_bytes", "enabled", "last_removed_bytes"} <= set(stats)
+    assert stats["enabled"] is True
+    swept = client.post("/api/cache/clean").json()
+    assert "report" in swept and "stats" in swept
+    assert isinstance(swept["report"]["removed_files"], int)
+
+
+def test_artists_endpoint_feeds_the_filter_suggestions(client):
+    body = client.get("/api/library/artists").json()
+    assert body["artists"], "the fixture library has artists"
+    assert {"artist", "n"} <= set(body["artists"][0])
+
+
+def test_artist_filter_narrows_the_queue(client):
+    """playback.artists is settable from the UI's artist field and is honoured."""
+    artists = client.get("/api/library/artists").json()["artists"]
+    name = artists[0]["artist"]
+    client.put("/api/config", json={"playback": {"artists": [name]}})
+    try:
+        # Exactly what the card's Apply does: the filter takes effect on the NEXT
+        # fill, so the already-queued (unfiltered) items are dropped first.
+        client.post("/api/queue/clear")
+        queue = client.get("/api/queue?limit=50").json()      # a list of queue items
+        assert queue, "the queue should still fill from a single-artist filter"
+        assert {item["track"]["artist"] for item in queue} == {name}, "artist filter leaked"
+    finally:
+        client.put("/api/config", json={"playback": {"artists": []}})
+
+
 def test_programs_endpoint_exposes_the_artist_run_cap(client):
     """The card needs the cap to describe the rule it is enforcing."""
     body = client.get("/api/programs").json()

@@ -772,15 +772,39 @@ def recent_played_ids(window: int | None = None) -> set[int]:
     return set(db.recent_track_ids(span))
 
 
-def artist_key(track: dict[str, Any] | None) -> str:
-    """Normalized artist identity for the "no long artist runs" rule.
+# Artist tags that carry no identity: placeholders and the folder/track prefixes
+# that end up in a tag when a rip has no proper metadata. Russian entries matter
+# here — the library is heavily Russian and "Неизвестный исполнитель" is what a
+# lot of rips write instead of a band name.
+_PLACEHOLDER_ARTISTS = {
+    "", "-", "?", "--", "unknown", "unknown artist", "unknown band", "n/a", "na",
+    "none", "no artist", "various", "various artists", "v.a.", "va", "v/a",
+    "неизвестен", "неизвестный", "неизвестный исполнитель", "неизвестный артист",
+    "без исполнителя", "сборник", "разное",
+}
+# "07-Dva koncerta II. akustika", "01 - something": a track/folder number glued to
+# the front. Real names that merely START with a number ("30 Seconds to Mars") do
+# not match — that pattern needs a separator directly after the digits.
+_JUNK_ARTIST_RE = re.compile(r"^\d{1,3}\s*[-._]\s*\S")
+# One shared key for every unidentifiable artist, so the no-long-runs rule applies
+# to them: a wall of untagged tracks is exactly the sameness the user objected to.
+_UNKNOWN_ARTIST_KEY = "__unknown__"
 
-    Tracks with no usable artist get a unique key each: they come from unrelated
-    files (unknown metadata), so they must not be treated as "the same band".
+
+def artist_key(track: dict[str, Any] | None) -> str:
+    """Normalized artist identity for the "no long runs" rule.
+
+    An unidentifiable artist (blank, a placeholder like "Unknown" or
+    "Неизвестный исполнитель", or a folder-number prefix) shares ONE key with
+    every other unidentifiable artist. They stay fully playable — nothing is
+    excluded for metadata (see the never-exclude directive) — but the queue
+    treats them as the same group, so an untagged stretch is broken up like any
+    other run instead of becoming an unlimited block.
     """
     raw = str((track or {}).get("artist") or "").strip().lower()
-    if not raw or raw in ("unknown", "-", "?"):
-        return f"__unknown__{id(track)}"
+    raw = re.sub(r"\s+", " ", raw)
+    if raw in _PLACEHOLDER_ARTISTS or _JUNK_ARTIST_RE.match(raw):
+        return _UNKNOWN_ARTIST_KEY
     return raw
 
 

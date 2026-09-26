@@ -54,6 +54,23 @@
     "enabled": true
   },
 
+  "cache": {
+    "_comment": "Temporary data is pruned automatically: the rendered DJ-line cache, TTS scratch and abandoned partial downloads. dj_keep_files is how many recent breaks stay, dj_max_age_hours/max_mb are additional ceilings (0 disables one), tmp_grace_minutes is how long a *.tmp/*.part file may sit before it counts as abandoned. The web UI's Library card shows the footprint and has a Clean now button (POST /api/cache/clean).",
+    "enabled": true,
+    "cleanup_interval_minutes": 10,
+    "dj_keep_files": 100,
+    "dj_max_age_hours": 48,
+    "dj_max_mb": 256,
+    "tmp_grace_minutes": 60
+  },
+
+  "logging": {
+    "_comment": "Console always; to_file also writes data/logs/virtual-dj.log, rotated at max_mb with this many backups. VDJ_LOG_LEVEL overrides the console level.",
+    "to_file": true,
+    "max_mb": 5,
+    "backups": 3
+  },
+
   "playback": {
     "shuffle": true,
     "repeat_window": 50,

@@ -31,7 +31,15 @@ from . import config
 
 log = logging.getLogger(__name__)
 
-_TMPL_PATH = os.path.join(os.path.dirname(__file__), "..", "icecast.xml.tmpl")
+# The template ships at docker/icecast/icecast.xml.tmpl and the Dockerfile also
+# copies it to /app/icecast.xml.tmpl. Resolve both: pinning the image path meant a
+# checkout (bare metal, `run.sh`, the systemd unit in the README) could not render
+# a config at all - managed Icecast died with FileNotFoundError while the bundled
+# container worked, which hid the bug.
+_TMPL_CANDIDATES = (
+    os.path.join(os.path.dirname(__file__), "..", "docker", "icecast", "icecast.xml.tmpl"),
+    os.path.join(os.path.dirname(__file__), "..", "icecast.xml.tmpl"),
+)
 _RENDERED_PATH = "/tmp/icecast/icecast.xml"
 _LOGDIR = "/tmp/icecast"
 _PIDFILE = os.path.join(_LOGDIR, "icecast.pid")
@@ -103,9 +111,19 @@ class ManagedIcecast:
 
     # --- rendering ---------------------------------------------------------
 
+    @staticmethod
+    def template_path() -> str:
+        """The shipped icecast.xml template (checkout layout or container layout)."""
+        for candidate in _TMPL_CANDIDATES:
+            if os.path.exists(candidate):
+                return candidate
+        raise FileNotFoundError(
+            "icecast.xml.tmpl not found; looked in: " + ", ".join(_TMPL_CANDIDATES))
+
     def render_config(self) -> str:
         """Render icecast.xml from the app config. Returns the path written."""
-        tmpl = open(_TMPL_PATH, "r", encoding="utf-8").read()
+        with open(self.template_path(), "r", encoding="utf-8") as fh:
+            tmpl = fh.read()
         source_password = str(config.get("icecast.source_password", "hackme"))
         # Both are overridable from .env; an empty value means "keep the
         # default" (admin) or "same as the source password" (relay).

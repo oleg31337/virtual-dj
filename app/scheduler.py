@@ -148,6 +148,15 @@ class Scheduler:
         ladder.append(0)
         return ladder
 
+    def prepared_breaks(self) -> list[dict[str, Any]]:
+        """The DJ breaks rendered for upcoming tracks (housekeeping protection).
+
+        Their audio files live in the cache directory and must survive a sweep:
+        deleting one would silence a talk the broadcaster is about to play.
+        """
+        with self._lock:
+            return list(self._prepared.values())
+
     def _queued_music(self) -> bool:
         """True when the queue already holds something to switch away from.
 

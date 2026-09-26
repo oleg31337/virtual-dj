@@ -70,6 +70,11 @@ Point VLC, Winamp, Sonos, or any browser at the stream URL and it just plays.
   artist) the cap cannot hold: the queue relaxes it instead of going silent,
   and the *Programs* card summary says **artist limit relaxed** rather than
   claiming a rule the queue is about to break.
+- **Artist filter.** The *Genres* card's artist field narrows the queue to the
+  artists you list (comma-separated, suggestions from your library, blank =
+  every artist). It composes with the genre chips and the search box; when it
+  names a single band the artist-run rule cannot hold, and the *Programs* card
+  says "artist limit relaxed" instead of claiming it.
 - **No repeats in an evening.** `playback.repeat_window` (default **50**) keeps
   every song played in the last N plays — and everything already queued — out of
   the playlist, in every mode. If the eligible pool is smaller than the window
@@ -298,11 +303,48 @@ A few env vars override the defaults at first boot, useful for containers:
 | `VDJ_DATA_DIR` | `./data` | Where state is kept (config, DB, voices) |
 | `VDJ_DB_PATH` | `$VDJ_DATA_DIR/vdj.sqlite3` | Library database file |
 | `VDJ_HOST` / `VDJ_PORT` | `0.0.0.0` / `8420` | Bind address and port (the compose mapping assumes 8420) |
-| `VDJ_PORT` | `8420` | Listen port |
-| `VDJ_HOST` | `0.0.0.0` | Bind address |
-| `VDJ_LOG_LEVEL` | `info` | Log verbosity |
+| `VDJ_LOG_LEVEL` | `info` | Console log verbosity |
 | `VDJ_NO_VOICE_DOWNLOAD` | `0` | Set to `1` to skip the first-run voice download |
 | `VDJ_LOUDNESS_WORKERS` | `2` | Parallel loudness analyses (raise near your core count for a faster first pass) |
+
+An empty value means "unset": the bundled compose forwards `"${VAR:-}"`, so a
+variable you leave blank in `.env` arrives as an empty string and the default is
+used (a blank numeric value cannot crash the app either).
+
+### Temporary data (cleaned up automatically)
+
+The app renders a DJ line to an mp3 the first time it says it and caches it. That
+cache, plus TTS scratch space and any partially written download, is **pruned
+automatically** — you never have to clean it by hand:
+
+| Knob (`data/config.json` → `cache`) | Default | Meaning |
+|------------------------------------|---------|---------|
+| `enabled` | `true` | Run the periodic sweep at all |
+| `cleanup_interval_minutes` | `10` | How often the sweep runs |
+| `dj_keep_files` | `100` | Keep at least this many recent breaks |
+| `dj_max_age_hours` | `48` | Delete breaks older than this |
+| `dj_max_mb` | `256` | Overall size budget for the break cache (`0` = no limit) |
+| `tmp_grace_minutes` | `60` | Age before a partial `*.tmp`/`*.part` file is considered abandoned |
+
+A sweep runs on startup and then on the interval. A break the queue is about to
+play is never removed, and **voice models are never touched** (they are
+downloads, not cache). The **Library** card shows the current footprint —
+*"temporary data: N DJ breaks, X MB · keeps newest 100, sweeps every 10 min"* —
+with a **Clean now** button that sweeps immediately.
+
+### Log file
+
+Besides the console (`docker logs`), the app writes a bounded rotating log to
+`data/logs/virtual-dj.log` (`logging.to_file`, `logging.max_mb` = 5,
+`logging.backups` = 3). That file is what to read when an incident needs
+diagnosing without attaching to the container.
+
+### Strict config writes
+
+`PUT /api/config` rejects any key the app does not read with **HTTP 422** and
+lists it (`{"unknown": ["playback.repeat_windows"]}`). A mistyped key used to be
+stored and silently ignored — the UI showed the setting as saved while nothing
+consumed it.
 
 ## Volume normalization
 

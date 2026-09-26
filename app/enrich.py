@@ -20,6 +20,20 @@ log = logging.getLogger(__name__)
 
 MB_ROOT = "https://musicbrainz.org/ws/2"
 WIKI_ROOT = "https://en.wikipedia.org/api/rest_v1/page/summary"
+# A Cyrillic artist name almost never has an article on the English Wikipedia, so
+# the Russian edition is tried FIRST for Cyrillic terms (it is also the version
+# that actually has the facts) and the English disambiguator fallbacks are skipped
+# for them: on the real library those 4-5 en.wikipedia probes all 404'd, wasting a
+# request per name per track.
+WIKI_ROOT_RU = "https://ru.wikipedia.org/api/rest_v1/page/summary"
+# Unresolvable term -> the moment we may try again. Repeated tracks by the same
+# untagged/unfindable artist used to re-probe on every single play.
+_WIKI_MISSES: dict[str, float] = {}
+_WIKI_MISS_TTL_S = 6 * 60 * 60
+
+
+def _has_cyrillic(text: str) -> bool:
+    return any("\u0400" <= ch <= "\u04ff" for ch in text or "")
 
 # MusicBrainz asks for max 1 request/second from anonymous clients.
 _MIN_INTERVAL = 1.1
@@ -98,28 +112,42 @@ def _wikipedia(client: httpx.Client, term: str) -> dict[str, Any]:
     "(musician)", "(singer)", ...). Returns ``{"summary": str,
     "wikipedia_title": str}`` or ``{}`` if none resolve to a real article.
     """
+    import time
     from urllib.parse import quote
 
-    candidates = [
-        term,
-        f"{term}_(band)",
-        f"{term}_(musician)",
-        f"{term}_(singer)",
-        f"{term}_(American_band)",
-        f"{term}_(English_band)",
-    ]
-    for cand in candidates:
-        _throttle()
-        resp = client.get(f"{WIKI_ROOT}/{quote(cand, safe='')}")
-        if resp.status_code != 200:
-            continue
-        data = resp.json()
-        if data.get("type", "").endswith("disambiguation"):
-            continue
-        extract = (data.get("extract") or "").strip()
-        if not extract:
-            continue
-        return {"summary": extract[:1200], "wikipedia_title": data.get("title")}
+    # A known miss costs nothing the second time (per process, with a TTL).
+    missed_at = _WIKI_MISSES.get(term)
+    if missed_at and time.time() - missed_at < _WIKI_MISS_TTL_S:
+        return {}
+
+    if _has_cyrillic(term):
+        hosts = [WIKI_ROOT_RU, WIKI_ROOT]
+        suffixes = ["", "_(группа)", "_(музыкант)", "_(певица)", "_(группа)"]
+    else:
+        hosts = [WIKI_ROOT]
+        suffixes = ["", "_(band)", "_(musician)", "_(singer)",
+                    "_(American_band)", "_(English_band)"]
+
+    for suffix in suffixes:
+        cand = f"{term}{suffix}"
+        for host in hosts:
+            _throttle()
+            try:
+                resp = client.get(f"{host}/{quote(cand, safe='')}")
+            except Exception:                                   # noqa: BLE001
+                continue
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            if data.get("type", "").endswith("disambiguation"):
+                continue
+            extract = (data.get("extract") or "").strip()
+            if not extract:
+                continue
+            _WIKI_MISSES.pop(term, None)
+            return {"summary": extract[:1200], "wikipedia_title": data.get("title")}
+
+    _WIKI_MISSES[term] = time.time()
     return {}
 
 

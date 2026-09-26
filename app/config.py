@@ -7,6 +7,7 @@ git). Secrets, if any are ever needed, are read from the environment only.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import random
 import threading
@@ -15,6 +16,8 @@ from pathlib import Path
 from typing import Any
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+log = logging.getLogger("virtual_dj.config")
 
 
 def env_str(name: str, default: str) -> str:
@@ -164,6 +167,21 @@ DEFAULTS: dict[str, Any] = {
         "enabled": True,
         "timeout_s": 12,
     },
+    # Logging. Console always; the rotating file lives under DATA_DIR/logs and is
+    # bounded by max_mb x backups (app/__init__.py wires it up).
+    "logging": {"to_file": True, "max_mb": 5, "backups": 3},
+    # Housekeeping. Temporary data (rendered DJ audio, TTS scratch, partial
+    # downloads) is pruned automatically — see app/maintenance.py. The defaults
+    # keep a comfortable buffer for repeat playback of the same lines while
+    # never letting the directory grow without limit.
+    "cache": {
+        "enabled": True,
+        "cleanup_interval_minutes": 10,
+        "dj_keep_files": 100,
+        "dj_max_age_hours": 48,
+        "dj_max_mb": 256,
+        "tmp_grace_minutes": 60,
+    },
     "playback": {
         "shuffle": True,
         # Active filters applied when auto-filling the queue.
@@ -257,6 +275,51 @@ def _deep_merge(base: dict, override: dict) -> dict:
     return out
 
 
+def flattened_paths() -> set[str]:
+    """Every config path the app knows (dotted, e.g. ``playback.program.size``).
+
+    Used to reject unknown keys on a config write: a typo'd key used to be merged
+    into config.json and silently ignored forever — the harshest kind of bug,
+    because the UI shows the setting as saved.
+    """
+    paths: set[str] = set()
+
+    def walk(node, prefix: str) -> None:
+        for key, value in (node or {}).items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            paths.add(path)
+            if isinstance(value, dict):
+                walk(value, path)
+
+    walk(DEFAULTS, "")
+    return paths
+
+
+def unknown_paths(patch: dict[str, Any], *, allow_prefixes: tuple[str, ...] = ()) -> list[str]:
+    """Dotted paths in ``patch`` that no part of the app reads.
+
+    Only dicts are recursed into (a list value is a leaf); ``allow_prefixes``
+    whitelists whole subtrees (used for stored presets, which may legitimately
+    carry keys from an older schema).
+    """
+    known = flattened_paths()
+    bad: list[str] = []
+
+    def walk(node, prefix: str) -> None:
+        for key, value in (node or {}).items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            if any(path == p or path.startswith(p + ".") for p in allow_prefixes):
+                continue
+            if path not in known:
+                bad.append(path)
+                continue
+            if isinstance(value, dict):
+                walk(value, path)
+
+    walk(patch, "")
+    return sorted(set(bad))
+
+
 def ensure_dirs() -> None:
     for path in (DATA_DIR, CACHE_DIR, DJ_CACHE_DIR, VOICES_DIR):
         path.mkdir(parents=True, exist_ok=True)
@@ -279,8 +342,16 @@ def load_config(force: bool = False) -> dict[str, Any]:
 
 
 def save_config(patch: dict[str, Any]) -> dict[str, Any]:
-    """Deep-merge ``patch`` into the stored config and persist it."""
+    """Deep-merge ``patch`` into the stored config and persist it.
+
+    Unknown keys are logged rather than rejected here: ``save_config`` is also the
+    path presets and internal callers use. The HTTP API is strict (422) so the
+    web UI cannot silently store a typo.
+    """
     global _CACHE
+    unknown = unknown_paths(patch)
+    if unknown:
+        log.warning("config write carries unknown key(s): %s", ", ".join(unknown))
     with _LOCK:
         current = load_config()
         merged = _deep_merge(current, patch)

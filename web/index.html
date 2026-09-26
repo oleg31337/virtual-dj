@@ -59,6 +59,10 @@
     <div class="meta dim" id="scan-status">—</div>
     <div id="library-stats" class="stats"></div>
     <div class="row">
+      <span class="meta dim" id="cache-stats">temporary data: —</span>
+      <button id="cache-clean" class="ghost" title="Prune rendered DJ audio and stale temporary files now">Clean now</button>
+    </div>
+    <div class="row">
       <input type="text" id="search" placeholder="search title / artist / album" />
       <button id="do-search">Search</button>
     </div>
@@ -220,9 +224,16 @@
     <h3>Genres</h3>
     <div class="chips" id="genres"></div>
     <div class="row">
+      <span class="dim">Only these artists</span>
+      <input type="text" id="filter-artists" list="artist-options"
+             placeholder="comma-separated, blank = every artist" />
+      <datalist id="artist-options"></datalist>
+    </div>
+    <div class="row">
       <label><input type="checkbox" id="shuffle" checked /> Shuffle</label>
       <button id="apply-filters" class="primary">Apply</button>
     </div>
+    <div class="meta dim" id="filter-note"></div>
   </section>
 
   <section class="card">

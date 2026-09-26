@@ -2,7 +2,35 @@
 
 from __future__ import annotations
 
-from app import config, db, dj
+from app import config, db, dj, icecast_server
+
+
+def test_icecast_template_resolves_outside_the_image(tmp_path, monkeypatch):
+    """A checkout must be able to render the managed Icecast config.
+
+    Regression: the template path was pinned to ``/app/icecast.xml.tmpl``, the
+    layout the Dockerfile creates — so bare metal, ``run.sh`` and the systemd
+    unit blew up with FileNotFoundError while the container worked, which hid it.
+    """
+    assert icecast_server.ManagedIcecast.template_path().endswith("icecast.xml.tmpl")
+    import os
+    assert os.path.exists(icecast_server.ManagedIcecast.template_path())
+
+
+def test_rendered_icecast_config_is_bounded_and_substituted(tmp_path, monkeypatch):
+    monkeypatch.setattr(icecast_server, "_RENDERED_PATH", str(tmp_path / "icecast.xml"))
+    monkeypatch.setattr(config, "_CACHE", {
+        "icecast": {"enabled": True, "port": 8123, "mount": "virtualdj",
+                    "hostname": "boombox", "source_password": "srcpw",
+                    "public_port": 8123, "public_host": ""},
+        "stream": {"station_name": "Virtual DJ"},
+    })
+    text = open(icecast_server.SERVER.render_config(), encoding="utf-8").read()
+    assert "<source-password>srcpw</source-password>" in text
+    assert "<hostname>boombox</hostname>" in text
+    # Icecast rotates its own access/error logs; without logsize they would grow
+    # forever in /tmp/icecast next to the rendered config.
+    assert "<logsize>10000</logsize>" in text
 
 
 def test_defaults_present():

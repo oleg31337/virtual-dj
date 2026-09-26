@@ -318,6 +318,12 @@ async function loadConfig() {
   $('enrich-enabled').checked = cfg.enrich.enabled;
   $('shuffle').checked = cfg.playback.shuffle;
   state.activeGenres = new Set(cfg.playback.genres || []);
+  // Artist filter (playback.artists). It narrows the queue the same way the genre
+  // chips do, and it is what makes the artist-run cap unsatisfiable when it names
+  // a single band — the Programs card says so.
+  const artistInput = $('filter-artists');
+  if (artistInput) artistInput.value = (cfg.playback.artists || []).join(', ');
+  renderFilterNote();
 
   // Icecast Streaming card: port + public host (the external URL host).
   const ice = cfg.icecast || {};
@@ -529,6 +535,68 @@ function disabledProgramThemes() {
     artist: data.strategy === 'artist' ? values : (data.disabled?.artist || []),
     decade: data.strategy === 'decade' ? values : (data.disabled?.decade || []),
   };
+}
+
+/* Comma-separated artist filter -> the array the backend stores. Blank means
+ * "every artist", which is the normal state. */
+function parseArtistList(value) {
+  return String(value || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/* Artist suggestions for the queue's artist filter (biggest libraries first). */
+async function loadArtistOptions() {
+  const list = $('artist-options');
+  if (!list) return;
+  try {
+    const data = await api('/api/library/artists?limit=500');
+    const rows = data.artists || [];
+    list.innerHTML = rows.map((a) => {
+      const name = a.artist ?? a.name;
+      return `<option value="${esc(String(name))}">${fmtNum(a.n)} tracks</option>`;
+    }).join('');
+  } catch (e) { /* suggestions are optional */ }
+}
+
+/* Temporary data: what housekeeping keeps and what the last sweep freed. */
+async function loadCacheStats() {
+  const el = $('cache-stats');
+  if (!el) return;
+  try {
+    const s = await api('/api/cache');
+    renderCacheStats(s);
+  } catch (e) { /* leave the placeholder */ }
+}
+
+function renderCacheStats(s) {
+  const el = $('cache-stats');
+  if (!el || !s) return;
+  if (s.enabled === false) {
+    el.textContent = 'temporary data: automatic cleanup OFF';
+    el.className = 'meta warn';
+    return;
+  }
+  const mb = (n) => `${(Number(n || 0) / 1048576).toFixed(1)} MB`;
+  const parts = [`temporary data: ${fmtNum(s.dj_files)} DJ breaks, ${mb(s.dj_bytes)}`];
+  if (s.stale_files) parts.push(`${fmtNum(s.stale_files)} stale temp files`);
+  parts.push(`keeps newest ${fmtNum(s.keep_files)}, sweeps every ${fmtNum(s.interval_minutes)} min`);
+  if (s.last_run) parts.push(`last freed ${mb(s.last_removed_bytes)} at ${s.last_run.split('T')[1]}`);
+  el.textContent = parts.join(' · ');
+  el.className = 'meta dim';
+}
+
+function renderFilterNote() {
+  const el = $('filter-note');
+  if (!el) return;
+  const artists = parseArtistList($('filter-artists') ? $('filter-artists').value : '');
+  if (!artists.length) {
+    el.textContent = '';
+    return;
+  }
+  el.textContent = `queue limited to ${artists.length} artist${artists.length > 1 ? 's' : ''}: `
+    + artists.join(', ');
 }
 
 function renderProgramSummary() {
@@ -815,6 +883,20 @@ function wire() {
     });
     pollScan();
   };
+  $('cache-clean').onclick = async () => {
+    const btn = $('cache-clean');
+    btn.disabled = true; btn.textContent = 'cleaning…';
+    try {
+      const r = await api('/api/cache/clean', { method: 'POST' });
+      renderCacheStats(r.stats);
+    } catch (e) {
+      $('cache-stats').textContent = `cleanup failed: ${e.message}`;
+      $('cache-stats').className = 'meta warn';
+    } finally {
+      btn.disabled = false; btn.textContent = 'Clean now';
+    }
+  };
+  if ($('filter-artists')) $('filter-artists').oninput = renderFilterNote;
   $('do-search').onclick = () => loadTracks($('search').value.trim());
   $('search').onkeydown = (e) => { if (e.key === 'Enter') $('do-search').click(); };
 
@@ -847,6 +929,7 @@ function wire() {
           genres: [...state.activeGenres],
           shuffle: $('shuffle').checked,
           search: $('search').value.trim(),
+          artists: parseArtistList($('filter-artists') ? $('filter-artists').value : ''),
         },
       }),
     });
@@ -1083,7 +1166,7 @@ async function init() {
     safe(loadGenres()), safe(loadTracks('')),
     safe(loadQueue()), safe(loadPresets()), safe(loadHistory()),
     safe(loadHealth()), safe(loadPrograms()), safe(loadLLMConfig()),
-    safe(loadLoudness()),
+    safe(loadLoudness()), safe(loadCacheStats()), safe(loadArtistOptions()),
   ]);
   pollScan();
   pollLoudness();

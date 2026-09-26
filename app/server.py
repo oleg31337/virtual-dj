@@ -16,6 +16,7 @@ from . import config, db, dj, library, websearch, ai_meta
 from . import icecast as icecast_mod
 from . import icecast_server as icecast_server_mod
 from . import loudness
+from . import maintenance
 from .scheduler import SCHEDULER
 from .stream import BROADCASTER
 
@@ -69,9 +70,14 @@ async def lifespan(app: FastAPI):
     # Drain the loudness queue in the background at low priority. New files
     # added by a scan re-trigger it; switching it off here is harmless.
     loudness.autostart()
+    # Housekeeping: prune the DJ audio cache and stale partial writes on boot,
+    # then on an interval, so temporary data never accumulates behind the user's
+    # back (see app/maintenance.py).
+    maintenance.MAINTAINER.start()
     try:
         yield
     finally:
+        maintenance.MAINTAINER.stop()
         loudness.ANALYZER.stop(timeout_s=3.0)
         icecast_mod.PUSHER.stop()
         icecast_server_mod.SERVER.stop()
@@ -423,6 +429,12 @@ def api_genres():
     return library.list_genres()
 
 
+@app.get("/api/library/artists")
+def api_artists(limit: int = 500):
+    """Artist choices for the queue's artist filter (biggest first)."""
+    return {"artists": library.list_artists(limit)}
+
+
 @app.get("/api/library/tracks")
 def api_tracks(search: str = "", genre: str = "", artist: str = "",
                limit: int = 200, offset: int = 0):
@@ -501,6 +513,19 @@ def api_resume():
 
 # --- config ----------------------------------------------------------------
 
+@app.get("/api/cache")
+def api_cache():
+    """Temporary-data footprint: what housekeeping keeps and what it just freed."""
+    return maintenance.cache_stats()
+
+
+@app.post("/api/cache/clean")
+def api_cache_clean():
+    """Sweep now (the "Clean now" button) and report what went."""
+    report = maintenance.clean(force=True)
+    return {"report": report, "stats": maintenance.cache_stats()}
+
+
 @app.get("/api/config")
 def api_get_config():
     return config.load_config()
@@ -511,6 +536,16 @@ async def api_put_config(request: Request):
     patch = await request.json()
     if not isinstance(patch, dict):
         raise HTTPException(400, "config patch must be an object")
+    unknown = config.unknown_paths(patch)
+    if unknown:
+        # Loudly refuse instead of storing a key nothing reads: the UI would show
+        # the setting as saved while the app ignored it (a typo'd payload key is
+        # invisible otherwise).
+        raise HTTPException(422, {
+            "error": "unknown config key(s)",
+            "unknown": unknown,
+            "hint": "check the spelling against GET /api/config",
+        })
     updated = config.save_config(patch)
     # Filter changes should take effect on the next refill. When the program
     # grouping settings change, rebuild the upcoming queue right away so the
