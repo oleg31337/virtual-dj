@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 import re
 import threading
 import time
@@ -711,6 +712,90 @@ def program_exclusions() -> dict[str, list[Any]]:
     }
 
 
+def artist_run_cap() -> int:
+    """Max songs in a row by one band (``playback.program.max_consecutive_artist``).
+
+    Single source of truth for the rule: the queue builder, the flat shuffle and
+    the Programs card all read it, so the card can never describe a different
+    rule than the one being enforced.
+    """
+    prog = (config.get("playback", {}) or {}).get("program", {}) or {}
+    try:
+        return max(1, int(prog.get("max_consecutive_artist", 2)))
+    except (TypeError, ValueError):
+        return 2
+
+
+def artist_key(track: dict[str, Any] | None) -> str:
+    """Normalized artist identity for the "no long artist runs" rule.
+
+    Tracks with no usable artist get a unique key each: they come from unrelated
+    files (unknown metadata), so they must not be treated as "the same band".
+    """
+    raw = str((track or {}).get("artist") or "").strip().lower()
+    if not raw or raw in ("unknown", "-", "?"):
+        return f"__unknown__{id(track)}"
+    return raw
+
+
+def interleave_artists(tracks: list[dict[str, Any]],
+                       max_consecutive: int = 2,
+                       previous_artist: str | None = None,
+                       previous_run: int = 0,
+                       limit: int | None = None) -> list[dict[str, Any]]:
+    """Order ``tracks`` so one artist never plays more than N in a row.
+
+    Greedy and random: at every step it takes a track from the artist with the
+    MOST tracks still unplaced among those still allowed (random tie-break), and
+    only continues the current artist while its run is under ``max_consecutive``.
+    Preferring the biggest remaining pool is what lets a theme fill up at all —
+    picking a different artist every time burns the small pools first and leaves
+    the rest unplaceable (a 4+2 theme can fill 6 as A A B A B A, but a greedy
+    "always switch" gets 5 and the theme would be discarded). ``previous_artist``
+    / ``previous_run`` carry the run across queue boundaries, so a refill cannot
+    complete a third song by the artist that just played.
+
+    Returns at most ``limit`` tracks. A short result means the input genuinely
+    cannot supply that many without breaking the rule — callers treat that as
+    "not enough songs, skip to another program".
+    """
+    cap = max(1, int(max_consecutive))
+    pools: dict[str, list[dict[str, Any]]] = {}
+    for track in tracks:
+        pools.setdefault(artist_key(track), []).append(track)
+    for pool in pools.values():
+        random.shuffle(pool)
+
+    target = len(tracks) if limit is None else max(0, int(limit))
+    out: list[dict[str, Any]] = []
+    run_artist, run_len = previous_artist, max(0, int(previous_run))
+    while len(out) < target:
+        eligible = [a for a, pool in pools.items()
+                    if pool and (a != run_artist or run_len < cap)]
+        if not eligible:
+            break
+        biggest = max(len(pools[a]) for a in eligible)
+        artist = random.choice([a for a in eligible if len(pools[a]) == biggest])
+        out.append(pools[artist].pop())
+        if artist == run_artist:
+            run_len += 1
+        else:
+            run_artist, run_len = artist, 1
+    return out
+
+
+def restore_after_interleave(ordered: list[dict[str, Any]],
+                             originals: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Append the tracks ``interleave_artists`` could not place (flat mode).
+
+    A flat shuffle must still return everything it asked for — when the pool is
+    a single artist the rule is simply unachievable, and dropping tracks would
+    silently shrink the queue.
+    """
+    placed = {id(t) for t in ordered}
+    return ordered + [t for t in originals if id(t) not in placed]
+
+
 def program_selection(strategy: str, size: int, limit: int) -> dict[str, Any]:
     """The program rotation + the numbers the Programs card displays.
 
@@ -723,11 +808,17 @@ def program_selection(strategy: str, size: int, limit: int) -> dict[str, Any]:
     removed from the ACTIVE rotation. Order matters: disabling a theme must not
     pull the 21st-biggest theme into the list, or the card's rows would shuffle
     every time something is switched off.
+
+    ``artist`` themes are one band, so the no-long-runs rule caps a program at
+    ``max_consecutive_artist`` songs — that cap, not ``size``, is what they have
+    to be able to fill. Requiring a full ``size`` of tracks from an artist would
+    hide artists that can host a (short) program and make the cap unreachable.
     """
     size = max(2, int(size))
     limit = max(1, int(limit))
+    needed = min(size, artist_run_cap()) if strategy == "artist" else size
     themes = program_themes(strategy)
-    eligible = [t for t in themes if int(t.get("n", 0) or 0) >= size]
+    eligible = [t for t in themes if int(t.get("n", 0) or 0) >= needed]
     candidates = eligible[:limit]
     disabled = set(disabled_programs(strategy))
     value_of = lambda t: norm_theme_value(strategy, t.get(strategy))  # noqa: E731

@@ -55,6 +55,16 @@ Point VLC, Winamp, Sonos, or any browser at the stream URL and it just plays.
   a click: switched-off themes never reach the queue, in any strategy. Program
   size, grouping strategy and how many themes take part are adjustable in
   `playback.program` (config or web UI).
+- **No long runs by one band.** However the queue is built — programs or flat
+  shuffle, across program and refill boundaries — the same artist never plays
+  more than `playback.program.max_consecutive_artist` songs in a row (default
+  **2**; set 1 to never repeat an artist back-to-back, adjustable in the
+  *Programs* card). A theme that cannot be filled without repeating a band is
+  skipped and the next program is used; in *Artist* mode a program is one band
+  by definition, so it plays the cap and then the DJ moves on. Measured on a
+  10,158-track library: the longest run drops from 6 songs to 2, while 19 of 20
+  genre themes, 20 of 20 artist themes and 8 of 8 decade themes still fill a
+  program.
 - **Even volume across the whole library.** Every track is measured once
   (EBU R128 loudness + true peak) and then streamed at its own fixed gain, so
   loud songs are pulled down and quiet ones lifted — without the level being

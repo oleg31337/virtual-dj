@@ -343,6 +343,7 @@ async function loadConfig() {
   $('program-size').value = cfg.playback?.program?.size ?? 6;
   $('program-size-val').textContent = $('program-size').value;
   $('program-limit').value = cfg.playback?.program?.limit ?? 20;
+  $('program-max-consec').value = cfg.playback?.program?.max_consecutive_artist ?? 2;
   $('program-strategy-sel').value = cfg.playback?.program?.strategy ?? 'genre';
   // Voice + prosody controls.
   $('dj-speed').value = Math.round((cfg.dj?.speed ?? 1.0) * 100);
@@ -476,6 +477,7 @@ async function loadPrograms() {
     $('program-strategy').textContent =
       `(${{ genre: 'by genre', artist: 'by artist', decade: 'by decade' }[p.strategy] || p.strategy})`;
     $('program-limit').value = p.limit;
+    if (p.max_consecutive_artist) $('program-max-consec').value = p.max_consecutive_artist;
     const themes = p.themes || [];
     const box = $('programs');
     if (!themes.length) {
@@ -546,6 +548,10 @@ function renderProgramSummary() {
     parts.push(`${data.eligible - chips.length} smaller themes outside the top ${data.limit}`);
   }
   if (off) parts.push(`${off} switched off — they stay out of the queue in every mode`);
+  const cap = Number(data.max_consecutive_artist) || 2;
+  parts.push(cap > 1
+    ? `max ${cap} songs in a row by the same artist`
+    : 'never two songs in a row by the same artist');
   el.textContent = parts.join(' · ');
   el.className = 'meta ' + (on ? 'dim' : 'warn');
 }
@@ -915,6 +921,8 @@ function wire() {
             size: Number($('program-size').value),
             strategy: $('program-strategy-sel').value,
             limit: Math.max(1, Number($('program-limit').value) || 20),
+            max_consecutive_artist:
+              Math.min(10, Math.max(1, Number($('program-max-consec').value) || 2)),
             // Stored as the exclusion set, so a theme that shows up later (a
             // new genre after a scan) starts ON.
             disabled: disabledProgramThemes(),

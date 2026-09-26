@@ -254,6 +254,7 @@ def api_programs():
     limit = max(1, int(config.get("playback.program.limit", 20) or 20))
     sel = library.program_selection(strategy, size, limit)
     disabled = set(library.disabled_programs(strategy))
+    max_consec = max(1, int(config.get("playback.program.max_consecutive_artist", 2) or 2))
     key = strategy if strategy in ("genre", "artist") else "decade"
     value_of = library.norm_theme_value
     themes = []
@@ -269,6 +270,7 @@ def api_programs():
         "strategy": strategy,
         "size": size,
         "limit": limit,
+        "max_consecutive_artist": max_consec,
         "eligible": sel["eligible"],
         "themes": themes,
         "selected": sum(1 for t in themes if not t["disabled"]),

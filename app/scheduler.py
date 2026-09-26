@@ -40,6 +40,11 @@ def _genre_matches(theme_genre: Any, term: Any) -> bool:
     return wanted.lower() in genre.lower()
 
 
+def _artist_run_settings() -> int:
+    """How many songs in a row one artist may play (>= 1)."""
+    return library.artist_run_cap()
+
+
 class Scheduler:
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -103,6 +108,26 @@ class Scheduler:
             "program": program,
         }
 
+    def _tail_artist(self) -> tuple[str | None, int]:
+        """Artist of the queue's tail plus how many of its songs run back.
+
+        Refills append, so the rule has to be measured against what is already
+        queued — otherwise every refill could add a third song by whoever is
+        playing at the end of the current queue.
+        """
+        with self._lock:
+            artist: str | None = None
+            run = 0
+            for item in reversed(self._queue):
+                key = library.artist_key(item.get("track"))
+                if run == 0:
+                    artist, run = key, 1
+                elif key == artist:
+                    run += 1
+                else:
+                    break
+            return artist, run
+
     def _build_programs(self, count: int) -> list[dict[str, Any]]:
         """Build ``count`` themed program items, ordering the queue into runs.
 
@@ -157,6 +182,9 @@ class Scheduler:
         random.shuffle(themes)
         items: list[dict[str, Any]] = []
         programs_made = 0
+        max_consec = _artist_run_settings()
+        # Carry the artist run in from whatever is already queued.
+        run_artist, run_len = self._tail_artist()
         # Round-robin themes so consecutive programs differ, like a real DJ
         # alternating vibes rather than repeating one.
         for theme in themes:
@@ -175,9 +203,20 @@ class Scheduler:
                 kwargs["genres"] = list(genres_filter)
             if artists_filter and strategy != "artist":
                 kwargs["artists"] = list(artists_filter)
+            # An "artist" theme is one band by definition, so the no-long-runs
+            # rule caps it at `max_consec` songs; capping keeps artist programs
+            # audible instead of making the whole strategy unusable.
+            want = min(size, max_consec) if strategy == "artist" else size
+            # Over-fetch candidates so the interleave has material to work with.
             tracks = library.query_tracks(
-                limit=size, random_order=True, **kwargs, **excludes)
-            if len(tracks) < 2:
+                limit=max(want * 4, want), random_order=True, **kwargs, **excludes)
+            ordered = library.interleave_artists(
+                tracks, max_consec, run_artist, run_len, want)
+            if len(ordered) < want:
+                # Not enough songs for this theme without repeating a band:
+                # skip it and try another program (theme order is randomized).
+                log.debug("program theme %r skipped: %d/%d tracks under the "
+                          "%d-in-a-row rule", theme, len(ordered), want, max_consec)
                 continue
             program = {
                 "kind": strategy,
@@ -185,7 +224,7 @@ class Scheduler:
                 or f"{theme['decade']}s",
             }
             first = True
-            for track in tracks:
+            for track in ordered:
                 if first and items:
                     # Announce the switch into this new program.
                     items.append(self._wrap(
@@ -193,8 +232,22 @@ class Scheduler:
                 else:
                     items.append(self._wrap(track, with_dj=None, program=program))
                 first = False
+            run_artist = library.artist_key(ordered[-1])
+            run_len = self._trailing_run(ordered)
             programs_made += 1
         return items
+
+    @staticmethod
+    def _trailing_run(ordered: list[dict[str, Any]]) -> int:
+        """How many songs at the end of ``ordered`` share the last artist."""
+        key = library.artist_key(ordered[-1])
+        run = 0
+        for track in reversed(ordered):
+            if library.artist_key(track) == key:
+                run += 1
+            else:
+                break
+        return run
 
     def refill(self, count: int = 20) -> int:
         """Top the queue up from the library using the active filters.
@@ -206,8 +259,14 @@ class Scheduler:
         playback = config.get("playback", {}) or {}
         program_enabled = bool((playback.get("program") or {}).get("enabled", False))
         if program_enabled:
-            size = max(2, int((playback.get("program") or {}).get("size", 6)))
-            n_programs = max(1, count // size)
+            prog = playback.get("program") or {}
+            size = max(2, int(prog.get("size", 6)))
+            strategy = str(prog.get("strategy", "genre"))
+            # Artist programs are capped by the no-long-runs rule, so they come
+            # out shorter than `size` — ask for proportionally more of them so a
+            # refill still tops the queue up by roughly `count` tracks.
+            per = min(size, _artist_run_settings()) if strategy == "artist" else size
+            n_programs = max(1, count // max(1, per))
             items = self._build_programs(n_programs)
             if items:
                 with self._lock:
@@ -238,6 +297,14 @@ class Scheduler:
             tracks = [t for t in tracks if t["path"] not in existing_paths]
         else:
             random.shuffle(tracks)
+            # Flat shuffle obeys the no-long-runs rule too, so switching
+            # programs off cannot reintroduce artist runs. Every track is kept
+            # (a single-artist pool simply cannot satisfy the rule).
+            run_artist, run_len = self._tail_artist()
+            tracks = library.restore_after_interleave(
+                library.interleave_artists(
+                    tracks, _artist_run_settings(), run_artist, run_len),
+                tracks)
         with self._lock:
             for track in tracks:
                 self._queue.append(self._wrap(track))

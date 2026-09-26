@@ -172,6 +172,14 @@ DEFAULTS: dict[str, Any] = {
             # appears later — a new genre after a scan, a new decade — starts
             # ENABLED, which is the documented default.
             "disabled": {"genre": [], "artist": [], "decade": []},
+            # Never play more than this many songs IN A ROW by the same band /
+            # artist, in any mode (programs and flat shuffle alike), including
+            # across program and refill boundaries. A program that cannot be
+            # filled without breaking the rule is skipped and the next theme is
+            # tried ("not enough songs -> another program").
+            #
+            # Set 1 to never repeat an artist back-to-back.
+            "max_consecutive_artist": 2,
         },
     },
     # Icecast delivery. When enabled, the app runs a *managed* Icecast2 server

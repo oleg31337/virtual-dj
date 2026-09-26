@@ -205,3 +205,9 @@ def test_programs_endpoint_exposes_the_switchable_selection(client):
     assert off and off[0]["disabled"] is True
     assert after["selected"] == len(after["themes"]) - 1
     assert after["disabled"]["genre"] == [label]
+
+
+def test_programs_endpoint_exposes_the_artist_run_cap(client):
+    """The card needs the cap to describe the rule it is enforcing."""
+    body = client.get("/api/programs").json()
+    assert body["max_consecutive_artist"] == 2
