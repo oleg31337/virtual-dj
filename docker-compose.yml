@@ -40,6 +40,15 @@ services:
       VDJ_ICECAST_SOURCE_PASSWORD: "${ICECAST_SOURCE_PASSWORD:-hackme}"
       VDJ_ICECAST_PUBLIC_PORT: "${ICECAST_PORT:-8008}"
       VDJ_ICECAST_PUBLIC_HOST: "${ICECAST_PUBLIC_HOST:-}"
+      # Icecast's own admin/relay credentials. Leave blank to keep the defaults
+      # (admin / same-as-source). They are only reachable on the container's
+      # loopback, but set them if you ever expose Icecast beyond the LAN.
+      VDJ_ICECAST_HOSTNAME: "${VDJ_ICECAST_HOSTNAME:-virtual-dj}"
+      VDJ_ICECAST_ADMIN_PASSWORD: "${ICECAST_ADMIN_PASSWORD:-}"
+      VDJ_ICECAST_RELAY_PASSWORD: "${ICECAST_RELAY_PASSWORD:-}"
+      # In-container mount point of the music library. Only change it together
+      # with the `volumes:` mapping below.
+      VDJ_MUSIC_DIR: "${VDJ_MUSIC_DIR:-/music}"
       # Optional: point the DJ at an Ollama instance. Uncomment (and set in
       # .env) to reach Ollama on the Docker host. Inside the container,
       # "host-gateway" resolves to the host's loopback. The web UI can override

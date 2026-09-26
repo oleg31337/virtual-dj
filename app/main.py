@@ -9,6 +9,8 @@ import os
 
 import uvicorn
 
+from . import config
+
 log = logging.getLogger("virtual_dj")
 
 
@@ -25,12 +27,14 @@ def _ensure_voices() -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Virtual DJ radio station")
-    parser.add_argument("--host", default=os.environ.get("VDJ_HOST", "0.0.0.0"),
+    # env_str/env_int treat an empty value (what compose forwards for an
+    # unset .env entry) as "unset", and never raise on junk.
+    parser.add_argument("--host", default=config.env_str("VDJ_HOST", "0.0.0.0"),
                         help="bind address (default 0.0.0.0 for LAN access)")
     parser.add_argument("--port", type=int,
-                        default=int(os.environ.get("VDJ_PORT", "8420")))
+                        default=config.env_int("VDJ_PORT", 8420))
     parser.add_argument("--reload", action="store_true")
-    parser.add_argument("--log-level", default=os.environ.get("VDJ_LOG_LEVEL", "info"))
+    parser.add_argument("--log-level", default=config.env_str("VDJ_LOG_LEVEL", "info"))
     parser.add_argument("--no-voice-download", action="store_true",
                         help="skip the first-run voice auto-download")
     args = parser.parse_args()
@@ -38,7 +42,7 @@ def main() -> None:
     # Allow skipping via env (used by the Docker image / compose).
     skip_voice_download = (
         args.no_voice_download
-        or os.environ.get("VDJ_NO_VOICE_DOWNLOAD", "").strip() == "1"
+        or config.env_flag("VDJ_NO_VOICE_DOWNLOAD", False)
     )
     if not skip_voice_download:
         _ensure_voices()

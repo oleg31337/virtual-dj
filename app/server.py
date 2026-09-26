@@ -271,6 +271,11 @@ def api_programs():
         "size": size,
         "limit": limit,
         "max_consecutive_artist": max_consec,
+        # Honest rule reporting: an artist/genre selection with too few bands to
+        # rotate through cannot honour the no-long-runs cap, and the queue builder
+        # relaxes it rather than going silent. The card says so instead of stating
+        # a rule the queue will break (see library.cap_is_enforceable).
+        "cap_enforceable": library.cap_is_enforceable(max_consec),
         "repeat_window": library.repeat_window(),
         "eligible": sel["eligible"],
         "themes": themes,

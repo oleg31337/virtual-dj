@@ -56,7 +56,8 @@ Point VLC, Winamp, Sonos, or any browser at the stream URL and it just plays.
   size, grouping strategy and how many themes take part are adjustable in
   `playback.program` (config or web UI).
 - **No long runs by one band.** However the queue is built — programs or flat
-  shuffle, across program and refill boundaries — the same artist never plays
+  shuffle, across program and refill boundaries, and *including a refill that
+  starts a new theme* (the DJ announces that switch too) — the same artist never plays
   more than `playback.program.max_consecutive_artist` songs in a row (default
   **2**; set 1 to never repeat an artist back-to-back, adjustable in the
   *Programs* card). A theme that cannot be filled without repeating a band is
@@ -64,7 +65,11 @@ Point VLC, Winamp, Sonos, or any browser at the stream URL and it just plays.
   by definition, so it plays the cap and then the DJ moves on. Measured on a
   10,158-track library: the longest run drops from 6 songs to 2, while 19 of 20
   genre themes, 20 of 20 artist themes and 8 of 8 decade themes still fill a
-  program.
+  program. When the selection itself leaves fewer than `cap + 1` artists to
+  rotate through (you filtered down to one band, or a genre has a single
+  artist) the cap cannot hold: the queue relaxes it instead of going silent,
+  and the *Programs* card summary says **artist limit relaxed** rather than
+  claiming a rule the queue is about to break.
 - **No repeats in an evening.** `playback.repeat_window` (default **50**) keeps
   every song played in the last N plays — and everything already queued — out of
   the playlist, in every mode. If the eligible pool is smaller than the window
@@ -178,6 +183,12 @@ Port `8008` is the default Icecast port (change `ICECAST_PORT` in `.env`), and
 `virtualdj` is the default mount (change `ICECAST_MOUNT`). The browser player
 uses the app's own `/stream.mp3`; only external players need the Icecast mount.
 
+The **Streaming** card in the web UI carries a *Stream through Icecast* checkbox:
+it writes `icecast.enabled` and `Apply & restart Icecast` brings the relay up (or
+down) without touching `.env`. The port field sets both the listen port and the
+published port — in the bundled container the listen port must stay `8008`, so
+change the host-side mapping with `ICECAST_PORT` in `.env` instead.
+
 ## If the music library is not mounted
 
 The app watches playback, not just the database: a queued file that cannot be
@@ -247,8 +258,16 @@ the **Rescan** button in the Library panel (or change the path there).
 | `ICECAST_MOUNT` | `virtualdj` | Mountpoint external players open (`http://<host>:<port>/<mount>`) |
 | `ICECAST_SOURCE_PASSWORD` | `hackme` | Relay password the app's pusher uses to connect to Icecast |
 | `ICECAST_PUBLIC_HOST` | _blank_ | Host shown in the web UI's stream URL (blank = derive from the browser) |
+| `ICECAST_ADMIN_PASSWORD` | `admin` | Icecast admin/status password (loopback-only) |
+| `ICECAST_RELAY_PASSWORD` | = source password | Icecast relay password (loopback-only) |
+| `VDJ_ICECAST_HOSTNAME` | `virtual-dj` | Hostname Icecast reports in its status page (cosmetic) |
+| `VDJ_MUSIC_DIR` | `/music` | Music folder **inside** the container (change with the volume mapping) |
 | `VDJ_OLLAMA_URL` | _unset_ | Ollama endpoint (e.g. `http://host-gateway:11434` for host Ollama) |
 | `VDJ_OLLAMA_MODEL` | _unset_ | Model for DJ scripts |
+
+An **empty** value is treated as unset (the bundled compose forwards
+`"${VAR:-}"`, so an undefined entry arrives as `""`) — defaults are never
+silently blanked, and a blank numeric value cannot crash the app.
 
 ### Reaching an Ollama on the host
 
@@ -277,6 +296,8 @@ A few env vars override the defaults at first boot, useful for containers:
 | `VDJ_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama endpoint |
 | `VDJ_OLLAMA_MODEL` | `qwen3.5:9b` | Model used for DJ scripts |
 | `VDJ_DATA_DIR` | `./data` | Where state is kept (config, DB, voices) |
+| `VDJ_DB_PATH` | `$VDJ_DATA_DIR/vdj.sqlite3` | Library database file |
+| `VDJ_HOST` / `VDJ_PORT` | `0.0.0.0` / `8420` | Bind address and port (the compose mapping assumes 8420) |
 | `VDJ_PORT` | `8420` | Listen port |
 | `VDJ_HOST` | `0.0.0.0` | Bind address |
 | `VDJ_LOG_LEVEL` | `info` | Log verbosity |

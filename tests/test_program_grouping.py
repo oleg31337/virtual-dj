@@ -414,6 +414,37 @@ def test_artist_programs_are_capped_by_the_rule(tiny_library, monkeypatch):
         assert len(songs) <= 2
 
 
+def test_a_refill_announces_its_theme_switch(tiny_library, monkeypatch):
+    """Every theme switch must be announced, including one a REFILL introduces.
+
+    Regression: the program builder only forced the program-start talk while the
+    list it was building was non-empty, so the first program of every refill
+    could change the theme silently — the playlist matrix measured 4-7
+    unannounced switches per 120 songs.
+    """
+    _set_program(monkeypatch, size=2, strategy="genre")
+    sched = scheduler.Scheduler()
+    played = []
+    for _ in range(4):                       # several refills -> several boundaries
+        sched.refill(4)
+        for _ in range(4):
+            head = (sched.peek(1) or [None])[0]
+            item = sched.pop_next()
+            if item is None:
+                break
+            played.append((item[0], item[2], bool((head or {}).get("dj_requested"))))
+
+    labels = [((prog or {}).get("kind"), (prog or {}).get("label")) for _, prog, _ in played]
+    switches = [i for i in range(1, len(labels)) if labels[i] != labels[i - 1]]
+    assert switches, "the fixture should switch themes at least once"
+    unannounced = [i for i in switches if not played[i][2]]
+    assert not unannounced, (
+        f"theme switches without a DJ announcement: "
+        f"{[(i, labels[i]) for i in unannounced]}")
+    # The very first program of all has nothing to switch away from.
+    assert played[0][2] is False
+
+
 def test_interleave_is_exact_when_a_theme_allows_it():
     tracks = ([{"artist": "A", "id": i} for i in range(4)]
               + [{"artist": "B", "id": i} for i in range(4, 6)])

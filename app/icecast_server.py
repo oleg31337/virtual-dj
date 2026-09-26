@@ -107,8 +107,10 @@ class ManagedIcecast:
         """Render icecast.xml from the app config. Returns the path written."""
         tmpl = open(_TMPL_PATH, "r", encoding="utf-8").read()
         source_password = str(config.get("icecast.source_password", "hackme"))
-        admin_password = os.environ.get("VDJ_ICECAST_ADMIN_PASSWORD", "admin")
-        relay_password = os.environ.get("VDJ_ICECAST_RELAY_PASSWORD", source_password)
+        # Both are overridable from .env; an empty value means "keep the
+        # default" (admin) or "same as the source password" (relay).
+        admin_password = config.env_str("VDJ_ICECAST_ADMIN_PASSWORD", "admin")
+        relay_password = config.env_str("VDJ_ICECAST_RELAY_PASSWORD", source_password)
         port = int(config.get("icecast.port", 8008))
         hostname = str(config.get("icecast.hostname", "virtual-dj"))
         mount = str(config.get("icecast.mount", "virtualdj")).lstrip("/") or "virtualdj"

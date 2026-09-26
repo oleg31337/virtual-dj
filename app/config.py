@@ -15,33 +15,54 @@ from pathlib import Path
 from typing import Any
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = Path(os.environ.get("VDJ_DATA_DIR", BASE_DIR / "data"))
+
+
+def env_str(name: str, default: str) -> str:
+    """Read a string knob from the environment, treating empty as unset.
+
+    Compose forwards ``"${VAR:-}"`` for optional knobs, which arrives as an
+    EMPTY string when the variable is unset in ``.env``. A plain
+    ``os.environ.get(name, default)`` would then return ``""`` and silently
+    override the default — that is how an unset ``VDJ_OLLAMA_URL`` used to blank
+    the DJ's LLM endpoint (and ``VDJ_OLLAMA_MODEL`` the model name).
+    """
+    return (os.environ.get(name) or "").strip() or default
+
+
+def env_int(name: str, default: int) -> int:
+    """Read an integer knob from the environment, never raising.
+
+    Unset/empty/junk falls back to ``default``: compose's ``"${VAR:-}"`` is an
+    empty string, and ``int("")`` used to crash the app at import time (an empty
+    ``ICECAST_PORT=`` in ``.env`` was enough).
+    """
+    try:
+        return int((os.environ.get(name) or "").strip())
+    except ValueError:
+        return default
+
+
+def env_flag(name: str, default: bool = False) -> bool:
+    """Read a boolean knob: 1/true/yes/on (case-insensitive). Empty → default."""
+    raw = (os.environ.get(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
+DATA_DIR = Path(env_str("VDJ_DATA_DIR", str(BASE_DIR / "data")))
 WEB_DIR = BASE_DIR / "web"
 CACHE_DIR = DATA_DIR / "cache"
 DJ_CACHE_DIR = CACHE_DIR / "dj"
 VOICES_DIR = DATA_DIR / "voices"
 CONFIG_PATH = DATA_DIR / "config.json"
-DB_PATH = Path(os.environ.get("VDJ_DB_PATH", DATA_DIR / "vdj.sqlite3"))
-
-
-def _env_int(name: str, default: int) -> int:
-    """Read an integer knob from the environment, never raising.
-
-    Compose usually forwards ``"${VAR:-}"``, which yields an EMPTY string when
-    the variable is unset — ``int("")`` would crash the app at import time, so
-    an unset/empty/junk value falls back to ``default``.
-    """
-    raw = (os.environ.get(name) or "").strip()
-    try:
-        return int(raw)
-    except ValueError:
-        return default
+DB_PATH = Path(env_str("VDJ_DB_PATH", str(DATA_DIR / "vdj.sqlite3")))
 
 
 DEFAULTS: dict[str, Any] = {
     # Where to look for music. Set it in the web UI (Library panel), or
     # override at first boot with VDJ_MUSIC_DIR.
-    "music_dir": os.environ.get("VDJ_MUSIC_DIR", str(Path.home() / "Music")),
+    "music_dir": env_str("VDJ_MUSIC_DIR", str(Path.home() / "Music")),
     "stream": {
         "bitrate_kbps": 128,
         "sample_rate": 44100,
@@ -78,8 +99,8 @@ DEFAULTS: dict[str, Any] = {
         "enabled": True,
         # Ollama endpoint. Override per-install without touching source via
         # the VDJ_OLLAMA_URL env var or "llm.base_url" in data/config.json.
-        "base_url": os.environ.get("VDJ_OLLAMA_URL", "http://127.0.0.1:11434"),
-        "model": os.environ.get("VDJ_OLLAMA_MODEL", "qwen3.5:9b"),
+        "base_url": env_str("VDJ_OLLAMA_URL", "http://127.0.0.1:11434"),
+        "model": env_str("VDJ_OLLAMA_MODEL", "qwen3.5:9b"),
         "timeout_s": 120,
         "temperature": 0.7,
         # Connection attempts per DJ line before falling back to a templated
@@ -123,7 +144,7 @@ DEFAULTS: dict[str, Any] = {
         # files: ~1 h at 2 workers, ~28 min at 4, ~24 min at 6. A value saved by
         # the web UI into data/config.json wins over the .env default (same
         # precedence as the LLM settings).
-        "workers": _env_int("VDJ_LOUDNESS_WORKERS", 2),
+        "workers": env_int("VDJ_LOUDNESS_WORKERS", 2),
         # Start draining the queue at boot and after every library scan.
         "autostart": True,
     },
@@ -196,30 +217,29 @@ DEFAULTS: dict[str, Any] = {
     # choke on. The web player keeps using the app's own /stream.mp3, which also
     # remains the pusher's source.
     "icecast": {
-        "enabled": os.environ.get("VDJ_ICECAST_ENABLED", "0").lower()
-        in ("1", "true", "yes"),
+        "enabled": env_flag("VDJ_ICECAST_ENABLED", False),
         # Hostname reported in Icecast's status / YP listings.
-        "hostname": os.environ.get("VDJ_ICECAST_HOSTNAME", "virtual-dj"),
+        "hostname": env_str("VDJ_ICECAST_HOSTNAME", "virtual-dj"),
         # Host the pusher's ffmpeg connects to. 127.0.0.1 (loopback) when
         # Icecast runs in the same container as the app (managed mode).
-        "host": os.environ.get("VDJ_ICECAST_HOST", "127.0.0.1"),
+        "host": env_str("VDJ_ICECAST_HOST", "127.0.0.1"),
         # Port the pusher connects to (the Icecast listen port).
-        "port": int(os.environ.get("VDJ_ICECAST_PORT", "8008")),
+        "port": env_int("VDJ_ICECAST_PORT", 8008),
         # Mountpoint the pusher publishes to.
-        "mount": os.environ.get("VDJ_ICECAST_MOUNT", "virtualdj"),
+        "mount": env_str("VDJ_ICECAST_MOUNT", "virtualdj"),
         # Source (relay) password — must match the rendered icecast.xml.
-        "source_password": os.environ.get("VDJ_ICECAST_SOURCE_PASSWORD", "hackme"),
+        "source_password": env_str("VDJ_ICECAST_SOURCE_PASSWORD", "hackme"),
         # Port external players hit (the published Docker port / the host's
         # Icecast port). The web UI builds the external URL from this. In the
         # single-container deployment this must match ``port`` (the container's
         # listen port) so the published Docker mapping reaches Icecast.
-        "public_port": int(os.environ.get("VDJ_ICECAST_PUBLIC_PORT", "8008")),
+        "public_port": env_int("VDJ_ICECAST_PUBLIC_PORT", 8008),
         # Host clients connect to for the external URL (e.g. 192.168.1.50 or a
         # DNS name). Empty means "derive from the browser's address" at display
         # time, which works when you open the UI from the same host Winamp/VLC
         # will point at. Set it explicitly when those differ (reverse proxy,
         # different LAN hostname, public DNS, ...).
-        "public_host": os.environ.get("VDJ_ICECAST_PUBLIC_HOST", ""),
+        "public_host": env_str("VDJ_ICECAST_PUBLIC_HOST", ""),
     },
 }
 

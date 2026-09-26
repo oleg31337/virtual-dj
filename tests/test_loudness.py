@@ -73,15 +73,15 @@ def test_workers_env_var_is_read_and_tolerates_junk(monkeypatch):
     """`VDJ_LOUDNESS_WORKERS` (compose forwards "${VAR:-}") must never crash
     the app, and must be honoured when it holds a real number."""
     monkeypatch.delenv("VDJ_TEST_WORKERS", raising=False)
-    assert config._env_int("VDJ_TEST_WORKERS", 2) == 2      # unset
+    assert config.env_int("VDJ_TEST_WORKERS", 2) == 2      # unset
     monkeypatch.setenv("VDJ_TEST_WORKERS", "")
-    assert config._env_int("VDJ_TEST_WORKERS", 2) == 2      # empty string
+    assert config.env_int("VDJ_TEST_WORKERS", 2) == 2      # empty string
     monkeypatch.setenv("VDJ_TEST_WORKERS", "  ")
-    assert config._env_int("VDJ_TEST_WORKERS", 2) == 2      # whitespace
+    assert config.env_int("VDJ_TEST_WORKERS", 2) == 2      # whitespace
     monkeypatch.setenv("VDJ_TEST_WORKERS", "six")
-    assert config._env_int("VDJ_TEST_WORKERS", 2) == 2      # junk
+    assert config.env_int("VDJ_TEST_WORKERS", 2) == 2      # junk
     monkeypatch.setenv("VDJ_TEST_WORKERS", "4")
-    assert config._env_int("VDJ_TEST_WORKERS", 2) == 4      # honoured
+    assert config.env_int("VDJ_TEST_WORKERS", 2) == 4      # honoured
 
 
 def test_stored_workers_win_over_the_env_default(monkeypatch):

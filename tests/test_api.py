@@ -211,3 +211,19 @@ def test_programs_endpoint_exposes_the_artist_run_cap(client):
     """The card needs the cap to describe the rule it is enforcing."""
     body = client.get("/api/programs").json()
     assert body["max_consecutive_artist"] == 2
+    # ...and whether that rule can hold for the selection at hand, so the summary
+    # never promises a cap the queue builder is about to relax.
+    assert body["cap_enforceable"] is True
+
+
+def test_programs_endpoint_reports_an_unenforceable_cap(client, music_dir):
+    """Pick one artist and the no-long-runs rule cannot hold — say so."""
+    artist = "Band One"                       # one of the fixture's three artists
+    client.put("/api/config", json={"playback": {"artists": [artist]}})
+    try:
+        body = client.get("/api/programs").json()
+        assert body["cap_enforceable"] is False, (
+            f"one artist selected ({artist!r}) cannot keep 2 songs in a row apart")
+    finally:
+        client.put("/api/config", json={"playback": {"artists": []}})
+    assert client.get("/api/programs").json()["cap_enforceable"] is True

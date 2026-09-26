@@ -325,6 +325,11 @@ async function loadConfig() {
   if (portInput) portInput.value = ice.public_port ?? ice.port ?? 8008;
   const hostInput = $('icecast-public-host');
   if (hostInput) hostInput.value = ice.public_host || '';
+  // The card must be able to turn streaming ON: without this the only way to
+  // enable Icecast was the config file or .env, so the UI offered a disabled
+  // card with an "Apply & restart Icecast" button that could never enable it.
+  const enabledInput = $('icecast-enabled');
+  if (enabledInput) enabledInput.checked = !!ice.enabled;
 
   const voices = await api('/api/dj/voices');
   const profiles = voices.profiles || [];
@@ -350,7 +355,9 @@ async function loadConfig() {
   $('dj-speed').value = Math.round((cfg.dj?.speed ?? 1.0) * 100);
   $('speed-val').textContent = ((cfg.dj?.speed ?? 1.0)).toFixed(2);
   const ns = cfg.dj?.noise_scale ?? 0.667;
-  $('dj-noise').value = Math.round(ns * 100);
+  // Per-mille, so the 0.667 default round-trips exactly (per-cent turned it
+  // into 0.67 on every save).
+  $('dj-noise').value = Math.round(ns * 1000);
   $('expr-val').textContent = ns.toFixed(2);
 
   // Volume normalization card (the running pass reports through
@@ -363,7 +370,7 @@ async function loadConfig() {
   $('loudness-boost').value = lo.max_boost_db ?? 6;
   $('loudness-min').value = lo.min_gain_db ?? -12;
   $('loudness-window').value = lo.window_seconds ?? 120;
-  $('loudness-workers').value = lo.workers ?? 6;
+  $('loudness-workers').value = lo.workers ?? 2;
 }
 
 async function loadLLMConfig() {
@@ -551,9 +558,17 @@ function renderProgramSummary() {
   }
   if (off) parts.push(`${off} switched off — they stay out of the queue in every mode`);
   const cap = Number(data.max_consecutive_artist) || 2;
-  parts.push(cap > 1
-    ? `max ${cap} songs in a row by the same artist`
-    : 'never two songs in a row by the same artist');
+  if (data.cap_enforceable === false) {
+    // Don't state a rule the queue is going to break: with too few artists to
+    // rotate through (an explicit single-artist selection, say) the builder
+    // relaxes the cap rather than going silent.
+    parts.push(`artist limit relaxed — the current selection has too few artists `
+      + `to keep ${cap} in a row apart`);
+  } else {
+    parts.push(cap > 1
+      ? `max ${cap} songs in a row by the same artist`
+      : 'never two songs in a row by the same artist');
+  }
   const win = Number(data.repeat_window);
   if (win > 0) parts.push(`no repeat within ${fmtNum(win)} songs`);
   el.textContent = parts.join(' · ');
@@ -715,6 +730,7 @@ function wire() {
       const before = await api('/api/config');
       const patch = {
         icecast: {
+          enabled: $('icecast-enabled') ? $('icecast-enabled').checked : true,
           port, public_port: port, public_host: host,
         },
       };
@@ -770,15 +786,21 @@ function wire() {
   };
   $('llm-load-models').onclick = () => loadLLMModels();
   $('llm-test').onclick = () => testLLM();
+  // `x || fallback` swallows a legitimate 0 (temperature 0 = deterministic) and
+  // `Number('')` is 0, so an emptied retries field silently saved "no retries".
+  const numOr = (id, fallback) => {
+    const s = $(id).value.trim();
+    return s === '' ? fallback : Number(s);
+  };
   $('save-llm').onclick = async () => {
     const patch = {
       llm: {
         enabled: $('llm-enabled').checked,
         base_url: $('llm-url').value.trim(),
         model: $('llm-model').value,
-        timeout_s: Number($('llm-timeout').value) || 120,
-        temperature: Number($('llm-temperature').value) || 0.7,
-        retries: Number($('llm-retries').value) || 0,
+        timeout_s: numOr('llm-timeout', 120),
+        temperature: numOr('llm-temperature', 0.7),
+        retries: numOr('llm-retries', 2),
       },
     };
     await api('/api/config', { method: 'PUT', body: JSON.stringify(patch) });
@@ -885,7 +907,7 @@ function wire() {
   $('test-voice').onclick = async () => {
     const voice = $('dj-voice').value;
     const speed = Number($('dj-speed').value) / 100;
-    const noise = Number($('dj-noise').value) / 100;
+    const noise = Number($('dj-noise').value) / 1000;
     const btn = $('test-voice');
     btn.disabled = true;
     btn.textContent = '⏳ synthesizing…';
@@ -963,7 +985,7 @@ function wire() {
           sent_min: smin,
           sent_max: smax,
           speed: Number($('dj-speed').value) / 100,
-          noise_scale: Number($('dj-noise').value) / 100,
+          noise_scale: Number($('dj-noise').value) / 1000,
           voice: $('dj-voice').value,
           style: $('dj-style').value.trim(),
         },
@@ -986,37 +1008,7 @@ function wire() {
   $('dj-sent-min').oninput = refreshSentLabel;
   $('dj-sent-max').oninput = refreshSentLabel;
   $('dj-noise').oninput = (e) =>
-    ($('expr-val').textContent = (e.target.value / 100).toFixed(2));
-  $('test-voice').onclick = async () => {
-    const voice = $('dj-voice').value;
-    const speed = Number($('dj-speed').value) / 100;
-    const noise = Number($('dj-noise').value) / 100;
-    const btn = $('test-voice');
-    btn.disabled = true;
-    btn.textContent = '⏳ synthesizing…';
-    try {
-      const r = await api('/api/dj/preview', {
-        method: 'POST',
-        body: JSON.stringify({
-          text: 'Hey listeners, this is your Virtual DJ — let\'s keep the '
-                + 'vibes flowing through the night.',
-          voice, speed, noise_scale: noise,
-        }),
-      });
-      if (r && r.audio_url) {
-        const a = $('preview-audio');
-        a.hidden = false;
-        a.src = r.audio_url;
-        a.play().catch(() => {});
-      }
-    } catch (e) {
-      alert('Voice test failed: ' + e.message);
-    } finally {
-      btn.disabled = false;
-      btn.textContent = '▶ Test this voice';
-    }
-  };
-
+    ($('expr-val').textContent = (e.target.value / 1000).toFixed(2));
   $('save-preset').onclick = async () => {
     const name = $('preset-name').value.trim();
     if (!name) return;
@@ -1024,10 +1016,19 @@ function wire() {
     $('preset-name').value = ''; loadPresets();
   };
 
+  // (The #test-voice handler is assigned next to the voice picker above, where
+  // it can pick a Russian or English sample from the selected voice's profile. A
+  // second assignment used to sit here and overwrote it with an English-only
+  // sample, so testing a Russian voice spoke English.)
+
   // Volume normalization card.
   $('save-loudness').onclick = async () => {
     const num = (id, fallback) => {
-      const v = Number($(id).value);
+      // `Number('')` is 0 and 0 is finite, so an emptied field used to save 0
+      // instead of the documented default (clearing "Peak ceiling" wrote 0 dBTP).
+      const s = $(id).value.trim();
+      if (s === '') return fallback;
+      const v = Number(s);
       return Number.isFinite(v) ? v : fallback;
     };
     await api('/api/config', {
@@ -1040,7 +1041,7 @@ function wire() {
           max_boost_db: num('loudness-boost', 6),
           min_gain_db: num('loudness-min', -12),
           window_seconds: Math.round(num('loudness-window', 120)),
-          workers: Math.round(num('loudness-workers', 6)),
+          workers: Math.round(num('loudness-workers', 2)),
         },
       }),
     });

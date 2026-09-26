@@ -726,6 +726,32 @@ def artist_run_cap() -> int:
         return 2
 
 
+def cap_is_enforceable(cap: int | None = None) -> bool:
+    """Can the no-long-runs rule hold under the filters the user selected?
+
+    The rule needs more than ``cap`` distinct artists to rotate through. An
+    explicit single-artist selection (or a one-band genre) cannot satisfy it, and
+    the queue builder deliberately RELAXES the cap there instead of going silent —
+    so the Programs card must not claim a rule the queue is going to break. This
+    is the one place that decides, shared by the card and the tests.
+    """
+    cap = artist_run_cap() if cap is None else cap
+    playback = config.get("playback", {}) or {}
+    artists = [a for a in (playback.get("artists") or []) if str(a).strip()]
+    if artists:
+        # A user-picked artist list is the narrowest statement of intent.
+        if len(artists) <= cap:
+            return False
+    rows = query_tracks(
+        search=playback.get("search", "") or "",
+        genres=(playback.get("genres") or None),
+        artists=(artists or None),
+        limit=500,
+        **program_exclusions(),
+    )
+    return len({artist_key(t) for t in rows}) > cap
+
+
 def repeat_window() -> int:
     """How many recent songs must not repeat (``playback.repeat_window``).
 

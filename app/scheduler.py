@@ -148,6 +148,16 @@ class Scheduler:
         ladder.append(0)
         return ladder
 
+    def _queued_music(self) -> bool:
+        """True when the queue already holds something to switch away from.
+
+        The first program ever queued has nothing to announce; every later
+        program — including the first one of a refill, which the old
+        ``items``-only test missed — does.
+        """
+        with self._lock:
+            return bool(self._queue)
+
     def _tail_artist(self) -> tuple[str | None, int]:
         """Artist of the queue's tail plus how many of its songs run back.
 
@@ -269,8 +279,13 @@ class Scheduler:
             }
             first = True
             for track in ordered:
-                if first and items:
-                    # Announce the switch into this new program.
+                if first and (items or self._queued_music()):
+                    # Announce the switch into this new program. The queue must be
+                    # considered too: a refill starts a new program whose theme may
+                    # differ from the tail of the existing queue, and checking
+                    # `items` alone left that boundary — the FIRST program of every
+                    # batch — silently unannounced (found by the playlist matrix:
+                    # 4-7 unannounced switches per 120 songs).
                     items.append(self._wrap(
                         track, with_dj=True, program=program))
                 else:

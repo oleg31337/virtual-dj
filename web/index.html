@@ -158,13 +158,16 @@
       <input type="text" id="icecast-url" readonly value="(icecast disabled)" />
       <button id="icecast-copy" class="ghost">Copy</button>
     </div>
+    <label class="field inline">
+      <input type="checkbox" id="icecast-enabled" /> Stream through Icecast
+      <span class="dim">(external players — Winamp / VLC / Sonos)</span>
+    </label>
     <div class="row">
-      <label class="lbl">Icecast port</label>
+      <span class="dim">Icecast port</span>
       <input type="number" id="icecast-port" min="1" max="65535" value="8008" />
-      <label class="lbl">Public host / URL</label>
+      <span class="dim">Public host / URL</span>
       <input type="text" id="icecast-public-host" placeholder="auto (this page's host)" />
     </div>
-    <div class="meta dim" id="icecast-config-note"></div>
     <div class="row">
       <button id="icecast-apply" class="primary">Apply &amp; restart Icecast</button>
       <span class="meta dim" id="icecast-apply-status"></span>
@@ -273,7 +276,7 @@
     <label class="field">
       <span>Expression: <b id="expr-val">0.67</b>
         <span class="dim">(lower = calm/monotone, higher = lively)</span></span>
-      <input type="range" id="dj-noise" min="10" max="150" value="67" />
+      <input type="range" id="dj-noise" min="100" max="1500" value="667" />
     </label>
     <label class="field">
       <span>Persona / style</span>

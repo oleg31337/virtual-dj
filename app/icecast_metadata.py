@@ -34,9 +34,8 @@ _ADMIN_USER = "admin"
 
 
 def _admin_password() -> str:
-    import os
-
-    return os.environ.get("VDJ_ICECAST_ADMIN_PASSWORD", "admin")
+    # Empty (compose forwards an unset var as "") falls back to the default.
+    return config.env_str("VDJ_ICECAST_ADMIN_PASSWORD", "admin")
 
 
 def build_title(meta: dict[str, Any]) -> str | None:
