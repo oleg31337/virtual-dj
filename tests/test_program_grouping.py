@@ -80,6 +80,34 @@ def test_programs_group_by_genre(tiny_library, monkeypatch):
     assert "Rock" in "".join(genres_in_order) and "Pop" in "".join(genres_in_order)
 
 
+def test_every_program_is_marked_by_its_opening_track(tiny_library, monkeypatch):
+    """`program_start` marks a program boundary — `dj_requested` cannot.
+
+    Both the periodic talk cadence and a program switch set `dj_requested`, so
+    anything that needs to know where a program begins (the DJ's script, a queue
+    audit) has to read `program_start`; without it a 6-song program looked like
+    two or three programs of 2-4 songs.
+    """
+    _set_program(monkeypatch)
+    sched = scheduler.Scheduler()
+    items = sched._build_programs(3)          # NOT queued yet: peek() reads _queue
+    assert items, "the fixture has two themes and must build programs"
+    starts = [it for it in items if it.get("program_start")]
+    # The fixture has two themes (Rock, Pop) and a batch never uses one theme
+    # twice, so this is two programs of `size` 3 tracks each.
+    assert len(starts) == len(items) // 3, (
+        f"{len(items)} tracks carry {len(starts)} boundaries, expected "
+        f"{len(items) // 3}")
+    assert items[0]["program_start"] is True, "the batch must open a program"
+    labels = [it["program"]["label"] for it in items]
+    for index, item in enumerate(items):
+        # Runs of the same theme can be consecutive programs, so a boundary is
+        # allowed inside a same-label stretch; what must never happen is a
+        # program CHANGE without a marked boundary.
+        if index and labels[index] != labels[index - 1]:
+            assert item["program_start"] is True
+
+
 def test_programs_respect_strategy_decade(tiny_library, monkeypatch):
     _set_program(monkeypatch, strategy="decade", size=2)
     sched = scheduler.Scheduler()

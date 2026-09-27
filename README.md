@@ -57,7 +57,8 @@ Point VLC, Winamp, Sonos, or any browser at the stream URL and it just plays.
   `playback.program` (config or web UI).
 - **No long runs by one band.** However the queue is built — programs or flat
   shuffle, across program and refill boundaries, and *including a refill that
-  starts a new theme* (the DJ announces that switch too) — the same artist never plays
+  starts a new theme* (the DJ announces that switch too; the *length* of each run
+  scales with the theme's track count — see the scaling rule below) — the same artist never plays
   more than `playback.program.max_consecutive_artist` songs in a row (default
   **2**; set 1 to never repeat an artist back-to-back, adjustable in the
   *Programs* card). A theme that cannot be filled without repeating a band is
@@ -75,6 +76,33 @@ Point VLC, Winamp, Sonos, or any browser at the stream URL and it just plays.
   every artist). It composes with the genre chips and the search box; when it
   names a single band the artist-run rule cannot hold, and the *Programs* card
   says "artist limit relaxed" instead of claiming it.
+- **One artist may not come back too soon.** `playback.artist_gap` (default
+  **10**) holds an artist out of the queue until 10 tracks have played since its
+  own last song — across programs, across refills and against what has already
+  played, not just within one program. It is the rule that stops the same band
+  turning up in every second program: the no-long-runs cap alone still allowed
+  *X … Y X … Z X*. It is *stricter* than the cap, so with a 10-track gap two
+  songs by one band in a row cannot happen at all. Measured on the 10,158-track
+  library with a live queue: **0 violations in 63 songs, the closest an artist
+  came back was exactly 10**, longest artist run 1. A theme that cannot fill its
+  program without bringing a band back inside the gap is *skipped* for that round
+  (your "not enough songs for this genre/band — skip to another program" rule)
+  instead of repeating itself; spacing needs at least as many distinct artists in
+  the selection as the gap, and with fewer (a single-band filter) the builder
+  plays the longest-absent artist and the *Programs* card reports **artist
+  spacing relaxed** plus how often it gave way in the queue that is waiting.
+  Adjustable in the *Programs* card, `0` disables it.
+- **Programs scale with their theme.** `playback.program.size` (default **6**)
+  is the *ceiling*, taken by the biggest theme; every other theme runs for a
+  proportional share of it (a theme with half the tracks gets half the run,
+  never less than `playback.program.min_size`, default **2**). A 30-track genre
+  therefore gets a short program instead of being skipped for not filling six
+  songs, and the queue spends most of its time in the genres that can actually
+  sustain a long run. Each chip in the *Programs* card shows its theme's run
+  length. On the 10,158-track library that means Rock (2,840 tracks) runs 6,
+  Electronic (1,093) runs 3, and Pop, Jazz, Dnb, Dance and the rest of the
+  rotation run 2 — measured live, where a 63-song queue came out as
+  `Rock:6 · … · Jazz:2 · Trip Hop:2`.
 - **No repeats in an evening.** `playback.repeat_window` (default **50**) keeps
   every song played in the last N plays — and everything already queued — out of
   the playlist, in every mode. If the eligible pool is smaller than the window

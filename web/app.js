@@ -355,6 +355,8 @@ async function loadConfig() {
   $('program-size-val').textContent = $('program-size').value;
   $('program-limit').value = cfg.playback?.program?.limit ?? 20;
   $('program-max-consec').value = cfg.playback?.program?.max_consecutive_artist ?? 2;
+  $('program-min-size').value = cfg.playback?.program?.min_size ?? 2;
+  $('artist-gap').value = cfg.playback?.artist_gap ?? 10;
   $('repeat-window').value = cfg.playback?.repeat_window ?? 50;
   $('program-strategy-sel').value = cfg.playback?.program?.strategy ?? 'genre';
   // Voice + prosody controls.
@@ -493,6 +495,8 @@ async function loadPrograms() {
     $('program-limit').value = p.limit;
     if (p.max_consecutive_artist) $('program-max-consec').value = p.max_consecutive_artist;
     if (p.repeat_window !== undefined) $('repeat-window').value = p.repeat_window;
+    if (p.artist_gap !== undefined) $('artist-gap').value = p.artist_gap;
+    if (p.min_size !== undefined) $('program-min-size').value = p.min_size;
     const themes = p.themes || [];
     const box = $('programs');
     if (!themes.length) {
@@ -507,6 +511,7 @@ async function loadPrograms() {
         + ` data-value="${esc(String(value))}"`
         + ` title="${t.disabled ? 'switched off — click to play it' : 'playing — click to switch off'}">`
         + `<span class="pc-label">${esc(t.label)}</span>`
+        + (t.program_size ? `<span class="pc-len">${t.program_size}</span>` : '')
         + `<span class="pc-n">${t.n}</span></div>`;
     }).join('');
     for (const chip of box.querySelectorAll('.program-chip')) {
@@ -636,6 +641,21 @@ function renderProgramSummary() {
     parts.push(cap > 1
       ? `max ${cap} songs in a row by the same artist`
       : 'never two songs in a row by the same artist');
+  }
+  const gap = Number(data.artist_gap) || 0;
+  if (gap > 1) {
+    if (data.gap_enforceable === false) {
+      parts.push(`artist spacing relaxed — ${fmtNum(gap)} tracks apart needs at `
+        + `least ${fmtNum(gap)} artists in the selection`);
+    } else {
+      parts.push(`same artist no closer than ${fmtNum(gap)} tracks`);
+    }
+  }
+  const breaks = Number(data.gap_breaks) || 0;
+  if (breaks > 0) {
+    // The queue builder is best-effort here: it says how often it had to give
+    // way in the queue that is waiting right now, instead of pretending.
+    parts.push(`spacing gave way ${fmtNum(breaks)}× in the current queue`);
   }
   const win = Number(data.repeat_window);
   if (win > 0) parts.push(`no repeat within ${fmtNum(win)} songs`);
@@ -1032,6 +1052,8 @@ function wire() {
             limit: Math.max(1, Number($('program-limit').value) || 20),
             max_consecutive_artist:
               Math.min(10, Math.max(1, Number($('program-max-consec').value) || 2)),
+            min_size:
+              Math.min(10, Math.max(1, Number($('program-min-size').value) || 2)),
             // Stored as the exclusion set, so a theme that shows up later (a
             // new genre after a scan) starts ON.
             disabled: disabledProgramThemes(),
@@ -1040,6 +1062,10 @@ function wire() {
           // sits beside the program block rather than inside it.
           repeat_window:
             Math.min(1000, Math.max(0, Number($('repeat-window').value) || 0)),
+          // "The same artist shall not repeat for at least N tracks." Applies in
+          // programs and in the flat shuffle, and spans refills.
+          artist_gap:
+            Math.min(500, Math.max(0, Number($('artist-gap').value) || 0)),
         },
       }),
     });

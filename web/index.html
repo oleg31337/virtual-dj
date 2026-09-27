@@ -192,8 +192,10 @@
       </label>
     </div>
     <label class="field">
-      <span>Tracks per program: <b id="program-size-val">6</b></span>
+      <span>Up to <b id="program-size-val">6</b> tracks per program</span>
       <input type="range" id="program-size" min="2" max="20" value="6" />
+      <span class="dim">the ceiling — programs scale with how many tracks their
+        theme has, so a small genre runs short instead of being skipped</span>
     </label>
     <div class="row">
       <label class="field inline"><span>Themes to play</span>
@@ -211,9 +213,17 @@
       <label class="field inline"><span>Same artist in a row</span>
         <input type="number" id="program-max-consec" min="1" max="10" step="1" value="2" />
         <span class="dim">max songs before the DJ moves on</span></label>
+      <label class="field inline"><span>Same artist no closer than</span>
+        <input type="number" id="artist-gap" min="0" max="500" step="1" value="10" />
+        <span class="dim">tracks — one artist may not come back sooner (0 = off)</span></label>
+    </div>
+    <div class="row">
       <label class="field inline"><span>Don't repeat a song for</span>
         <input type="number" id="repeat-window" min="0" max="1000" step="10" value="50" />
         <span class="dim">songs (0 = off)</span></label>
+      <label class="field inline"><span>Shortest program</span>
+        <input type="number" id="program-min-size" min="1" max="10" step="1" value="2" />
+        <span class="dim">tracks — a small genre's run</span></label>
     </div>
     <button id="save-program" class="primary">Save programs</button>
     <button id="program-select-all" class="ghost"

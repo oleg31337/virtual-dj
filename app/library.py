@@ -23,6 +23,7 @@ never sets it.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import random
 import re
@@ -712,6 +713,80 @@ def program_exclusions() -> dict[str, list[Any]]:
     }
 
 
+def recent_played_artist_keys(window: int | None = None) -> list[str]:
+    """Identity keys of the last ``window`` plays, OLDEST first.
+
+    Feeding ``artist_positions`` this (rather than a set) is what lets the
+    queue builder know that an artist played 3 songs ago and may not come back
+    for ``artist_gap()`` more.
+    """
+    span = artist_gap() if window is None else max(0, int(window))
+    if span <= 0:
+        return []
+    return [artist_key({"artist": raw})
+            for raw in db.recent_played_artists(span)]
+
+
+def artist_positions(history_keys: list[str] | None = None,
+                     queued: list[dict[str, Any]] | None = None) -> dict[str, int]:
+    """Where each artist last appeared, relative to the NEXT song (position 0).
+
+    History maps to negative positions (the newest play is -1, the one before
+    -2, ...) and the queue to 0..len-1, so a single number says how many songs
+    must pass before an artist may return. Both inputs are optional: the flat
+    shuffle only needs the queue, the program builder wants history too.
+    """
+    positions: dict[str, int] = {}
+    keys = list(history_keys or [])
+    for index, key in enumerate(keys):
+        positions[key] = index - len(keys)
+    for index, track in enumerate(queued or []):
+        positions[artist_key(track)] = index
+    return positions
+
+
+def artist_gap() -> int:
+    """How many songs must pass before an artist may play again.
+
+    "Don't play the same artist again for at least N tracks"
+    (``playback.artist_gap``). Separate from and stricter than the
+    no-long-runs cap: the cap stops three in a row, this stops an artist
+    bouncing back every other program. 0 disables the rule.
+    """
+    playback = config.get("playback", {}) or {}
+    try:
+        return max(0, int(playback.get("artist_gap", 10)))
+    except (TypeError, ValueError):
+        return 10
+
+
+def program_min_size() -> int:
+    """Shortest a themed program may be (``playback.program.min_size``)."""
+    prog = (config.get("playback", {}) or {}).get("program", {}) or {}
+    try:
+        return max(1, int(prog.get("min_size", 2)))
+    except (TypeError, ValueError):
+        return 2
+
+
+def program_size_for(track_count: int, size: int, biggest: int,
+                     min_size: int | None = None) -> int:
+    """How long this theme's program may be, given how much it has to offer.
+
+    ``size`` is the ceiling ("up to N in a row") and the longest program goes to
+    the theme with the most tracks; a theme with a third of that many tracks
+    gets a third-length program rather than being dropped or bloating the queue
+    with repeats. Never shorter than ``program_min_size()`` and never longer
+    than ``size``.
+    """
+    ceiling = max(2, int(size))
+    floor = min(max(1, int(program_min_size() if min_size is None else min_size)),
+                ceiling)
+    top = max(1, int(biggest))
+    scaled = math.ceil(ceiling * max(1, int(track_count)) / top)
+    return max(floor, min(ceiling, scaled))
+
+
 def artist_run_cap() -> int:
     """Max songs in a row by one band (``playback.program.max_consecutive_artist``).
 
@@ -750,6 +825,31 @@ def cap_is_enforceable(cap: int | None = None) -> bool:
         **program_exclusions(),
     )
     return len({artist_key(t) for t in rows}) > cap
+
+
+def gap_is_enforceable(gap: int | None = None) -> bool:
+    """Can the artist-spacing rule hold under the filters the user selected?
+
+    Spacing needs at least ``gap`` distinct artists to rotate through; fewer
+    than that and the builder plays the longest-absent artist early and counts a
+    ``gap_break``. Like ``cap_is_enforceable`` this is a hint for the card — the
+    queue builder is the authority and never goes silent over it.
+    """
+    gap = artist_gap() if gap is None else max(0, int(gap))
+    if gap <= 1:
+        return True
+    playback = config.get("playback", {}) or {}
+    artists = [a for a in (playback.get("artists") or []) if str(a).strip()]
+    if artists and len(artists) < gap:
+        return False
+    rows = query_tracks(
+        search=playback.get("search", "") or "",
+        genres=(playback.get("genres") or None),
+        artists=(artists or None),
+        limit=500,
+        **program_exclusions(),
+    )
+    return len({artist_key(t) for t in rows}) >= gap
 
 
 def repeat_window() -> int:
@@ -812,7 +912,12 @@ def interleave_artists(tracks: list[dict[str, Any]],
                        max_consecutive: int = 2,
                        previous_artist: str | None = None,
                        previous_run: int = 0,
-                       limit: int | None = None) -> list[dict[str, Any]]:
+                       limit: int | None = None,
+                  min_gap: int = 0,
+                  last_positions: dict[str, int] | None = None,
+                  report: dict[str, Any] | None = None,
+                  origin: int = 0,
+                  strict: bool = False) -> list[dict[str, Any]]:
     """Order ``tracks`` so one artist never plays more than N in a row.
 
     Greedy and random: at every step it takes a track from the artist with the
@@ -825,11 +930,29 @@ def interleave_artists(tracks: list[dict[str, Any]],
     / ``previous_run`` carry the run across queue boundaries, so a refill cannot
     complete a third song by the artist that just played.
 
+    ``strict`` refuses to place a blocked artist at all (the result comes back
+    short, which the caller reads as "this theme cannot fill its program").
+    ``min_gap`` is the artist-spacing rule ("no artist twice within N tracks"):
+    ``last_positions`` maps each artist to where it last played in QUEUE
+    coordinates (negative = recent plays, 0..n = already queued) and ``origin``
+    is the queue position this batch starts at, so an artist that played three
+    songs ago is held back for ``min_gap`` more. Freshness
+    filters the candidates BEFORE the biggest-pool heuristic; when nothing is
+    out of the gap (one-artist theme) the longest-absent artist plays anyway and
+    the break is counted in ``report["gap_breaks"]`` — best effort beats a
+    silent program.
+
     Returns at most ``limit`` tracks. A short result means the input genuinely
     cannot supply that many without breaking the rule — callers treat that as
     "not enough songs, skip to another program".
     """
+    report = report if report is not None else {}
+    report.setdefault("gap_breaks", 0)
+    report.setdefault("placed", 0)
+    report.setdefault("stopped_early", False)
     cap = max(1, int(max_consecutive))
+    gap = max(0, int(min_gap or 0))
+    base = dict(last_positions or {})
     pools: dict[str, list[dict[str, Any]]] = {}
     for track in tracks:
         pools.setdefault(artist_key(track), []).append(track)
@@ -840,18 +963,56 @@ def interleave_artists(tracks: list[dict[str, Any]],
     out: list[dict[str, Any]] = []
     run_artist, run_len = previous_artist, max(0, int(previous_run))
     while len(out) < target:
+        # Position in the QUEUE's coordinates, not the batch's: last_positions
+        # uses negative numbers for recent plays and 0..n for what is already
+        # queued, so a batch that starts at queue position 8 must test
+        # freshness against 8, 9, 10 — mixing the two made every artist look
+        # stale, which silently disabled the rule and let the fallback play the
+        # same band twice in a row.
+        position = origin + len(out)
         eligible = [a for a, pool in pools.items()
                     if pool and (a != run_artist or run_len < cap)]
         if not eligible:
             break
-        biggest = max(len(pools[a]) for a in eligible)
-        artist = random.choice([a for a in eligible if len(pools[a]) == biggest])
+        # Freshness first: an artist whose last song is still inside the gap is
+        # not a candidate. The biggest-pool heuristic only breaks ties among
+        # artists that may actually play now.
+        fresh = [a for a in eligible
+                 if gap <= 0 or position - base.get(a, _NEVER_PLAYED) >= gap]
+        if fresh:
+            pool_of = fresh
+        elif strict:
+            # Strict spacing: rather than reusing an artist inside the gap, stop.
+            # The caller compares the result with the length it asked for and
+            # skips the theme — "not enough songs for this band/genre, move on to
+            # another program" — instead of airing the same band twice.
+            report["stopped_early"] = True
+            break
+        else:
+            # Nothing is out of the gap — a theme with one or two artists, or a
+            # single-artist filter. Play the artist that has been away longest
+            # instead of stalling (a stalled program is skipped and the theme
+            # goes silent). Counted so /api/programs can say the rule was
+            # relaxed rather than pretend.
+            report["gap_breaks"] += 1
+            position_of = lambda a: base.get(a, _NEVER_PLAYED)  # noqa: E731
+            oldest = min(position_of(a) for a in eligible)
+            pool_of = [a for a in eligible if position_of(a) == oldest]
+        biggest = max(len(pools[a]) for a in pool_of)
+        artist = random.choice([a for a in pool_of if len(pools[a]) == biggest])
         out.append(pools[artist].pop())
+        base[artist] = position
         if artist == run_artist:
             run_len += 1
         else:
             run_artist, run_len = artist, 1
+    report["placed"] = len(out)
     return out
+
+
+# Sentinel for an artist with no recorded position: far in the past, so it is
+# always allowed to play and always loses the "who was away longest" tie-break.
+_NEVER_PLAYED = -10 ** 9
 
 
 def restore_after_interleave(ordered: list[dict[str, Any]],
@@ -872,8 +1033,10 @@ def program_selection(strategy: str, size: int, limit: int) -> dict[str, Any]:
     One function feeds both the scheduler and ``GET /api/programs`` so the list
     a user switches off in the browser is exactly the list the queue uses.
 
-    Themes with fewer than ``size`` tracks are not eligible (a shorter run could
-    not fill a program). The ``limit`` cutoff is applied FIRST, to the biggest
+    Each theme carries ``program_size``: how many songs its program plays.
+    Programs scale with the theme's share of tracks (``program_size_for``), so
+    the biggest genre gets the longest run and a small genre a short one instead
+    of being dropped for not filling ``size``. The ``limit`` cutoff is applied FIRST, to the biggest
     themes, giving a stable universe of candidates; the disabled ones are then
     removed from the ACTIVE rotation. Order matters: disabling a theme must not
     pull the 21st-biggest theme into the list, or the card's rows would shuffle
@@ -886,9 +1049,20 @@ def program_selection(strategy: str, size: int, limit: int) -> dict[str, Any]:
     """
     size = max(2, int(size))
     limit = max(1, int(limit))
-    needed = min(size, artist_run_cap()) if strategy == "artist" else size
+    cap = artist_run_cap()
     themes = program_themes(strategy)
-    eligible = [t for t in themes if int(t.get("n", 0) or 0) >= needed]
+    counts = [int(t.get("n", 0) or 0) for t in themes]
+    biggest = max(counts) if counts else 0
+    # A program's length is proportional to its theme's track count, so the
+    # eligibility test has to use that length: requiring a full `size` would
+    # keep dropping small genres, which is the opposite of what we want (a
+    # 30-track genre should host a 2-song program, not none). Artist themes are
+    # additionally capped by the no-long-runs rule.
+    for theme, count in zip(themes, counts):
+        length = program_size_for(count, size, biggest)
+        theme["program_size"] = min(length, cap) if strategy == "artist" else length
+    eligible = [t for t in themes
+                if int(t.get("n", 0) or 0) >= int(t["program_size"])]
     candidates = eligible[:limit]
     disabled = set(disabled_programs(strategy))
     value_of = lambda t: norm_theme_value(strategy, t.get(strategy))  # noqa: E731
@@ -899,6 +1073,8 @@ def program_selection(strategy: str, size: int, limit: int) -> dict[str, Any]:
     return {
         "strategy": strategy,
         "size": size,
+        "min_size": program_min_size(),
+        "artist_gap": artist_gap(),
         "limit": limit,
         "eligible": len(eligible),
         "candidates": candidates,

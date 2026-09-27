@@ -252,6 +252,49 @@ def test_artist_filter_narrows_the_queue(client):
         client.put("/api/config", json={"playback": {"artists": []}})
 
 
+def test_programs_endpoint_reports_the_artist_gap(client, music_dir):
+    """"Same artist no closer than N tracks" must be visible and honest.
+
+    The tiny fixture has 3 artists, so a 10-track gap is not satisfiable there —
+    the card has to say so rather than promise the rule. Small fixture, small
+    numbers: the gap is read back from the payload the card uses.
+    """
+    # Give the tiny fixture two real genres so there is a theme rotation to
+    # measure program lengths against (same setup as the sibling test).
+    conn = db.connect()
+    for genre in ("AAA", "BBB"):
+        for n in range(3):
+            conn.execute(
+                "INSERT INTO tracks(path,title,artist,album,genre,year,duration,"
+                "mtime,size,missing,excluded,meta_source) VALUES(?,?,?,?,?,?,?,?,?,"
+                "0,0,'tags')",
+                (f"/m/{genre}/{n}.mp3", f"{genre} {n}", f"{genre} Band", "Al",
+                 genre, "1999", 200.0, 1, 1),
+            )
+    conn.commit()
+    client.put("/api/config", json={"playback": {"program": {"size": 2}}})
+
+    body = client.get("/api/programs").json()
+    assert body["artist_gap"] == 10, "the default spacing rule"
+    assert body["gap_enforceable"] is False, (
+        "3 artists cannot keep the same artist 10 tracks apart — the card must "
+        "admit that instead of claiming the rule")
+    assert body["min_size"] == 2
+    # Every theme carries how long its program runs; the biggest one takes the
+    # full ceiling, and nothing is longer than it.
+    sizes = [t["program_size"] for t in body["themes"]]
+    assert sizes and all(isinstance(n, int) and n >= 2 for n in sizes)
+    assert max(sizes) <= body["size"]
+
+    client.put("/api/config", json={"playback": {"artist_gap": 2}})
+    try:
+        body = client.get("/api/programs").json()
+        assert body["artist_gap"] == 2
+        assert body["gap_enforceable"] is True, "3 artists can keep 2 apart"
+    finally:
+        client.put("/api/config", json={"playback": {"artist_gap": 10}})
+
+
 def test_programs_endpoint_exposes_the_artist_run_cap(client):
     """The card needs the cap to describe the rule it is enforcing."""
     body = client.get("/api/programs").json()

@@ -134,6 +134,11 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .program-chip[data-kind="artist"] { border-left: 3px solid #b388ff; }
 .program-chip[data-kind="decade"] { border-left: 3px solid #6ee7a0; }
 .pc-label { font-weight: 600; }
+.pc-len {
+  color: var(--accent); font-size: 11px; font-weight: 600;
+  border: 1px solid var(--line); border-radius: 4px; padding: 0 4px;
+}
+.pc-len::after { content: " tracks"; font-weight: 400; color: var(--dim); }
 .pc-n { color: var(--dim); font-size: 11px; }
 .field.inline { display: flex; align-items: center; gap: 8px; }
 .field.inline > input { width: auto; }

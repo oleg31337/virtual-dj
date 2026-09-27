@@ -74,12 +74,17 @@
   "playback": {
     "shuffle": true,
     "repeat_window": 50,
+    "_repeat_window": "Don't play the same song again for at least this many plays (0 = off).",
+    "artist_gap": 10,
+    "_artist_gap": "Don't play the same artist again for at least this many tracks, across programs and refills (0 = off). Needs at least this many distinct artists in the selection to hold exactly.",
     "genres": [],
     "artists": [],
     "search": "",
     "program": {
+      "_comment": "size is the CEILING for a program: every theme runs for a share of it proportional to how many tracks it has, never less than min_size. Artist themes are additionally capped at max_consecutive_artist.",
       "enabled": true,
       "size": 6,
+      "min_size": 2,
       "strategy": "genre",
       "limit": 20,
       "max_consecutive_artist": 2

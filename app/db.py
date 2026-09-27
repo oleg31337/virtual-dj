@@ -274,6 +274,25 @@ def recent_track_ids(window: int = 50) -> list[int]:
     return [int(r["track_id"]) for r in rows]
 
 
+def recent_played_artists(window: int = 50) -> list[str]:
+    """Raw artist tags of the last ``window`` plays, OLDEST first.
+
+    The artist-spacing rule needs positions, not just a set: "this artist last
+    played 3 songs ago" is what decides when it may come back, so insertion
+    order is preserved (``id``, like ``recent_track_ids``). Normalization to
+    identity keys happens in ``library.recent_played_artist_keys``.
+    """
+    window = int(window)
+    if window <= 0:
+        return []
+    rows = connect().execute(
+        "SELECT t.artist AS artist FROM history h "
+        "LEFT JOIN tracks t ON t.id = h.track_id "
+        "WHERE h.track_id IS NOT NULL ORDER BY h.id DESC LIMIT ?", (window,),
+    ).fetchall()
+    return [str(r["artist"] or "") for r in reversed(rows)]
+
+
 def recent_history(limit: int = 50) -> list[dict[str, Any]]:
     rows = connect().execute(
         "SELECT h.played_at, t.id, t.title, t.artist, t.album "

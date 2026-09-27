@@ -193,8 +193,12 @@ DEFAULTS: dict[str, Any] = {
             # of tracks that share a genre/era/mood, announced together, then a
             # DJ break before the next program switches the vibe. Adjustable.
             "enabled": True,
-            # Tracks per program before a DJ break announces the switch.
+            # MOST tracks in one program before a DJ break announces the switch.
+            # Programs scale with their theme's track count (a small genre gets a
+            # shorter run) and this is the ceiling, taken by the biggest theme.
             "size": 6,
+            # Shortest a program may be, so a small genre still gets airtime.
+            "min_size": 2,
             # How programs are themed: "genre" (same genre), "artist" (same
             # artist run), or "decade" (same era).
             "strategy": "genre",
@@ -226,6 +230,10 @@ DEFAULTS: dict[str, Any] = {
         # twice in an evening. 0 disables it. Falls back to ignoring the window
         # when the library is too small to fill the queue otherwise.
         "repeat_window": 50,
+        # "The same artist shall not repeat for at least N tracks." Enforced
+        # across programs, refills and the flat shuffle; relaxed (and counted)
+        # only when the pool has too few artists to space. 0 disables it.
+        "artist_gap": 10,
     },
     # Icecast delivery. When enabled, the app runs a *managed* Icecast2 server
     # (bundled in the same container) and a background ffmpeg ("the pusher")

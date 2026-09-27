@@ -270,6 +270,9 @@ def api_programs():
             key: value,
             "label": f"{value}s" if strategy == "decade" else value,
             "n": t.get("n", 0),
+            # How long this theme's program runs (scales with its track count,
+            # capped by max_consecutive_artist for artist themes).
+            "program_size": t.get("program_size"),
             "disabled": value in disabled,
         })
     return {
@@ -283,6 +286,13 @@ def api_programs():
         # a rule the queue will break (see library.cap_is_enforceable).
         "cap_enforceable": library.cap_is_enforceable(max_consec),
         "repeat_window": library.repeat_window(),
+        # The artist-spacing rule and what the queue actually managed: the card
+        # must not promise "no artist twice within N tracks" when the selected
+        # pool has fewer artists than that, and must say when it had to give way.
+        "artist_gap": library.artist_gap(),
+        "gap_enforceable": library.gap_is_enforceable(),
+        "gap_breaks": SCHEDULER.gap_breaks(),
+        "min_size": sel.get("min_size", library.program_min_size()),
         "eligible": sel["eligible"],
         "themes": themes,
         "selected": sum(1 for t in themes if not t["disabled"]),

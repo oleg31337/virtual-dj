@@ -8,6 +8,7 @@ them, so a break is always ready on time and never stalls playback.
 from __future__ import annotations
 
 import logging
+import math
 import random
 import threading
 import time
@@ -54,6 +55,10 @@ class Scheduler:
         self._queue: list[dict[str, Any]] = []
         self._prepared: dict[int, dict[str, Any]] = {}   # queue item uid -> break
         self._attempts: dict[int, int] = {}              # uid -> failed attempts
+        # How often the artist-spacing rule had to give way in the queue that is
+        # currently waiting (a one-artist theme cannot honour it). Reset whenever
+        # the queue is rebuilt, exposed by /api/programs so the card can say so.
+        self._gap_breaks = 0
         self._uid = 0
         self._track_counter = 0
         # Tracks remaining until the next DJ break. When it reaches 0 the next
@@ -85,7 +90,8 @@ class Scheduler:
         self._tracks_until_talk = self._roll_interval()
 
     def _wrap(self, track: dict[str, Any], with_dj: bool | None = None,
-              program: dict[str, Any] | None = None) -> dict[str, Any]:
+              program: dict[str, Any] | None = None,
+              program_start: bool = False) -> dict[str, Any]:
         # Decide whether THIS track gets a DJ break. The decision is stamped
         # here, at enqueue time, so the consumer and prefetch worker agree.
         if with_dj is None:
@@ -109,6 +115,11 @@ class Scheduler:
             "track": track,
             "dj_requested": with_dj,
             "program": program,
+            # Whether this track OPENS its program. `dj_requested` cannot say:
+            # it is also set by the periodic talk cadence, which is why a
+            # playlist audit that keyed program boundaries off it saw phantom
+            # 2-4 song "programs" (the DJ talks every 2-4 tracks).
+            "program_start": program_start,
         }
 
     def _do_not_repeat(self, window: int | None = None) -> set[int]:
@@ -166,6 +177,33 @@ class Scheduler:
         """
         with self._lock:
             return bool(self._queue)
+
+    def _note_gap_breaks(self, count: int) -> None:
+        if count > 0:
+            self._gap_breaks += count
+
+    def gap_breaks(self) -> int:
+        """Spacing relaxations in the current queue (see ``_gap_breaks``)."""
+        return self._gap_breaks
+
+    def _artist_positions(self) -> tuple[dict[str, int], int]:
+        """Where every artist last played, and the position the next song takes.
+
+        Combines the recent plays with the queue that is already waiting, so a
+        refill cannot put an artist back on air a few tracks after its own song
+        played — the rule spans queue boundaries and refills, exactly like the
+        no-long-runs cap. Positions: the newest play is -1, the queue's first
+        item is 0, and the NEXT song to be built sits at ``len(queue)`` — which
+        is why the origin is returned with the map: a batch build has to record
+        its own placements in these queue coordinates, not in batch coordinates.
+        """
+        gap = library.artist_gap()
+        with self._lock:
+            queued = [i.get("track") for i in self._queue if i.get("track")]
+        if gap <= 0:
+            return {}, len(queued)
+        history = library.recent_played_artist_keys(gap)
+        return library.artist_positions(history, queued), len(queued)
 
     def _tail_artist(self) -> tuple[str | None, int]:
         """Artist of the queue's tail plus how many of its songs run back.
@@ -242,68 +280,158 @@ class Scheduler:
         items: list[dict[str, Any]] = []
         programs_made = 0
         max_consec = _artist_run_settings()
+        gap = library.artist_gap()
         # Carry the artist run in from whatever is already queued.
         run_artist, run_len = self._tail_artist()
+        # ...and where each artist last played, so spacing holds inside the
+        # batch and across programs and refills.
+        positions, queue_len = self._artist_positions()
         # Songs that must not come back yet (recently played + already queued).
         block = self._do_not_repeat(window)
         # Round-robin themes so consecutive programs differ, like a real DJ
-        # alternating vibes rather than repeating one.
-        for theme in themes:
-            if programs_made >= count:
-                break
-            if strategy == "genre":
-                kwargs: dict[str, Any] = {"genres": [theme["genre"]], "search": search}
-            elif strategy == "artist":
-                kwargs = {"artists": [theme["artist"]], "search": search}
-            else:  # decade
-                kwargs = {"decade": int(theme["decade"]), "search": search}
-            # Filters from the OTHER dimensions still apply (AND): e.g. an
-            # "Artist" theme + genre filter yields that artist's tracks in that
-            # genre (the program is skipped if there are none).
-            if genres_filter and strategy != "genre":
-                kwargs["genres"] = list(genres_filter)
-            if artists_filter and strategy != "artist":
-                kwargs["artists"] = list(artists_filter)
-            # An "artist" theme is one band by definition, so the no-long-runs
-            # rule caps it at `max_consec` songs; capping keeps artist programs
-            # audible instead of making the whole strategy unusable.
-            want = min(size, max_consec) if strategy == "artist" else size
-            # Over-fetch candidates so the interleave has material to work with.
-            tracks = library.query_tracks(
-                limit=max(want * 4, want), random_order=True, **kwargs, **excludes,
-                exclude_ids=block)
-            ordered = library.interleave_artists(
-                tracks, max_consec, run_artist, run_len, want)
-            if len(ordered) < want:
-                # Not enough songs for this theme without repeating a band (or
-                # every candidate was played recently): skip it and try another
-                # program (theme order is randomized).
-                log.debug("program theme %r skipped: %d/%d tracks under the "
-                          "%d-in-a-row rule", theme, len(ordered), want, max_consec)
-                continue
-            program = {
-                "kind": strategy,
-                "label": theme.get("genre") or theme.get("artist")
-                or f"{theme['decade']}s",
-            }
-            first = True
-            for track in ordered:
-                if first and (items or self._queued_music()):
-                    # Announce the switch into this new program. The queue must be
-                    # considered too: a refill starts a new program whose theme may
-                    # differ from the tail of the existing queue, and checking
-                    # `items` alone left that boundary — the FIRST program of every
-                    # batch — silently unannounced (found by the playlist matrix:
-                    # 4-7 unannounced switches per 120 songs).
+        # alternating vibes rather than repeating one. Two passes: the first
+        # only takes themes the artist gap allows, the second (run only when the
+        # first produced nothing at all, so a tiny rotation never goes silent)
+        # drops that preference.
+        used: set[str] = set()
+        # The biggest theme takes the full `size`; everyone else scales against it.
+        # NOTE: this is the MAX theme size — passing the SUM made every program
+        # scale to the floor (all runs came out 2 tracks while the card promised
+        # Rock a 6-track run).
+        biggest = max((int(t.get("n", 0) or 0) for t in themes), default=1)
+        # Pass 1: honour the artist gap strictly — a theme that cannot fill its
+        # program without bringing a band back inside the gap is skipped, exactly
+        # like a theme without enough songs. Pass 2 relaxes the INTRA-program
+        # spacing (an artist theme is one band, so it can never satisfy it) but
+        # still prefers themes that are not themselves inside the gap. Pass 3 is
+        # the last resort that also drops that preference, so a one-theme
+        # rotation still plays programs instead of going silent.
+        for strict, allow_blocked in ((True, False), (False, False), (False, True)):
+            for theme in themes:
+                if programs_made >= count:
+                    break
+                theme_id = str(theme.get(strategy))
+                if theme_id in used:
+                    continue
+                offset = queue_len + len(items)
+                if (strategy == "artist" and not allow_blocked and gap > 0
+                        and self._artist_is_blocked(theme, offset, positions, gap)):
+                    # An artist program is ONE band, so the gap is the only rule
+                    # that stops the same band's program coming back a couple of
+                    # songs later — the run cap cannot, a program IS a run.
+                    log.debug("artist program %r held back by the %d-track gap",
+                              theme.get("artist"), gap)
+                    continue
+                # NOT marked used yet: a theme that fails strict spacing in this
+                # pass must be retryable in the next one. Marking it here meant
+                # pass 1 consumed every theme and the relaxed passes then found
+                # nothing left to try, so a small library built NO programs.
+                program, ordered = self._build_one_program(
+                    theme, strategy, size, biggest,
+                    max_consec, gap, positions, run_artist, run_len, block,
+                    excludes, genres_filter, artists_filter, search, offset,
+                    strict)
+                if not ordered:
+                    continue
+                used.add(theme_id)
+                for index, track in enumerate(ordered):
+                    # Record the placement so the next program in this same batch
+                    # (and the refill after it, via the queue) respects the gap.
+                    positions[library.artist_key(track)] = offset + index
+                    # The first track of every program after the first carries
+                    # the announce. The queue counts too: a refill starts a new
+                    # program whose theme may differ from the tail of the
+                    # existing queue, and checking the batch alone left that
+                    # boundary — the FIRST program of every batch — silently
+                    # unannounced (found by the playlist matrix: 4-7 per 120).
+                    first = index == 0
                     items.append(self._wrap(
-                        track, with_dj=True, program=program))
-                else:
-                    items.append(self._wrap(track, with_dj=None, program=program))
-                first = False
-            run_artist = library.artist_key(ordered[-1])
-            run_len = self._trailing_run(ordered)
-            programs_made += 1
+                        track,
+                        with_dj=True if (first and (items or self._queued_music()))
+                        else None,
+                        program=program,
+                        program_start=first))
+                run_artist = library.artist_key(ordered[-1])
+                run_len = self._trailing_run(ordered)
+                programs_made += 1
+            if programs_made:
+                break
         return items
+
+    @staticmethod
+    def _artist_is_blocked(theme: dict[str, Any], offset: int,
+                           positions: dict[str, int], gap: int) -> bool:
+        """Is this artist theme's band still inside the artist gap?"""
+        key = library.artist_key({"artist": theme.get("artist")})
+        return offset - positions.get(key, library._NEVER_PLAYED) < gap
+
+    def _build_one_program(
+        self,
+        theme: dict[str, Any],
+        strategy: str,
+        size: int,
+        biggest: int,
+        max_consec: int,
+        gap: int,
+        positions: dict[str, int],
+        run_artist: str | None,
+        run_len: int,
+        block: set[int],
+        excludes: dict[str, Any],
+        genres_filter: list[str] | None,
+        artists_filter: list[str] | None,
+        search: str,
+        offset: int,
+        strict: bool = False,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """One themed run: its label plus the tracks, spaced and rule-checked.
+
+        Returns ``({}, [])`` when the theme cannot fill its own program length
+        — "not enough songs for this genre, skip to another program".
+        """
+        if strategy == "genre":
+            kwargs: dict[str, Any] = {"genres": [theme["genre"]], "search": search}
+        elif strategy == "artist":
+            kwargs = {"artists": [theme["artist"]], "search": search}
+        else:  # decade
+            kwargs = {"decade": int(theme["decade"]), "search": search}
+        # Filters from the OTHER dimensions still apply (AND): e.g. an "Artist"
+        # theme + genre filter yields that artist's tracks in that genre (the
+        # program is skipped if there are none).
+        if genres_filter and strategy != "genre":
+            kwargs["genres"] = list(genres_filter)
+        if artists_filter and strategy != "artist":
+            kwargs["artists"] = list(artists_filter)
+        # A program's length comes from its theme's share of the library: the
+        # biggest theme runs the full `size`, a 30-track genre runs briefly
+        # instead of being skipped for not filling `size`. Artist themes are
+        # additionally capped by the no-long-runs rule (it is one band).
+        want = int(theme.get("program_size")
+                   or library.program_size_for(int(theme.get("n", 0) or 0),
+                                               size, biggest))
+        if strategy == "artist":
+            want = min(want, max_consec)
+        want = max(1, want)
+        # Over-fetch so the spacer has spare candidates to work with.
+        tracks = library.query_tracks(
+            limit=max(want * 4, want), random_order=True, **kwargs, **excludes,
+            exclude_ids=block)
+        placed: dict[str, Any] = {}
+        ordered = library.interleave_artists(
+            tracks, max_consec, run_artist, run_len, want,
+            min_gap=gap, last_positions=positions, report=placed,
+            origin=offset, strict=strict)
+        self._note_gap_breaks(int(placed.get("gap_breaks", 0)))
+        if len(ordered) < want:
+            log.debug("program theme %r skipped: %d/%d tracks under the "
+                      "%d-in-a-row rule", theme, len(ordered), want, max_consec)
+            return {}, []
+        program = {
+            "kind": strategy,
+            "label": theme.get("genre") or theme.get("artist")
+            or f"{theme['decade']}s",
+        }
+        return program, ordered
 
     @staticmethod
     def _trailing_run(ordered: list[dict[str, Any]]) -> int:
@@ -348,11 +476,18 @@ class Scheduler:
             prog = playback.get("program") or {}
             size = max(2, int(prog.get("size", 6)))
             strategy = str(prog.get("strategy", "genre"))
-            # Artist programs are capped by the no-long-runs rule, so they come
-            # out shorter than `size` — ask for proportionally more of them so a
-            # refill still tops the queue up by roughly `count` tracks.
-            per = min(size, _artist_run_settings()) if strategy == "artist" else size
-            n_programs = max(1, count // max(1, per))
+            # Programs are not all the same length any more (a program scales
+            # with its theme's track count), so ask for enough programs to cover
+            # `count` tracks at the average length rather than at the ceiling —
+            # otherwise a batch of short programs would under-fill the queue.
+            lengths = [int(t.get("program_size", size) or size)
+                       for t in library.program_selection(
+                           strategy, size,
+                           max(1, int(prog.get("limit", 20) or 20)))["themes"]]
+            if strategy == "artist":
+                lengths = [min(length, _artist_run_settings()) for length in lengths]
+            per = round(sum(lengths) / len(lengths)) if lengths else size
+            n_programs = max(1, math.ceil(count / max(1, per)))
             items = self._build_programs(n_programs, window=window)
             if items:
                 with self._lock:
@@ -362,11 +497,17 @@ class Scheduler:
             # No theme had enough tracks (tiny library) — fall through to flat.
 
         excludes: dict[str, Any] = library.program_exclusions()
+        # Over-fetch: the spacer needs spare candidates to honour the artist gap.
+        # Fetching exactly `count` left the interleave no choice but to reuse an
+        # artist it had just placed (measured on the real library: gap 1 where 10
+        # was configured), because a random 20-track slice of a genre usually
+        # contains several songs by the same band.
+        fetch = max(count * 4, count + 20) if library.artist_gap() > 0 else count
         queries: dict[str, Any] = {
             "search": playback.get("search", "") or "",
             "genres": playback.get("genres") or None,
             "artists": playback.get("artists") or None,
-            "limit": count,
+            "limit": fetch,
             "random_order": bool(playback.get("shuffle", True)),
             **excludes,
         }
@@ -386,7 +527,7 @@ class Scheduler:
                 # exactly what the user asked not to hear. The repeat window still
                 # applies here; it is the ladder that relaxes it, not this branch.
                 tracks = library.query_tracks(
-                    limit=count, random_order=True,
+                    limit=fetch, random_order=True,
                     exclude_ids=self._do_not_repeat(window))
         if not tracks:
             return 0
@@ -399,10 +540,18 @@ class Scheduler:
             # programs off cannot reintroduce artist runs. Every track is kept
             # (a single-artist pool simply cannot satisfy the rule).
             run_artist, run_len = self._tail_artist()
-            tracks = library.restore_after_interleave(
-                library.interleave_artists(
-                    tracks, _artist_run_settings(), run_artist, run_len),
-                tracks)
+            placed: dict[str, Any] = {}
+            positions, origin = self._artist_positions()
+            ordered = library.interleave_artists(
+                tracks, _artist_run_settings(), run_artist, run_len, count,
+                min_gap=library.artist_gap(),
+                last_positions=positions, report=placed, origin=origin)
+            # Keep the requested size: restore covers a stall (a single-artist
+            # pool the cap cannot space), while the over-fetched spares are only
+            # candidates and must not inflate the queue unspaced. A short result
+            # is normal — the next refill sees the updated positions.
+            tracks = library.restore_after_interleave(ordered, tracks)[:count]
+            self._note_gap_breaks(int(placed.get("gap_breaks", 0)))
         with self._lock:
             for track in tracks:
                 self._queue.append(self._wrap(track))
@@ -423,6 +572,7 @@ class Scheduler:
                     "uid": item["uid"],
                     "track": item["track"],
                     "program": item.get("program"),
+                    "program_start": bool(item.get("program_start")),
                     "dj_requested": bool(item.get("dj_requested")),
                     "dj_ready": item["uid"] in self._prepared,
                     "dj_text": (self._prepared.get(item["uid"]) or {}).get("text"),
@@ -469,6 +619,7 @@ class Scheduler:
             self._queue.clear()
             self._prepared.clear()
             self._attempts.clear()
+            self._gap_breaks = 0
 
     def replace(self, track_ids: list[int]) -> int:
         self.clear()
