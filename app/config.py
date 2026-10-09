@@ -58,6 +58,19 @@ WEB_DIR = BASE_DIR / "web"
 CACHE_DIR = DATA_DIR / "cache"
 DJ_CACHE_DIR = CACHE_DIR / "dj"
 VOICES_DIR = DATA_DIR / "voices"
+
+
+def voices_dir() -> Path:
+    """Where the Piper voice models live.
+
+    ``voices_dir`` (config.json) wins when set; otherwise the default is
+    ``$VDJ_DATA_DIR/voices``. Read at CALL time, so a test/profile that repoints
+    ``VOICES_DIR`` or ``DATA_DIR`` is honoured instead of a value frozen at
+    import. (A key the code reads but DEFAULTS does not declare would also be
+    rejected by the strict PUT /api/config — found while auditing the docs.)
+    """
+    configured = str(get("voices_dir", "") or "").strip()
+    return Path(configured).expanduser() if configured else VOICES_DIR
 CONFIG_PATH = DATA_DIR / "config.json"
 DB_PATH = Path(env_str("VDJ_DB_PATH", str(DATA_DIR / "vdj.sqlite3")))
 
@@ -66,6 +79,10 @@ DEFAULTS: dict[str, Any] = {
     # Where to look for music. Set it in the web UI (Library panel), or
     # override at first boot with VDJ_MUSIC_DIR.
     "music_dir": env_str("VDJ_MUSIC_DIR", str(Path.home() / "Music")),
+    # Where Piper voice models are kept. Empty = $VDJ_DATA_DIR/voices (the
+    # default and what the container volume holds). Set it to keep several GB of
+    # voices on another disk.
+    "voices_dir": "",
     "stream": {
         "bitrate_kbps": 128,
         "sample_rate": 44100,

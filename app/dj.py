@@ -187,13 +187,13 @@ def voice_model_path(voice: str | None = None) -> Path | None:
     name = voice or config.get("dj.voice", "en_US-amy-medium")
     # Allow tests/installs to point the voice library elsewhere (e.g. system
     # share dir) without duplicating multi-hundred-MB models.
-    voices_dir = Path(config.get("voices_dir", config.VOICES_DIR))
+    voices_dir = config.voices_dir()
     path = voices_dir / f"{name}.onnx"
     return path if path.exists() else None
 
 
 def available_voices() -> list[str]:
-    voices_dir = Path(config.get("voices_dir", config.VOICES_DIR))
+    voices_dir = config.voices_dir()
     if not voices_dir.is_dir():
         return []
     return sorted(p.stem for p in voices_dir.glob("*.onnx"))

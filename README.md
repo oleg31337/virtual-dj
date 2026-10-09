@@ -51,86 +51,36 @@ Point VLC, Winamp, Sonos, or any browser at the stream URL and it just plays.
 - **Themed programs.** The queue is grouped into DJ-style "programs" — runs of
   tracks sharing a genre, an artist, or a decade — with the DJ announcing each
   vibe switch before the next block. The *Programs* card lists the themes
-  (biggest by track count first) and every one of them can be switched off with
-  a click: switched-off themes never reach the queue, in any strategy. Program
-  size, grouping strategy and how many themes take part are adjustable in
-  `playback.program` (config or web UI).
-- **No long runs by one band.** However the queue is built — programs or flat
-  shuffle, across program and refill boundaries, and *including a refill that
-  starts a new theme* (the DJ announces that switch too; the *length* of each run
-  scales with the theme's track count — see the scaling rule below) — the same artist never plays
-  more than `playback.program.max_consecutive_artist` songs in a row (default
-  **2**; set 1 to never repeat an artist back-to-back, adjustable in the
-  *Programs* card). A theme that cannot be filled without repeating a band is
-  skipped and the next program is used; in *Artist* mode a program is one band
-  by definition, so it plays the cap and then the DJ moves on. Measured on a
-  10,158-track library: the longest run drops from 6 songs to 2, while 19 of 20
-  genre themes, 20 of 20 artist themes and 8 of 8 decade themes still fill a
-  program. When the selection itself leaves fewer than `cap + 1` artists to
-  rotate through (you filtered down to one band, or a genre has a single
-  artist) the cap cannot hold: the queue relaxes it instead of going silent,
-  and the *Programs* card summary says **artist limit relaxed** rather than
-  claiming a rule the queue is about to break.
+  (biggest by track count first) and every one can be switched off with a click:
+  switched-off themes never reach the queue, in any strategy.
+- **Playlist rules that hold.** No band plays more than 2 songs in a row, no
+  artist comes back within 10 tracks, no song repeats within 50 plays, and every
+  program's length scales with how much its theme actually holds — so a small
+  genre gets a short run instead of being skipped. All of them are enforced
+  across programs, refills and the flat shuffle, shown in the *Programs* card
+  (including when the current selection makes one unenforceable), and tunable
+  one by one. See [Playlist rules](#playlist-rules).
 - **Genre and decade selection.** The *Genres/decades* card's chips are a
   selection: with nothing picked everything plays, and once you pick genres
   and/or decades only those are queued — in programs, in the flat shuffle and in
   the library browser alike. A selection on the same dimension as the program
-  theme also narrows the *rotation* (picking the 90s stops 2020s programs, not
-  just 2020s songs), while a cross-dimension selection is ANDed into every
-  program's tracks. Decade chips are built from plausible years only (1900–2099,
-  so the junk `0s`/`90s` buckets never appear) and a track with no usable year
-  cannot match a decade: the card tells you how many those are instead of
-  leaving them silently unplayable.
-- **Artist filter.** The *Genres/decades* card's artist field narrows the queue to the
-  artists you list (comma-separated, suggestions from your library, blank =
-  every artist). It composes with the genre chips and the search box; when it
-  names a single band the artist-run rule cannot hold, and the *Programs* card
-  says "artist limit relaxed" instead of claiming it.
-- **One artist may not come back too soon.** `playback.artist_gap` (default
-  **10**) holds an artist out of the queue until 10 tracks have played since its
-  own last song — across programs, across refills and against what has already
-  played, not just within one program. It is the rule that stops the same band
-  turning up in every second program: the no-long-runs cap alone still allowed
-  *X … Y X … Z X*. It is *stricter* than the cap, so with a 10-track gap two
-  songs by one band in a row cannot happen at all. Measured on the 10,158-track
-  library with a live queue: **0 violations in 63 songs, the closest an artist
-  came back was exactly 10**, longest artist run 1. A theme that cannot fill its
-  program without bringing a band back inside the gap is *skipped* for that round
-  (your "not enough songs for this genre/band — skip to another program" rule)
-  instead of repeating itself; spacing needs at least as many distinct artists in
-  the selection as the gap, and with fewer (a single-band filter) the builder
-  plays the longest-absent artist and the *Programs* card reports **artist
-  spacing relaxed** plus how often it gave way in the queue that is waiting.
-  Adjustable in the *Programs* card, `0` disables it.
-- **Programs scale with their theme.** `playback.program.size` (default **6**)
-  is the *ceiling*, taken by the biggest theme; every other theme runs for a
-  proportional share of it (a theme with half the tracks gets half the run,
-  never less than `playback.program.min_size`, default **2**). A 30-track genre
-  therefore gets a short program instead of being skipped for not filling six
-  songs, and the queue spends most of its time in the genres that can actually
-  sustain a long run. Each chip in the *Programs* card shows its theme's run
-  length. On the 10,158-track library that means Rock (2,840 tracks) runs 6,
-  Electronic (1,093) runs 3, and Pop, Jazz, Dnb, Dance and the rest of the
-  rotation run 2 — measured live, where a 63-song queue came out as
-  `Rock:6 · … · Jazz:2 · Trip Hop:2`.
-- **No repeats in an evening.** `playback.repeat_window` (default **50**) keeps
-  every song played in the last N plays — and everything already queued — out of
-  the playlist, in every mode. If the eligible pool is smaller than the window
-  (a narrow artist/genre filter, or a small library) the window shrinks by
-  halves down to 2 songs rather than being dropped, so the station never falls
-  back to "anything goes" (which could repeat a song immediately) and a filter
-  is never silently replaced by the whole library. Measured on a 10,158-track
-  library over 600 songs: with a 50-song window the closest a song ever came
-  back was 64 plays later (211 with a 200-song window). Adjustable in the
-  *Programs* card, `0` disables it.
+  theme also narrows the *rotation*; a cross-dimension selection is ANDed into
+  every program's tracks.
+- **Artist filter.** The *Genres/decades* card's artist field narrows the queue
+  to the artists you list (comma-separated, suggestions from your library, blank
+  = every artist). It composes with the genre/decade chips and the search box.
 - **Even volume across the whole library.** Every track is measured once
   (EBU R128 loudness + true peak) and then streamed at its own fixed gain, so
   loud songs are pulled down and quiet ones lifted — without the level being
   ridden inside a song. The measurement pass runs in the background at low
   priority, is resumable, and can be watched and tuned in the *Volume
   normalization* card (see [Volume normalization](#volume-normalization)).
-- **Web control panel** — live now-playing, library browser/search, genre
-  filters, queue editing, presets, and DJ settings. Includes a browser player.
+- **Web control panel** — live now-playing with the DJ's script, library
+  browser/search, the *Genres/decades* selection, queue editing and reordering,
+  the *Programs* card (themes, rules, program length), presets, the loudness
+  card with per-track gains, DJ/voice settings, Icecast control and a running
+  report of temporary data with a **Clean now** button. Includes a browser
+  player.
 - **Your library, untouched** — the scanner only ever reads your music files.
 
 ## Requirements
@@ -140,8 +90,8 @@ Point VLC, Winamp, Sonos, or any browser at the stream URL and it just plays.
 - [Ollama](https://ollama.com) reachable on your network, for DJ scripts
   (optional — the station plays music fine without it; the DJ just stays
   silent until an Ollama endpoint is configured)
-- internet access on first run, to auto-download the Piper voice models
-  (~190 MB for the two default voices)
+- internet access on first run (optional), to auto-download the configured Piper
+  voice — the default is `en_US-amy-medium`, **~63 MB**
 
 ## Install
 
@@ -197,10 +147,11 @@ curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/m
 curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json
 ```
 
-The full catalogue (Amy, Lessac, LibriTTS-R, Ryan, Bryce, plus the Russian
-Irina/Denis/Dmitri/Ruslan) is listed in `app/dj.py` (`VOICE_PROFILES`); every
-one is downloadable from the same HuggingFace repo via the web UI or
-`python -m app.voices --all`.
+The catalogue is **16 curated voices** — 12 English (Amy, Lessac, LibriTTS-R,
+Ryan, Bryce, Sam, Norman, Alan, Jenny, Southern English, HFC male/female) and 4
+Russian (Irina, Denis, Dmitri, Ruslan) — listed in `app/dj.py`
+(`VOICE_PROFILES`) and downloadable from the same HuggingFace repo via the web
+UI. Each is ~63 MB; `python -m app.voices --all` fetches the lot (**~1 GB**).
 
 **The chosen voice sets the DJ's language.** English voices (`en_US-*`,
 `en_GB-*`) make the DJ speak English; picking a Russian voice (Irina, Denis,
@@ -208,6 +159,62 @@ Dmitri, Ruslan) makes the DJ speak Russian — intros are written in Russian and
 spoken natively, with no transliteration. There is no separate "Russian voice"
 setting and no per-song language detection: the whole station speaks the
 language of the voice you select in DJ Settings.
+
+## Playlist rules
+
+Five knobs shape the queue, and they are enforced in every mode — themed
+programs, the flat shuffle, across refills and across restarts:
+
+| Knob (`playback.*`) | Default | Rule |
+|---|---|---|
+| `program.max_consecutive_artist` | `2` | No more than 2 songs in a row by one band (`1` = never back-to-back) |
+| `artist_gap` | `10` | The same artist may not come back within 10 tracks (`0` = off) |
+| `repeat_window` | `50` | A song may not repeat within 50 plays (`0` = off) |
+| `program.size` | `6` | The longest program — taken by the biggest theme |
+| `program.min_size` | `2` | The shortest program — for the smallest theme |
+
+Three more say *what* the queue is built from: `genres`, `decades` and `artists`
+(the *Genres/decades* card), `program.limit` (how many themes take part) and the
+per-theme on/off switches in the *Programs* card. All of them live in
+`data/config.json` and are editable from the web UI.
+
+### How they interact
+
+- **Programs are contiguous runs of one theme**, and the DJ announces every
+  switch — including the first program of a refill, which used to slip through
+  unannounced.
+- **The artist gap beats the no-long-runs cap.** With a 10-track gap, two songs
+  by one band in a row cannot happen at all: the stricter rule wins.
+- **A theme that cannot fill its program is skipped** for that round and another
+  program is used — "not enough songs for this genre/band, move on". The builder
+  tries strict spacing first, then relaxed spacing, then themes that are
+  themselves inside the gap, so a small rotation never goes silent.
+- **Same dimension narrows, cross dimension ANDs.** Picking the 90s while
+  theming programs by decade restricts the rotation to 1990s programs; picking
+  the 90s while theming by genre filters each program's tracks instead.
+- **Spacing needs artists to space.** The gap needs at least as many distinct
+  artists in the selection as the gap itself; with fewer (a single-band filter, a
+  one-artist genre) the builder plays the longest-absent artist and the card
+  reports **artist spacing relaxed**, plus how often it gave way.
+- **The card never claims a rule the queue will break.** `cap_enforceable` and
+  `gap_enforceable` come from the same functions the builder uses, so switching
+  to a single artist makes the summary say "artist limit relaxed" instead of
+  stating a rule that cannot hold.
+- **The station never goes silent.** If no theme can fill a program the queue
+  falls back to a *filtered* flat shuffle (your selection still applies). Only a
+  filter that matches nothing at all falls back to the whole library.
+
+### Measured on the reference library (10,158 tracks)
+
+| What | Result |
+|---|---|
+| Artist gap, live queue | 63 songs, **0 violations**, closest an artist came back was exactly 10, longest run 1 |
+| Artist gap, 10-configuration matrix | held in genre, decade and flat modes; held across program boundaries in artist mode; 18–19 of 20 themes aired per 120 songs, every program exactly its theme's length |
+| No long runs | longest run dropped from 6 songs to 2; 19/20 genre themes, 20/20 artist themes, 8/8 decade themes still fill a program |
+| Program scaling | Rock (2,840 tracks) runs 6, Electronic (1,093) runs 3, the rest of the rotation runs 2 — live queue `Rock:6 … Jazz:2 · Trip Hop:2` |
+| Repeat window | over 600 songs the closest a song came back was 64 plays (211 with a 200-song window) |
+| Decade selection | chips 2000s 3,381 · 1990s 2,391 · 1980s 699 · 1970s 387 · 1960s 157 · 1950s 29 · 1940s 3 · 1930s 2 · 1920s 3, plus 2,527 tracks with no usable year; selecting 80s+90s gave a queue with 0 tracks outside them ("covers 3,090 tracks") |
+
 
 ## Listening
 
@@ -266,7 +273,8 @@ docker compose up -d --build
 Then open **http://localhost:8420**.
 
 On first start the container **auto-downloads the default voice model**
-(English, ~110 MB) into the volume; the DJ can speak out of the box.
+(English, `en_US-amy-medium`, ~63 MB) into the volume; the DJ can speak out of
+the box.
 It also **auto-scans `/music` on first boot** (the container's `music_dir`
 defaults to `/music`, which is where your host library is mounted), so the
 station indexes your music with no setup. If `/music` is empty or unmounted,
@@ -288,30 +296,6 @@ the **Rescan** button in the Library panel (or change the path there).
 - Music is mounted read-only at `/music` (override with the `music_dir` config
   in the web UI if you want a different in-container path).
 
-### Tuning (`.env`)
-
-| Key | Default | Meaning |
-|-----|---------|---------|
-| `HTTP_PORT` | `8420` | Host port published for the UI + stream |
-| `MUSIC_DIR` | `/mnt/mp3` | **Host** path to your music (mounted `:ro` at `/music`) |
-| `VDJ_LOG_LEVEL` | `info` | Log verbosity |
-| `VDJ_NO_VOICE_DOWNLOAD` | `0` | `1` = skip the first-run voice download |
-| `VDJ_ICECAST_ENABLED` | `1` | `0` disables Icecast delivery (browser player still works) |
-| `ICECAST_PORT` | `8008` | Icecast listen **and** published host port (both sides of the mapping — change together) |
-| `ICECAST_MOUNT` | `virtualdj` | Mountpoint external players open (`http://<host>:<port>/<mount>`) |
-| `ICECAST_SOURCE_PASSWORD` | `hackme` | Relay password the app's pusher uses to connect to Icecast |
-| `ICECAST_PUBLIC_HOST` | _blank_ | Host shown in the web UI's stream URL (blank = derive from the browser) |
-| `ICECAST_ADMIN_PASSWORD` | `admin` | Icecast admin/status password (loopback-only) |
-| `ICECAST_RELAY_PASSWORD` | = source password | Icecast relay password (loopback-only) |
-| `VDJ_ICECAST_HOSTNAME` | `virtual-dj` | Hostname Icecast reports in its status page (cosmetic) |
-| `VDJ_MUSIC_DIR` | `/music` | Music folder **inside** the container (change with the volume mapping) |
-| `VDJ_OLLAMA_URL` | _unset_ | Ollama endpoint (e.g. `http://host-gateway:11434` for host Ollama) |
-| `VDJ_OLLAMA_MODEL` | _unset_ | Model for DJ scripts |
-
-An **empty** value is treated as unset (the bundled compose forwards
-`"${VAR:-}"`, so an undefined entry arrives as `""`) — defaults are never
-silently blanked, and a blank numeric value cannot crash the app.
-
 ### Reaching an Ollama on the host
 
 If Ollama runs on the Docker host, point the container at it with
@@ -328,26 +312,95 @@ over. The first boot after an upgrade will reuse the already-downloaded voices.
 
 ## Configuration
 
-Settings live in `data/config.json` (created on first run, never committed).
-The web UI writes this same file — you rarely need to edit it by hand.
+Three layers, in increasing precedence:
 
-A few env vars override the defaults at first boot, useful for containers:
+| Layer | Holds | Notes |
+|---|---|---|
+| `.env` | docker compose inputs: host ports, the host music path, Icecast credentials, worker counts | only read by `docker-compose.yml`; it maps them into the container's environment |
+| container env (`VDJ_*`) | first-boot defaults the app reads directly | set by compose, or `docker run -e ...`; a value already saved in `config.json` wins over both |
+| `data/config.json` | everything the web UI writes — the app's live settings | created on first run, never committed, survives restarts and upgrades |
+
+So: change a host port or a mount in `.env`, change *behaviour* in the web UI (or
+`config.json`). An **empty** value always means "unset": the bundled compose
+forwards `"${VAR:-}"`, and a blank string neither clobbers a default nor crashes
+the app (a blank numeric value used to raise `int("")` at import).
+
+### `.env` (docker compose)
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `HTTP_PORT` | `8420` | Host port published for the UI + stream |
+| `MUSIC_DIR` | `/mnt/mp3` | **Host** path to your music (mounted `:ro` at `/music`) |
+| `VDJ_LOG_LEVEL` | `info` | Log verbosity (`debug`, `info`, `warning`, `error`) |
+| `VDJ_NO_VOICE_DOWNLOAD` | `0` | `1` = skip the first-run voice download |
+| `VDJ_ICECAST_ENABLED` | `1` | `0` disables Icecast delivery (the browser player still works) |
+| `ICECAST_PORT` | `8008` | Icecast listen **and** published host port (both sides of the mapping — change together) |
+| `ICECAST_MOUNT` | `virtualdj` | Mountpoint external players open (`http://<host>:<port>/<mount>`) |
+| `ICECAST_SOURCE_PASSWORD` | `hackme` | Relay password the app's pusher uses to connect to Icecast |
+| `ICECAST_PUBLIC_HOST` | _blank_ | Host shown in the web UI's stream URL (blank = derive from the browser) |
+| `ICECAST_ADMIN_PASSWORD` | `admin` | Icecast admin/status password (loopback-only) |
+| `ICECAST_RELAY_PASSWORD` | = source password | Icecast relay password (loopback-only) |
+| `VDJ_ICECAST_HOSTNAME` | `virtual-dj` | Hostname Icecast reports in its status page (cosmetic) |
+| `VDJ_MUSIC_DIR` | `/music` | Music folder **inside** the container (change with the volume mapping) |
+| `VDJ_LOUDNESS_WORKERS` | `2` | Parallel loudness analyses (one ffmpeg each) |
+| `VDJ_OLLAMA_URL` | _unset_ | Ollama endpoint (e.g. `http://host-gateway:11434` for host Ollama) |
+| `VDJ_OLLAMA_MODEL` | _unset_ | Model used for DJ scripts |
+
+### In-container environment overrides
+
+Useful for `docker run` / a non-compose install; the web UI writes to
+`config.json` instead:
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `VDJ_MUSIC_DIR` | `~/Music` | Initial music folder |
+| `VDJ_DATA_DIR` | `./data` | Where state is kept (config, DB, voices, logs, cache) |
+| `VDJ_DB_PATH` | `$VDJ_DATA_DIR/vdj.sqlite3` | Library database file |
+| `VDJ_MUSIC_DIR` | `~/Music` | Initial music folder (the container image sets `/music`) |
 | `VDJ_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama endpoint |
 | `VDJ_OLLAMA_MODEL` | `qwen3.5:9b` | Model used for DJ scripts |
-| `VDJ_DATA_DIR` | `./data` | Where state is kept (config, DB, voices) |
-| `VDJ_DB_PATH` | `$VDJ_DATA_DIR/vdj.sqlite3` | Library database file |
-| `VDJ_HOST` / `VDJ_PORT` | `0.0.0.0` / `8420` | Bind address and port (the compose mapping assumes 8420) |
+| `VDJ_HOST` / `VDJ_PORT` | `0.0.0.0` / `8420` | Bind address and port |
 | `VDJ_LOG_LEVEL` | `info` | Console log verbosity |
-| `VDJ_NO_VOICE_DOWNLOAD` | `0` | Set to `1` to skip the first-run voice download |
-| `VDJ_LOUDNESS_WORKERS` | `2` | Parallel loudness analyses (raise near your core count for a faster first pass) |
+| `VDJ_NO_VOICE_DOWNLOAD` | `0` | `1` = skip the first-run voice download |
+| `VDJ_LOUDNESS_WORKERS` | `2` | Parallel loudness analyses |
+| `VDJ_ICECAST_*` | see above | The Icecast settings compose forwards |
 
-An empty value means "unset": the bundled compose forwards `"${VAR:-}"`, so a
-variable you leave blank in `.env` arrives as an empty string and the default is
-used (a blank numeric value cannot crash the app either).
+### `data/config.json`
+
+The sections the web UI does not already document elsewhere in this file:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `music_dir` | `~/Music` (`/music` in the container) | Where the library lives |
+| `voices_dir` | _blank_ = `$VDJ_DATA_DIR/voices` | Where Piper voice models are kept (point it at a bigger disk) |
+| `playback.shuffle` | `true` | Flat shuffle when programs are off |
+| `playback.genres` / `playback.decades` / `playback.artists` | `[]` | The *Genres/decades* card's selection: empty = everything |
+| `playback.search` | `""` | Free-text filter applied to every queue fill |
+| `playback.program.*` | see [Playlist rules](#playlist-rules) | Theming, program length, artist rules |
+| `playback.program.disabled.{genre,artist,decade}` | `[]` | Themes switched off in the *Programs* card (a stored exclusion list, so a new genre starts ON) |
+| `dj.enabled` | `true` | Speak between tracks at all |
+| `dj.voice` | `en_US-amy-medium` | Piper voice — also picks the DJ's language |
+| `dj.style` | _warm radio host_ | The LLM persona |
+| `dj.talk_min` / `dj.talk_max` | `2` / `4` | Tracks between DJ breaks (randomized) |
+| `dj.sent_min` / `dj.sent_max` | `1` / `3` | Sentences per DJ line |
+| `dj.speed` | `1.0` | Piper speaking rate |
+| `dj.gain_db` | `0.0` | Trim applied to the voice only |
+| `dj.noise_scale` | `0.667` | Piper expressiveness |
+| `dj.prefetch_depth` | `3` | DJ lines rendered ahead of playback |
+| `llm.enabled` / `llm.base_url` / `llm.model` | `true` / `127.0.0.1:11434` / `qwen3.5:9b` | The Ollama endpoint used for scripts |
+| `llm.temperature` / `llm.retries` / `llm.timeout_s` | `0.7` / `2` / `120` | Sampling and resilience |
+| `stream.bitrate_kbps` | `128` | MP3 bitrate of the broadcast |
+| `stream.sample_rate` / `stream.channels` | `44100` / `2` | Encoder output format |
+| `stream.station_name` | `Virtual DJ` | Shown by players and in Icecast |
+| `icecast.enabled` | `false` | Stream through the bundled Icecast as well (the *Streaming* card) |
+| `icecast.port` / `icecast.mount` / `icecast.public_host` | `8008` / `virtualdj` / _blank_ | Listen port, mountpoint, advertised host |
+| `icecast.source_password` / `hostname` / `host` | `hackme` / `virtual-dj` / `127.0.0.1` | Credentials and identity |
+| `enrich.enabled` | `true` | MusicBrainz/Wikipedia lookups for DJ facts |
+| `enrich.timeout_s` / `enrich.user_agent` | `15` / `VirtualDJ/1.0 …` | Lookup politeness settings |
+| `websearch.enabled` / `websearch.timeout_s` | `true` / `12` | Fallback web lookups for missing metadata |
+| `ai.free_text_genre` | `true` | Let the local LLM fill genres web lookups miss |
+
+`cache.*`, `logging.*` and `loudness.*` each have their own table below.
+
 
 ### Temporary data (cleaned up automatically)
 
@@ -416,8 +469,8 @@ queue is a database query, restarting the app resumes the pass instead of
 starting over.
 
 The web UI's **Volume normalization** card shows library-wide progress
-(`6,772 of 10,158 measured (67%)` with a live bar, the ETA and the last analyzed
-file) and puts each track's measured gain next to it in the library list. Its
+(`6,772 of 10,158 measured (67%)` on the reference library — your numbers will
+differ — with a live bar, the ETA and the last analyzed file) and puts each track's measured gain next to it in the library list. Its
 buttons do different things:
 
 | button | what it does |
@@ -471,13 +524,26 @@ Edit `User=`, `WorkingDirectory=`, and the `ExecStart` path first.
 
 | Module | Role |
 |--------|------|
-| `app/library.py` | Filesystem scan + tag extraction (mutagen) into SQLite |
-| `app/enrich.py` | MusicBrainz / Wikipedia lookups, cached on disk |
-| `app/dj.py` | Prompt building, Ollama call, Piper synthesis |
-| `app/scheduler.py` | Queue, genre/artist filters, shuffle, DJ cadence, prefetch |
-| `app/stream.py` | `Broadcaster` — ffmpeg encode, frame alignment, client fan-out |
-| `app/server.py` | FastAPI: `/stream.mp3`, REST API, WebSocket now-playing |
+| `app/config.py` | `data/config.json` defaults + the env bridge (empty value = unset), path resolution (`DATA_DIR`, `voices_dir()`, `ensure_dirs`) |
+| `app/db.py` | SQLite schema and queries: tracks, play history, loudness, misses |
+| `app/library.py` | Filesystem scan + tag extraction (mutagen); **every queue-level rule lives here** — `query_tracks`, `interleave_artists` (cap + gap), `artist_positions`, `repeat_window`, `program_size_for`, the theme list |
+| `app/enrich.py` | MusicBrainz / Wikipedia lookups (language-aware, misses cached) |
+| `app/ai_meta.py` | LLM-assisted metadata repair (romanisation, missing genres) |
+| `app/websearch.py` | Fallback web lookups for metadata the APIs miss |
+| `app/dj.py` | Prompt building, Ollama call, Piper synthesis, voice catalogue |
+| `app/voices.py` | Piper voice download / verification / listing |
+| `app/scheduler.py` | The queue: themed programs, filtering, DJ cadence, DJ prefetch |
+| `app/stream.py` | `Broadcaster` — ffmpeg encode, frame alignment, client fan-out, failure breaker |
+| `app/loudness.py` | EBU R128 measurement, the worker pool, per-track gain |
+| `app/icecast_server.py` | Renders `icecast.xml`, supervises the bundled Icecast2 |
+| `app/icecast.py` / `app/icecast_metadata.py` | Relay pusher + now-playing metadata to Icecast |
+| `app/maintenance.py` | Housekeeping: prunes the DJ cache, abandoned partials, bounded by `cache.*` |
+| `app/textq.py` | Announcement text queue (what the DJ is about to say) |
+| `app/server.py` | FastAPI: `/stream.mp3`, the REST API, WebSocket now-playing |
+| `app/main.py` | Entry point (`python -m app.main`) |
 | `web/` | Control panel (plain JS, no build step) |
+| `tests/` | Pytest; the playlist rules have their own matrix script in the project skill |
+
 
 ### How the stream stays smooth
 
@@ -498,17 +564,20 @@ The stream endpoint is a raw ASGI response on purpose — Starlette's
 ## Development
 
 ```bash
-.venv/bin/python -m pytest tests/ -q
+.venv/bin/python -m pytest tests/ -q      # 303 tests, ~3.5 minutes
 ```
 
-The suite covers tag parsing, DJ prompt/fact grounding, scheduler cadence,
-voice downloading, and end-to-end streaming against a real server — including
-decoding the live stream with ffmpeg across forced track switches to assert
-zero decode errors. Tests use temp directories and never touch your library.
+The suite covers tag parsing, DJ prompt/fact grounding, scheduler cadence and
+prefetching, voice downloading, loudness measurement, the env→config contract
+(a subprocess import with the exact environment compose produces), the
+maintenance sweep (including what must never be pruned), and end-to-end
+streaming against a real server — decoding the live stream with ffmpeg across
+forced track switches to assert zero decode errors. Tests use temp directories
+and never touch your library.
 
-> Note for `hermes verify` / `uv` users: activate the venv first
-> (`source .venv/bin/activate`), since the detected recipe invokes bare
-> `pytest` and `uvicorn`.
+> Run it through the venv interpreter (as above) rather than a bare `pytest`:
+> this repo shares a workspace with other projects, and a bare `pytest` can pick
+> up their config and fail on collection.
 
 ## License
 

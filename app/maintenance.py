@@ -93,7 +93,7 @@ def cache_stats() -> dict[str, Any]:
         "dj_oldest_hours": round((time.time() - min((_mtime(p) for p in dj), default=time.time())) / 3600, 1),
         "stale_files": len(stale),
         "stale_bytes": sum(_size(p) for p in stale),
-        "voices_bytes": sum(_size(p) for p in _files(config.VOICES_DIR)),
+        "voices_bytes": sum(_size(p) for p in _files(config.voices_dir())),
         "enabled": bool(config.get("cache.enabled", True)),
         "interval_minutes": int(config.get("cache.cleanup_interval_minutes", 10) or 10),
         "keep_files": int(config.get("cache.dj_keep_files", 100) or 0),
@@ -109,7 +109,7 @@ def _stale_files() -> list[Path]:
     grace = float(config.get("cache.tmp_grace_minutes", 60) or 0) * 60
     cutoff = time.time() - grace
     found: list[Path] = []
-    for directory in (config.DATA_DIR, config.CACHE_DIR, config.VOICES_DIR):
+    for directory in (config.DATA_DIR, config.CACHE_DIR, config.voices_dir()):
         for path in _files(directory, STALE_SUFFIXES):
             if _mtime(path) < cutoff:
                 found.append(path)

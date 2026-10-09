@@ -72,7 +72,7 @@ def _download_file(url: str, dest: Path, timeout: float = 120.0) -> None:
 def voice_model_path(voice: str | None = None) -> Path | None:
     """Absolute path to ``voice``'s ``.onnx`` if present, else ``None``."""
     name = voice or config.get("dj.voice", "en_US-amy-medium")
-    voices_dir = Path(config.get("voices_dir", config.VOICES_DIR))
+    voices_dir = config.voices_dir()
     path = voices_dir / f"{name}.onnx"
     return path if path.exists() else None
 
@@ -83,7 +83,7 @@ def download_voice(voice: str, timeout: float = 180.0) -> Path:
     Raises on network/HTTP failure. Returns the path to the ``.onnx`` file.
     """
     onnx_url, json_url = _voice_urls(voice)
-    out_dir = Path(config.get("voices_dir", config.VOICES_DIR))
+    out_dir = config.voices_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
     onnx_path = out_dir / f"{voice}.onnx"
     json_path = out_dir / f"{voice}.onnx.json"

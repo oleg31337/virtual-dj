@@ -1,19 +1,41 @@
 {
   "_comment": "Copy to data/config.json and edit. Everything here is also editable from the web UI; the UI writes this same file. All keys are optional — anything omitted falls back to the defaults in app/config.py.",
+  "_strict_writes": "PUT /api/config refuses keys the app does not read (HTTP 422 + the offending paths), so a typo cannot be stored and silently ignored. Keys starting with an underscore are comments and are ignored, on disk only.",
 
   "music_dir": "/path/to/your/mp3s",
+  "voices_dir": "",
+  "_voices_dir": "Where Piper voice models are kept. Blank = $VDJ_DATA_DIR/voices (the volume). Set it to park ~1 GB of voices on another disk.",
 
   "llm": {
+    "_comment": "Ollama, for the talking DJ. enabled=false keeps the music playing with no spoken breaks.",
     "enabled": true,
     "base_url": "http://127.0.0.1:11434",
-    "model": "qwen3.5:9b"
+    "model": "qwen3.5:9b",
+    "temperature": 0.7,
+    "timeout_s": 120,
+    "retries": 2
   },
 
   "ai": {
+    "_comment": "Let the local LLM fill in metadata the web lookups miss (missing genres, romanised titles for corrupt tags).",
     "free_text_genre": true
   },
 
+  "websearch": {
+    "_comment": "Fallback web lookups for metadata MusicBrainz/iTunes do not have.",
+    "enabled": true,
+    "timeout_s": 12
+  },
+
+  "enrich": {
+    "_comment": "MusicBrainz / Wikipedia facts for the DJ's introductions (cached on disk).",
+    "enabled": true,
+    "timeout_s": 15,
+    "user_agent": "VirtualDJ/1.0 (https://github.com/virtual-dj/virtual-dj; self-hosted personal radio)"
+  },
+
   "dj": {
+    "_comment": "The voice. voice also picks the DJ's language (an en_* voice speaks English, ru_* Russian) — there is no separate language setting and no per-song detection.",
     "enabled": true,
     "talk_min": 2,
     "talk_max": 4,
@@ -21,11 +43,17 @@
     "sent_max": 3,
     "style": "warm, witty late-night radio host",
     "voice": "en_US-amy-medium",
-    "speed": 1.0
+    "speed": 1.0,
+    "gain_db": 0.0,
+    "noise_scale": 0.667,
+    "prefetch_depth": 3
   },
 
   "stream": {
+    "_comment": "The MP3 broadcast itself (the browser player and /stream.mp3).",
     "bitrate_kbps": 128,
+    "sample_rate": 44100,
+    "channels": 2,
     "station_name": "Virtual DJ"
   },
 
@@ -42,16 +70,15 @@
   },
 
   "icecast": {
-    "_comment": "Icecast delivery for external players (Winamp / VLC / Sonos). The app runs a managed icecast2 and relays the stream into it. In Docker these come from the .env ICECAST_* / VDJ_ICECAST_* vars; on bare metal set them here. public_port must equal port for the single-container setup.",
-    "enabled": true,
+    "_comment": "Icecast delivery for external players (Winamp / VLC / Sonos). The app runs a managed icecast2 and relays the stream into it. enabled defaults to FALSE (the browser player needs no Icecast) — the web UI's Streaming card switches it on. In Docker these come from the .env ICECAST_* / VDJ_ICECAST_* vars; on bare metal set them here. public_port must equal port for the single-container setup.",
+    "enabled": false,
+    "host": "127.0.0.1",
     "port": 8008,
     "mount": "virtualdj",
     "public_port": 8008,
-    "public_host": ""
-  },
-
-  "enrich": {
-    "enabled": true
+    "public_host": "",
+    "hostname": "virtual-dj",
+    "source_password": "hackme"
   },
 
   "cache": {
@@ -72,6 +99,7 @@
   },
 
   "playback": {
+    "_comment": "The playlist rules. Each one is enforced in every mode — themed programs, the flat shuffle, across refills — and the Programs card reports when the current selection makes one unenforceable. See the README's Playlist rules section for what wins over what.",
     "shuffle": true,
     "repeat_window": 50,
     "_repeat_window": "Don't play the same song again for at least this many plays (0 = off).",
@@ -84,13 +112,19 @@
     "artists": [],
     "search": "",
     "program": {
-      "_comment": "size is the CEILING for a program: every theme runs for a share of it proportional to how many tracks it has, never less than min_size. Artist themes are additionally capped at max_consecutive_artist.",
+      "_comment": "size is the CEILING for a program: every theme runs for a share of it proportional to how many tracks it has, never less than min_size. Artist themes are additionally capped at max_consecutive_artist. Strategy is genre | artist | decade; limit is how many themes (biggest by track count) take part.",
       "enabled": true,
       "size": 6,
       "min_size": 2,
       "strategy": "genre",
       "limit": 20,
-      "max_consecutive_artist": 2
+      "max_consecutive_artist": 2,
+      "disabled": {
+        "_comment": "Themes switched off in the Programs card, stored as an exclusion list so a genre/artist/decade that appears after a rescan starts ON.",
+        "genre": [],
+        "artist": [],
+        "decade": []
+      }
     }
   }
 }

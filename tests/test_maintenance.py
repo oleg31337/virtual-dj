@@ -111,6 +111,25 @@ def test_stale_partials_go_but_an_in_flight_download_stays(data_dir):
     assert not stale.exists(), "an abandoned partial must be"
 
 
+def test_voices_dir_defaults_to_the_data_dir_and_is_overridable(tmp_path, monkeypatch):
+    """`voices_dir` is a real knob: declared, resolvable, and honoured everywhere.
+
+    Regression: the code read `config.get("voices_dir", config.VOICES_DIR)` while
+    DEFAULTS never declared the key — the strict PUT /api/config rejected it as
+    unknown, maintenance kept reporting/sweeping the default directory, and a
+    blank value would have resolved to Path("") = the working directory.
+    """
+    assert config.voices_dir() == config.VOICES_DIR, "empty voices_dir = the default"
+    assert config.voices_dir().name == "voices"
+
+    monkeypatch.setattr(config, "_CACHE", {"voices_dir": str(tmp_path / "elsewhere")})
+    assert config.voices_dir() == tmp_path / "elsewhere"
+    for blank in ("   ", ""):
+        monkeypatch.setattr(config, "_CACHE", {"voices_dir": blank})
+        assert config.voices_dir() == config.VOICES_DIR, (
+            f"a blank voices_dir ({blank!r}) must fall back, not become Path('')")
+
+
 def test_voice_models_are_never_touched(data_dir):
     model = config.VOICES_DIR / "en_US-amy-medium.onnx"
     model.write_bytes(b"model")
