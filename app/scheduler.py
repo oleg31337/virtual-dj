@@ -249,6 +249,8 @@ class Scheduler:
         search = playback.get("search", "") or ""
         genres_filter = playback.get("genres") or None
         artists_filter = playback.get("artists") or None
+        decades_filter = [int(d) for d in (playback.get("decades") or [])
+                          if str(d).strip() != ""]
         excludes = library.program_exclusions()
 
         themes = library.program_selection(strategy, size, limit)["themes"]
@@ -273,6 +275,13 @@ class Scheduler:
             wanted = {str(a).strip().lower() for a in artists_filter}
             themes = [t for t in themes
                       if str(t.get("artist") or "").strip().lower() in wanted]
+        if strategy == "decade" and decades_filter:
+            # Same dimension as the theme, so the selection NARROWS the
+            # rotation (exactly like a genre selection does for genre themes):
+            # switching the 2020s off in the card must also stop a 2020s
+            # program, not just the flat queue.
+            themes = [t for t in themes
+                      if int(t.get("decade") or 0) in decades_filter]
         if not themes:
             return []
 
@@ -329,8 +338,8 @@ class Scheduler:
                 program, ordered = self._build_one_program(
                     theme, strategy, size, biggest,
                     max_consec, gap, positions, run_artist, run_len, block,
-                    excludes, genres_filter, artists_filter, search, offset,
-                    strict)
+                    excludes, genres_filter, artists_filter, decades_filter,
+                    search, offset, strict)
                 if not ordered:
                     continue
                 used.add(theme_id)
@@ -380,6 +389,7 @@ class Scheduler:
         excludes: dict[str, Any],
         genres_filter: list[str] | None,
         artists_filter: list[str] | None,
+        decades_filter: list[int] | None,
         search: str,
         offset: int,
         strict: bool = False,
@@ -402,6 +412,8 @@ class Scheduler:
             kwargs["genres"] = list(genres_filter)
         if artists_filter and strategy != "artist":
             kwargs["artists"] = list(artists_filter)
+        if decades_filter and strategy != "decade":
+            kwargs["decades"] = list(decades_filter)
         # A program's length comes from its theme's share of the library: the
         # biggest theme runs the full `size`, a 30-track genre runs briefly
         # instead of being skipped for not filling `size`. Artist themes are
@@ -507,6 +519,7 @@ class Scheduler:
             "search": playback.get("search", "") or "",
             "genres": playback.get("genres") or None,
             "artists": playback.get("artists") or None,
+            "decades": [int(d) for d in (playback.get("decades") or [])] or None,
             "limit": fetch,
             "random_order": bool(playback.get("shuffle", True)),
             **excludes,

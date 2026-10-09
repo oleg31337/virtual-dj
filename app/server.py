@@ -439,6 +439,20 @@ def api_genres():
     return library.list_genres()
 
 
+@app.get("/api/library/decades")
+def api_decades():
+    """Decade chips for the Genres/decades card, newest first.
+
+    Same shape as `/api/library/genres`: `{"decade": 1990, "n": 1234}` plus the
+    selection summary (how many tracks the selection covers, and how many have
+    no usable year — those cannot match a decade and the card says so).
+    """
+    return {
+        "decades": library.list_decades(),
+        **library.decade_selection(),
+    }
+
+
 @app.get("/api/library/artists")
 def api_artists(limit: int = 500):
     """Artist choices for the queue's artist filter (biggest first)."""
@@ -447,11 +461,15 @@ def api_artists(limit: int = 500):
 
 @app.get("/api/library/tracks")
 def api_tracks(search: str = "", genre: str = "", artist: str = "",
+               decade: str = "", decades: str = "",
                limit: int = 200, offset: int = 0):
+    """The Library browser's track list, narrowed by the card's selection."""
     return library.query_tracks(
         search=search,
         genres=[g for g in genre.split(",") if g] or None,
         artists=[a for a in artist.split(",") if a] or None,
+        decade=int(decade) if decade.strip() else None,
+        decades=[int(d) for d in decades.split(",") if d.strip()] or None,
         limit=limit, offset=offset,
     )
 

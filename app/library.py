@@ -654,12 +654,47 @@ def list_decades() -> list[dict[str, Any]]:
         "FROM tracks WHERE missing=0 AND excluded=0 "
         "AND year IS NOT NULL AND TRIM(year) <> '' "
         "AND CAST(year AS INTEGER) BETWEEN 1900 AND 2099 "
-        "GROUP BY decade ORDER BY n DESC"
+        "GROUP BY decade ORDER BY decade DESC"
     ).fetchall()
+    # Newest decade first: a timeline reads left to right in the card, and the
+    # programs card shows the same order (both call list_decades).
     return [
         {"decade": int(r["decade"]), "n": r["n"]}
         for r in rows if r["decade"] is not None
     ]
+
+
+def decade_selection(decades: list[int] | None = None) -> dict[str, Any]:
+    """The decade filter as the card and the queue builder both see it.
+
+    Mirrors ``genre`` handling: the list is the SELECTION (empty = every
+    decade). Also reports how many playable tracks carry no usable year, because
+    those are unreachable while a selection is active and the card must say so
+    instead of letting them look lost.
+    """
+    selected = [int(d) for d in (decades if decades is not None
+                                else (config.get("playback", {}) or {}).get("decades")
+                                or [])]
+    row = db.connect().execute(
+        "SELECT COUNT(*) AS n FROM tracks WHERE missing=0 AND excluded=0 "
+        "AND (year IS NULL OR TRIM(year) = '' "
+        "OR CAST(year AS INTEGER) NOT BETWEEN 1900 AND 2099)"
+    ).fetchone()
+    conn = db.connect()
+    selected_tracks = 0
+    if selected:
+        placeholders = ",".join("?" * len(selected))
+        selected_tracks = conn.execute(
+            "SELECT COUNT(*) AS n FROM tracks WHERE missing=0 AND excluded=0 "
+            "AND (year IS NOT NULL AND TRIM(year) <> '' "
+            f"AND (CAST(year AS INTEGER) / 10) * 10 IN ({placeholders}))",
+            selected,
+        ).fetchone()["n"]
+    return {
+        "selected": selected,
+        "selected_tracks": int(selected_tracks or 0),
+        "undated": int(row["n"] or 0),
+    }
 
 
 def program_themes(strategy: str = "genre") -> list[dict[str, Any]]:
@@ -801,6 +836,14 @@ def artist_run_cap() -> int:
         return 2
 
 
+def _selected_decades(playback: dict[str, Any] | None = None) -> list[int] | None:
+    """The decade selection as `query_tracks(decades=...)` wants it."""
+    playback = playback if playback is not None else (config.get("playback", {}) or {})
+    selected = [int(d) for d in (playback.get("decades") or [])
+                if str(d).strip() != ""]
+    return selected or None
+
+
 def cap_is_enforceable(cap: int | None = None) -> bool:
     """Can the no-long-runs rule hold under the filters the user selected?
 
@@ -821,6 +864,7 @@ def cap_is_enforceable(cap: int | None = None) -> bool:
         search=playback.get("search", "") or "",
         genres=(playback.get("genres") or None),
         artists=(artists or None),
+        decades=_selected_decades(playback),
         limit=500,
         **program_exclusions(),
     )
@@ -846,6 +890,7 @@ def gap_is_enforceable(gap: int | None = None) -> bool:
         search=playback.get("search", "") or "",
         genres=(playback.get("genres") or None),
         artists=(artists or None),
+        decades=_selected_decades(playback),
         limit=500,
         **program_exclusions(),
     )
@@ -1093,6 +1138,7 @@ def query_tracks(
     genres: list[str] | None = None,
     artists: list[str] | None = None,
     decade: int | None = None,
+    decades: list[int] | None = None,
     limit: int = 200,
     offset: int = 0,
     random_order: bool = False,
@@ -1136,6 +1182,20 @@ def query_tracks(
         hi = lo + 9
         where.append("(year IS NOT NULL AND CAST(year AS INTEGER) BETWEEN ? AND ?)")
         params += [lo, hi]
+
+    if decades:
+        # The Genres/decades card's decade selection: only tracks whose year
+        # falls in a chosen decade. Unlike `exclude_decades` (which must never
+        # drop a year-less track, since such a track has no decade theme to
+        # switch off), a POSITIVE selection means "only these decades", so a
+        # track with no usable year cannot qualify — the card says how many
+        # those are, and they stay reachable with the selection cleared.
+        placeholders = ",".join("?" * len(decades))
+        where.append(
+            "(year IS NOT NULL AND TRIM(year) <> '' "
+            f"AND (CAST(year AS INTEGER) / 10) * 10 IN ({placeholders}))"
+        )
+        params += [int(d) for d in decades]
 
     # Programs switched OFF in the web card must not reach the playlist through
     # ANY path, so exclusions are applied here (the one place every queue fill

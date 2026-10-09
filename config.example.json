@@ -78,6 +78,9 @@
     "artist_gap": 10,
     "_artist_gap": "Don't play the same artist again for at least this many tracks, across programs and refills (0 = off). Needs at least this many distinct artists in the selection to hold exactly.",
     "genres": [],
+    "_genres": "Selection from the Genres/decades card. Empty = every genre; a non-empty list narrows the queue to those genres (and narrows the genre program rotation).",
+    "decades": [],
+    "_decades": "Selection from the Genres/decades card, e.g. [1980, 1990]. Empty = every decade; a non-empty list narrows the queue to those decades (and narrows the decade program rotation). Tracks with no usable year cannot match and are reported by the card.",
     "artists": [],
     "search": "",
     "program": {

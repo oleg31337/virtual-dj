@@ -15,6 +15,7 @@ const state = {
   config: null,
   selected: new Set(),
   activeGenres: new Set(),
+  activeDecades: new Set(),
   programData: null,
   tracks: [],
   playing: false,
@@ -201,6 +202,7 @@ async function loadTracks(search) {
   const q = new URLSearchParams({ limit: '300' });
   if (search) q.set('search', search);
   if (state.activeGenres.size) q.set('genre', [...state.activeGenres].join(','));
+  if (state.activeDecades.size) q.set('decades', [...state.activeDecades].join(','));
   state.tracks = await api(`/api/library/tracks?${q}`);
   const box = $('tracks');
   box.innerHTML = '';
@@ -237,9 +239,60 @@ async function loadGenres() {
       if (state.activeGenres.has(g.genre)) state.activeGenres.delete(g.genre);
       else state.activeGenres.add(g.genre);
       chip.classList.toggle('on');
+      renderDecadeNote();
     };
     box.appendChild(chip);
   }
+}
+
+async function loadDecades() {
+  const data = await api('/api/library/decades');
+  state.decadeData = data;
+  const box = $('decades');
+  if (!box) return;
+  box.innerHTML = '';
+  const decades = data.decades || [];
+  for (const d of decades) {
+    const chip = document.createElement('div');
+    chip.className = 'chip' + (state.activeDecades.has(d.decade) ? ' on' : '');
+    chip.textContent = `${d.decade}s (${fmtNum(d.n)})`;
+    chip.onclick = () => {
+      if (state.activeDecades.has(d.decade)) state.activeDecades.delete(d.decade);
+      else state.activeDecades.add(d.decade);
+      chip.classList.toggle('on');
+      renderDecadeNote();
+    };
+    box.appendChild(chip);
+  }
+  renderDecadeNote();
+}
+
+/* Decade selection feedback: how much the selection covers, and the honest
+ * caveat that a track with no usable year cannot match a decade at all. */
+function renderDecadeNote() {
+  const el = $('filter-note');
+  const label = $('decades-label');
+  const data = state.decadeData;
+  const selected = [...state.activeDecades].sort((a, b) => a - b);
+  if (label) {
+    label.textContent = selected.length
+      ? `Decades — playing ${selected.map((d) => d + 's').join(', ')}`
+      : 'Decades (none selected = every decade)';
+  }
+  if (!el) return;
+  const parts = [];
+  const genres = state.activeGenres ? [...state.activeGenres] : [];
+  if (genres.length) parts.push(`only ${genres.join(', ')}`);
+  const artists = parseArtistList($('filter-artists') ? $('filter-artists').value : '');
+  if (artists.length) parts.push(`only ${artists.join(', ')}`);
+  if (selected.length) {
+    parts.push(`only the ${selected.map((d) => d + 's').join(', ')}`);
+    if (data && data.undated) {
+      parts.push(`${fmtNum(data.undated)} track(s) have no usable year and stay `
+        + 'out until the decade selection is cleared');
+    }
+  }
+  el.textContent = parts.length ? parts.join(' · ') : 'no filter — everything in the library is queued';
 }
 
 async function loadQueue() {
@@ -318,6 +371,7 @@ async function loadConfig() {
   $('enrich-enabled').checked = cfg.enrich.enabled;
   $('shuffle').checked = cfg.playback.shuffle;
   state.activeGenres = new Set(cfg.playback.genres || []);
+  state.activeDecades = new Set(cfg.playback.decades || []);
   // Artist filter (playback.artists). It narrows the queue the same way the genre
   // chips do, and it is what makes the artist-run cap unsatisfiable when it names
   // a single band — the Programs card says so.
@@ -592,16 +646,10 @@ function renderCacheStats(s) {
   el.className = 'meta dim';
 }
 
+/* ONE function owns the Genres/decades card's note (it used to be artist-only;
+ * two writers on one element means the last render wins and the card lies). */
 function renderFilterNote() {
-  const el = $('filter-note');
-  if (!el) return;
-  const artists = parseArtistList($('filter-artists') ? $('filter-artists').value : '');
-  if (!artists.length) {
-    el.textContent = '';
-    return;
-  }
-  el.textContent = `queue limited to ${artists.length} artist${artists.length > 1 ? 's' : ''}: `
-    + artists.join(', ');
+  renderDecadeNote();
 }
 
 function renderProgramSummary() {
@@ -701,7 +749,7 @@ async function pollScan() {
       ? `last scan: +${s.added} new, ${s.updated} updated`
       : 'idle';
     el.className = 'meta dim';
-    loadGenres(); loadHealth(); loadLibraryStats();
+    loadGenres(); loadDecades(); loadHealth(); loadLibraryStats();
     // A scan can add files that still need a loudness measurement — refresh
     // the volume card so its backlog count is never stale.
     loadLoudness();
@@ -947,6 +995,8 @@ function wire() {
       body: JSON.stringify({
         playback: {
           genres: [...state.activeGenres],
+          // Same contract as the genres: an empty list means "every decade".
+          decades: [...state.activeDecades].sort((a, b) => a - b),
           shuffle: $('shuffle').checked,
           search: $('search').value.trim(),
           artists: parseArtistList($('filter-artists') ? $('filter-artists').value : ''),
@@ -954,7 +1004,7 @@ function wire() {
       }),
     });
     await api('/api/queue/clear', { method: 'POST' });
-    loadTracks($('search').value.trim()); loadQueue();
+    loadTracks($('search').value.trim()); loadQueue(); loadDecades();
   };
 
   $('dj-speed').oninput = (e) =>
@@ -1189,7 +1239,7 @@ async function init() {
   // a single bad response can never leave the UI stuck on "connecting…".
   const safe = (p) => Promise.resolve(p).catch((e) => console.warn('loader failed:', e));
   await Promise.all([
-    safe(loadGenres()), safe(loadTracks('')),
+    safe(loadGenres()), safe(loadDecades()), safe(loadTracks('')),
     safe(loadQueue()), safe(loadPresets()), safe(loadHistory()),
     safe(loadHealth()), safe(loadPrograms()), safe(loadLLMConfig()),
     safe(loadLoudness()), safe(loadCacheStats()), safe(loadArtistOptions()),

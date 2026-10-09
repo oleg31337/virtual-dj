@@ -71,7 +71,17 @@ Point VLC, Winamp, Sonos, or any browser at the stream URL and it just plays.
   artist) the cap cannot hold: the queue relaxes it instead of going silent,
   and the *Programs* card summary says **artist limit relaxed** rather than
   claiming a rule the queue is about to break.
-- **Artist filter.** The *Genres* card's artist field narrows the queue to the
+- **Genre and decade selection.** The *Genres/decades* card's chips are a
+  selection: with nothing picked everything plays, and once you pick genres
+  and/or decades only those are queued — in programs, in the flat shuffle and in
+  the library browser alike. A selection on the same dimension as the program
+  theme also narrows the *rotation* (picking the 90s stops 2020s programs, not
+  just 2020s songs), while a cross-dimension selection is ANDed into every
+  program's tracks. Decade chips are built from plausible years only (1900–2099,
+  so the junk `0s`/`90s` buckets never appear) and a track with no usable year
+  cannot match a decade: the card tells you how many those are instead of
+  leaving them silently unplayable.
+- **Artist filter.** The *Genres/decades* card's artist field narrows the queue to the
   artists you list (comma-separated, suggestions from your library, blank =
   every artist). It composes with the genre chips and the search box; when it
   names a single band the artist-run rule cannot hold, and the *Programs* card

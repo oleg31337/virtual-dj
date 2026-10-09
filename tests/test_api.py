@@ -295,6 +295,48 @@ def test_programs_endpoint_reports_the_artist_gap(client, music_dir):
         client.put("/api/config", json={"playback": {"artist_gap": 10}})
 
 
+def test_decades_endpoint_feeds_the_card_and_the_config_round_trips(client):
+    """`/api/library/decades` + `playback.decades` = the card's decade chips.
+
+    Same contract as the genres: an empty selection means every decade, and the
+    payload says how many tracks have no usable year (they cannot match a decade
+    and the card says so rather than letting them look lost).
+    """
+    conn = db.connect()
+    for index, year in enumerate(("1994", "1995", "2021", "")):
+        conn.execute(
+            "INSERT INTO tracks(path,title,artist,album,genre,year,duration,"
+            "mtime,size,missing,excluded,meta_source) VALUES(?,?,?,?,?,?,?,?,?,"
+            "0,0,'tags')",
+            (f"/m/rock/d{index}.mp3", f"D{index}", f"Band {index}", "Al", "Rock",
+             year, 200.0, 1, 1),
+        )
+    conn.commit()
+
+    body = client.get("/api/library/decades").json()
+    decades = [d["decade"] for d in body["decades"]]
+    assert 1990 in decades and 2020 in decades, decades
+    assert 0 not in decades and 90 not in decades, (
+        f"junk buckets must never become chips: {decades}")
+    assert body["selected"] == [], "nothing selected by default"
+    assert body["undated"] >= 1, "the year-less track must be reported"
+    # Newest first, so the card reads as a timeline.
+    assert decades == sorted(decades, reverse=True)
+
+    client.put("/api/config", json={"playback": {"decades": [1990]}})
+    try:
+        assert client.get("/api/config").json()["playback"]["decades"] == [1990]
+        after = client.get("/api/library/decades").json()
+        assert after["selected"] == [1990]
+        assert after["selected_tracks"] >= 2
+        # ...and the browser honours it too.
+        rows = client.get("/api/library/tracks?decades=1990&limit=50").json()
+        assert rows and all(1990 <= int(r["year"]) <= 1999 for r in rows)
+    finally:
+        client.put("/api/config", json={"playback": {"decades": []}})
+    assert client.get("/api/library/decades").json()["selected"] == []
+
+
 def test_programs_endpoint_exposes_the_artist_run_cap(client):
     """The card needs the cap to describe the rule it is enforcing."""
     body = client.get("/api/programs").json()

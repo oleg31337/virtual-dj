@@ -186,6 +186,10 @@ DEFAULTS: dict[str, Any] = {
         "shuffle": True,
         # Active filters applied when auto-filling the queue.
         "genres": [],
+        # Decades selected in the Genres/decades card (e.g. [1980, 1990]).
+        # Empty = every decade; a non-empty list narrows the queue to those
+        # decades (and narrows the decade program rotation, like genres do).
+        "decades": [],
         "artists": [],
         "search": "",
         "program": {

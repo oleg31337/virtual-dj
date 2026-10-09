@@ -43,6 +43,51 @@ def wide_library(tmp_path, monkeypatch):
     db.close()
 
 
+def _insert(conn, path, artist, genre, year, title="Song"):
+    conn.execute(
+        "INSERT INTO tracks(path,title,artist,album,genre,year,duration,"
+        "mtime,size,missing,excluded,meta_source) VALUES(?,?,?,?,?,?,?,?,?,0,0,'tags')",
+        (path, title, artist, "Album", genre, year, 210.0, 1, 1))
+
+
+def test_the_decade_filter_selects_only_those_decades(wide_library):
+    """`playback.decades` narrows the queue the way the genre chips do."""
+    conn = db.connect()
+    _insert(conn, "/m/rock/nineties.mp3", "Band 0", "Rock", "1994", "Nineties")
+    _insert(conn, "/m/rock/twenties.mp3", "Band 1", "Rock", "2021", "Twenties")
+    _insert(conn, "/m/rock/undated.mp3", "Band 2", "Rock", "", "Undated")
+    conn.commit()
+
+    decades = [d["decade"] for d in library.list_decades()]
+    assert 1990 in decades and 2020 in decades, decades
+    assert 0 not in decades and 90 not in decades, (
+        "unparseable/2-digit years must not become '0s'/'90s' decade chips")
+
+    rows = library.query_tracks(decades=[1990], limit=500)
+    assert rows, "the 90s selection matched nothing"
+    assert all(str(r["year"]).isdigit() and 1990 <= int(r["year"]) <= 1999
+               for r in rows), [r["year"] for r in rows]
+    # A track with no usable year cannot be *known* to be from the 90s.
+    assert not any(r["title"] == "Undated" for r in rows)
+
+    both = library.query_tracks(decades=[1990, 2020], limit=500)
+    assert {r["title"] for r in both} >= {"Nineties", "Twenties"}
+    assert library.query_tracks(decades=None, limit=500) != []
+    assert library.query_tracks(decades=[], limit=500), (
+        "an empty selection means every decade, like the genre chips")
+
+
+def test_decade_selection_reports_what_it_covers(wide_library):
+    conn = db.connect()
+    _insert(conn, "/m/rock/a.mp3", "Band 0", "Rock", "1995", "Ninety-five")
+    _insert(conn, "/m/rock/b.mp3", "Band 1", "Rock", "", "No year")
+    conn.commit()
+    info = library.decade_selection([1990])
+    assert info["selected"] == [1990]
+    assert info["selected_tracks"] >= 1
+    assert info["undated"] >= 1, "tracks with no year must be reported, not hidden"
+
+
 def _use(monkeypatch, **playback):
     base = {"shuffle": True, "genres": [], "artists": [], "search": "",
             "program": {"enabled": True, "size": 4, "strategy": "genre"}}
@@ -217,6 +262,51 @@ def test_a_bigger_theme_runs_longer_than_a_smaller_one(wide_library, monkeypatch
 
 
 # --- the queue builder -------------------------------------------------------
+
+def test_the_decade_filter_narrows_every_mode(wide_library, monkeypatch):
+    """Cross-dimension AND, like the genre filter: no mode may ignore it."""
+    conn = db.connect()
+    for index in range(6):
+        _insert(conn, f"/m/rock/ninety-{index}.mp3", f"Nineties {index}", "Rock",
+                "1994", f"Ninety {index}")
+        _insert(conn, f"/m/rock/twenty-{index}.mp3", f"Twenties {index}", "Rock",
+                "2021", f"Twenty {index}")
+    conn.commit()
+
+    for programs, strategy in ((True, "genre"), (True, "artist"), (False, "genre")):
+        _use(monkeypatch, decades=[1990], artist_gap=2,
+             program={"enabled": programs, "size": 3, "strategy": strategy})
+        sched = scheduler.Scheduler()
+        sched.refill(30)
+        items = sched.peek(60)
+        assert items, f"nothing queued with programs={programs} strategy={strategy}"
+        bad = [it["track"]["year"] for it in items
+               if str(it["track"]["year"]).strip() and
+               not 1990 <= int(it["track"]["year"]) <= 1999]
+        assert not bad, f"{len(bad)} track(s) outside the 90s selection: {bad[:3]}"
+
+
+def test_a_decade_selection_narrows_the_decade_rotation(wide_library, monkeypatch):
+    """Same dimension as a decade theme: the selection must narrow the programs.
+
+    Otherwise switching the 2020s off would still air 2020s programs while only
+    hiding them from the flat queue.
+    """
+    conn = db.connect()
+    for index in range(6):
+        _insert(conn, f"/m/rock/ninety-{index}.mp3", f"Nineties {index}", "Rock",
+                "1994", f"Ninety {index}")
+        _insert(conn, f"/m/rock/twenty-{index}.mp3", f"Twenties {index}", "Rock",
+                "2021", f"Twenty {index}")
+    conn.commit()
+    _use(monkeypatch, decades=[1990], artist_gap=2,
+         program={"enabled": True, "size": 3, "strategy": "decade"})
+    sched = scheduler.Scheduler()
+    items = sched._build_programs(6)
+    assert items, "the 90s selection must still produce decade programs"
+    labels = {it["program"]["label"] for it in items}
+    assert labels == {"1990s"}, f"a decade outside the selection aired: {labels}"
+
 
 def test_the_queue_respects_the_gap_across_programs_and_refills(wide_library, monkeypatch):
     _use(monkeypatch, artist_gap=6,
