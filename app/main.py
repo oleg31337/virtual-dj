@@ -47,6 +47,27 @@ def main() -> None:
     if not skip_voice_download:
         _ensure_voices()
 
+    # Say plainly whether the DJ can speak at all. A missing voice model means
+    # Piper has nothing to say with: the breaks are dropped and no more LLM calls
+    # are made for them, so the station looks healthy while you hear no DJ.
+    try:
+        from . import dj as _dj
+        problem = _dj.tts_problem()
+        if problem:
+            log.warning(
+                "DJ voice not ready: %s%s. Music still plays; the DJ stays "
+                "silent. Fix it by picking an installed voice in the web UI's DJ "
+                "card, running `python -m app.voices` to fetch %s, or unsetting "
+                "VDJ_NO_VOICE_DOWNLOAD so it downloads on boot.",
+                problem,
+                " (downloads are DISABLED by VDJ_NO_VOICE_DOWNLOAD)"
+                if skip_voice_download else "",
+                config.get("dj.voice", "en_GB-alan-medium"))
+        else:
+            log.info("DJ voice ready: %s", config.get("dj.voice"))
+    except Exception as exc:  # noqa: BLE001 - never block boot on a check
+        log.debug("could not check the DJ voice: %s", exc)
+
     # Stop the Icecast daemon + pusher promptly on SIGTERM (e.g. `docker stop`)
     # so the open /stream.mp3 connection the pusher holds closes *before*
     # uvicorn drains, keeping shutdown quiet. The lifespan `finally` also

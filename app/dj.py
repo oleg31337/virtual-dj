@@ -675,6 +675,22 @@ def prepare_break(track: dict[str, Any],
     ``program`` (optional) describes the themed program this track opens, so the
     DJ announces the vibe switch ("Next up, a run of Rock...") like a real host.
     """
+    # Check the voice BEFORE the LLM call: without a model Piper cannot speak,
+    # so generating a script only burns the (GPU-backed) LLM and then drops the
+    # break silently. One clear warning, then stay quiet until it is fixed.
+    global _tts_warned
+    problem = tts_problem()
+    if problem:
+        if not _tts_warned:
+            _tts_warned = True
+            log.warning(
+                "DJ breaks are OFF: %s. The station keeps playing music. Fix it "
+                "in the web UI's DJ card (pick a voice marked installed), or run "
+                "`python -m app.voices` to fetch %s, or unset "
+                "VDJ_NO_VOICE_DOWNLOAD so it downloads on boot.",
+                problem, config.get("dj.voice", "en_GB-alan-medium"))
+        return None
+    _tts_warned = False
     script = generate_script(track, previous, program=program)
     if not script:
         return None
@@ -766,9 +782,34 @@ def test_llm(base_url: str | None = None, model: str | None = None,
         return {"ok": False, "text": "", "model": model, "error": str(exc)}
 
 
+# One warning per outage, not one per break: the queue would otherwise repeat
+# the same line every few minutes forever.
+_tts_warned = False
+
+
+def tts_problem(voice: str | None = None) -> str | None:
+    """Why the DJ cannot speak right now, or None when everything is in place.
+
+    Single source of truth for "is the voice usable", so the boot log, the
+    health payload, the web UI and ``prepare_break`` all describe the same
+    state. The DAILY trap this exists for: the configured ``dj.voice`` changed
+    (or the volume has a different model) and nothing plays the breaks any more —
+    the LLM is still called, so the station looks alive while you hear no DJ.
+    """
+    vid = voice or config.get("dj.voice", "en_GB-alan-medium")
+    if not piper_binary():
+        return "the piper binary is missing from this deployment"
+    if voice_model_path(vid) is None:
+        installed = ", ".join(available_voices()) or "none"
+        return f"the voice model for {vid!r} is not installed (have: {installed})"
+    return None
+
+
 def tts_health() -> dict[str, Any]:
+    problem = tts_problem()
     return {
-        "ok": bool(piper_binary() and voice_model_path()),
+        "ok": problem is None,
+        "problem": problem,
         "binary": piper_binary(),
         "voice": config.get("dj.voice"),
         "voices_available": available_voices(),

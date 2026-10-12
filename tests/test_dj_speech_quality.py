@@ -113,6 +113,50 @@ def test_the_cache_key_includes_the_new_knobs(tmp_path, monkeypatch):
     assert len({a.name, b.name, c.name}) == 3
 
 
+def test_a_missing_voice_is_named_and_stops_the_llm_call(monkeypatch, tmp_path, caplog):
+    """The silent-DJ trap: the configured voice has no model file.
+
+    Symptom on a host that pulled a newer default: the LLM still runs (GPU
+    spike), no DJ audio, and nothing in the UI. Now the reason is named in one
+    warning and the LLM call is skipped instead of being wasted.
+    """
+    monkeypatch.setattr(config, "VOICES_DIR", tmp_path / "voices")   # empty
+    monkeypatch.setattr(dj, "piper_binary", lambda: "/usr/bin/piper")
+    monkeypatch.setattr(dj, "_tts_warned", False)
+
+    problem = dj.tts_problem("en_GB-alan-medium")
+    assert problem and "en_GB-alan-medium" in problem, problem
+    assert "not installed" in problem
+
+    called: list[str] = []
+    monkeypatch.setattr(dj, "generate_script",
+                        lambda *a, **k: called.append("llm") or "a script")
+    with caplog.at_level("WARNING", logger="app.dj"):
+        assert dj.prepare_break({"id": 1, "artist": "A", "title": "T"}) is None
+    assert called == [], "no LLM call when the voice cannot speak"
+    assert any("DJ breaks are OFF" in r.getMessage() for r in caplog.records), (
+        f"the reason must be logged once: {caplog.text}")
+
+    # ...and once the model appears, breaks work again (no sticky state).
+    (tmp_path / "voices").mkdir(exist_ok=True)
+    (tmp_path / "voices" / "en_GB-alan-medium.onnx").write_bytes(b"model")
+    monkeypatch.setattr(dj, "voice_model_path",
+                        lambda v=None: (tmp_path / "voices" / f"{v}.onnx"))
+    monkeypatch.setattr(dj, "synthesize", lambda *a, **k: tmp_path / "x.mp3")
+    monkeypatch.setattr(dj, "audio_duration", lambda p: 1.0)
+    monkeypatch.setattr(dj, "db", __import__("app.db", fromlist=["db"]))
+    assert dj.tts_problem("en_GB-alan-medium") is None
+
+
+def test_health_payload_carries_the_reason(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "VOICES_DIR", tmp_path / "voices")
+    monkeypatch.setattr(dj, "piper_binary", lambda: "/usr/bin/piper")
+    health = dj.tts_health()
+    assert health["ok"] is False
+    assert "en_GB-alan-medium" in health["problem"]
+    assert health["voices_available"] == []
+
+
 def test_the_default_voice_is_the_measured_one():
     """alan-medium moves its pitch ~19 semitones; amy-medium measured ~7."""
     assert config.DEFAULTS["dj"]["voice"] == "en_GB-alan-medium"

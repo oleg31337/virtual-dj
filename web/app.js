@@ -401,7 +401,14 @@ async function loadConfig() {
         : '<option>no voices installed</option>');
   // Show the intonation note for the selected voice.
   const sel = profiles.find((p) => p.id === $('dj-voice').value) || profiles[0];
-  $('dj-voice-note').textContent = sel && sel.note ? sel.note : '';
+  if (sel && sel.installed === false) {
+    // The configured voice has no model file: say so here, where the fix is.
+    $('dj-voice-note').textContent =
+      `⚠ ${sel.name} is not installed yet — the DJ cannot speak with it. `
+      + 'Pick a voice marked installed, or press “Test this voice” to download it.';
+  } else {
+    $('dj-voice-note').textContent = sel && sel.note ? sel.note : '';
+  }
 
   // Program grouping settings.
   $('program-enabled').checked = !!(cfg.playback?.program?.enabled ?? true);
@@ -535,7 +542,10 @@ async function loadHealth() {
     const bits = [
       `${h.library.total} tracks`,
       h.llm.ok ? `LLM ok (${state.config?.llm?.model || ''})` : 'LLM offline',
-      h.tts.ok ? 'voice ok' : 'voice missing',
+      // Name the voice and the fix: "voice missing" alone sent a user hunting
+      // for a silent DJ after the default voice changed.
+      h.tts.ok ? `voice ok (${h.tts.voice || ''})`
+        : `DJ silent — ${h.tts.problem || 'voice missing'}`,
     ];
     $('health-line').innerHTML =
       `<span class="${h.llm.ok && h.tts.ok ? 'ok' : 'bad'}">${esc(bits.join(' · '))}</span>`;

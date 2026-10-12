@@ -354,6 +354,16 @@ docker compose pull   # or: docker compose up -d --build
 Your `data` volume is untouched — config, library DB, and voice models carry
 over. The first boot after an upgrade will reuse the already-downloaded voices.
 
+> **If the DJ goes silent after an upgrade**, check the voice first: the default
+> voice can change between versions (it is now `en_GB-alan-medium`), and a volume
+> that still holds the old model has nothing for Piper to speak with. The station
+> keeps playing music and the LLM may still be called, so it can look healthy
+> while you hear no DJ. `docker logs virtual-dj | grep -i "DJ voice"` says so
+> explicitly, and the web UI names the missing voice in the health line and the
+> DJ card. Fix it by picking a voice marked *installed* in the DJ card, or by
+> letting the app fetch the configured one (`docker exec virtual-dj python -m
+> app.voices`, or unset `VDJ_NO_VOICE_DOWNLOAD` and restart).
+
 ## Configuration
 
 Three layers, in increasing precedence:
