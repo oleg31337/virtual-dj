@@ -295,6 +295,30 @@ def test_programs_endpoint_reports_the_artist_gap(client, music_dir):
         client.put("/api/config", json={"playback": {"artist_gap": 10}})
 
 
+def test_preview_returns_the_text_the_voice_will_actually_say(client):
+    """"Test this voice" must show the prepared line, not the raw input.
+
+    Regression: the preview synthesised the prepared text but echoed the input,
+    so a Russian line showed a stress mark (U+00B4) that espeak-ng silently
+    ignores — the box looked right while the audio said the wrong stress.
+    """
+    body = client.post("/api/dj/preview", json={
+        "text": "Далее — замо\u00b4к, в исполнении Ага\u00b4ты Кри\u00b4сти.",
+        "voice": "ru_RU-irina-medium",
+    }).json()
+    text = body["text"]
+    assert "\u0301" in text, f"the obeyed mark must be present: {text!r}"
+    assert "\u00b4" not in text, f"the ignored mark must be gone: {text!r}"
+
+    # English input keeps its years spelled out, same as the DJ's own lines.
+    body = client.post("/api/dj/preview", json={
+        "text": "A track from 1999 by P\u00b4ink.",
+        "voice": "en_GB-alan-medium",
+    }).json()
+    assert "1999" not in body["text"] and "nineteen ninety-nine" in body["text"]
+    assert "\u00b4" not in body["text"]
+
+
 def test_decades_endpoint_feeds_the_card_and_the_config_round_trips(client):
     """`/api/library/decades` + `playback.decades` = the card's decade chips.
 

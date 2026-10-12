@@ -292,6 +292,20 @@ def _clean_script(text: str, max_sentences: int,
     return text
 
 
+def prepare_script(text: str, voice: str | None = None,
+                   max_sentences: int = 99) -> str:
+    """The display-level prep every spoken line goes through.
+
+    Called for LLM output (via ``generate_script``) and for text handed straight
+    to ``/api/dj/preview``, so the text a user sees is the text the voice is
+    given: years spelled out, and Russian stress marks rewritten into the
+    character espeak-ng actually obeys. Deliberately does NOT transliterate —
+    Cyrillic stays Cyrillic on screen.
+    """
+    return _clean_script(text, max_sentences,
+                         language=voice_language(voice))
+
+
 def fallback_script(track: dict[str, Any],
                     program: dict[str, Any] | None = None,
                     language: str | None = None) -> str:
@@ -517,7 +531,7 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
                 time.sleep(1.0 * (attempt + 1))
             continue
     if content:
-        script = _clean_script(content, max_sentences, language=language)
+        return prepare_script(raw, voice=voice, max_sentences=max_sentences)
         if script:
             return script
         log.warning("LLM returned an empty script; using fallback")

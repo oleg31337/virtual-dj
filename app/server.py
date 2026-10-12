@@ -675,6 +675,11 @@ class PreviewRequest(BaseModel):
 def api_dj_preview(req: PreviewRequest):
     """Generate (and optionally speak) a DJ line without touching the stream."""
     text = (req.text or "").strip()
+    if text:
+        # Same preparation the DJ's own lines get: years spelled out, Russian
+        # stress marks normalised into the form the engine obeys — otherwise the
+        # preview shows a mark that will be ignored on air.
+        text = dj.prepare_script(text, voice=req.voice)
     track = None
     if not text:
         if req.track_id:

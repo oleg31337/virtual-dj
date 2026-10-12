@@ -174,6 +174,12 @@ like a host or like a catalogue entry. Three things are now enforced:
   0.10–0.26 s, which is why `dj.sentence_silence` (below) adds a real sentence
   gap on top.
 
+The same preparation runs on anything you type into **Test this voice**, so the
+preview shows (and speaks) the line as it will go on air rather than the raw
+input. The code guarantees the date spelling and the stress marks; the *name*
+rewriting is the LLM's job, so it depends on the model you point Hermes at
+following the instruction — check it once with your own Ollama.
+
 #### Russian stress marks: only one character works
 
 The Russian voice guesses stress, and guesses wrong on homographs
