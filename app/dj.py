@@ -70,6 +70,59 @@ def _int_to_words(n: int) -> str:
     return " ".join(_int_to_words(int(d)) for d in str(n))
 
 
+# Stress-mark characters a language model may write. Only U+0301 (COMBINING
+# ACUTE) placed immediately AFTER the stressed vowel is obeyed by espeak-ng.
+# Measured on the bundled Russian voice: "замо\u0301к" -> zˈɑmʌk (correct) while
+# the plain acute "замо\u00b4к" is ignored, and U+02B9/U+02BC are read ALOUD as
+# their names ("zˈɛ a ɪdʒˈɛktɪv ˈɛm ʌ k" for "за\u02b9мок") — an audible disaster
+# that the old prompt actively invited by asking for "´".
+_COMBINING_ACUTE = "\u0301"
+_STRESS_MARKS = "\u00b4\u2019\u02bc\u02b9\u0060\u2032\u0301"
+_CYRILLIC_VOWELS = "аеёиоуыэюяАЕЁИОУЫЭЮЯ"
+
+
+def _normalize_stress_marks(text: str) -> str:
+    """Rewrite whatever stress mark the model wrote into the form espeak obeys.
+
+    Every mark is attached to its adjacent Cyrillic vowel as U+0301, moved to
+    the far side of the vowel when the model put it in front, and dropped when
+    there is no vowel to attach to. ``замо\u00b4к`` -> ``замо\u0301к`` (obeyed),
+    ``з\u00b4амок`` -> ``за\u0301мок``, ``за\u02b9мок`` -> ``замок``.
+    """
+    if not text:
+        return text
+    out: list[str] = []
+    index = 0
+    while index < len(text):
+        ch = text[index]
+        if ch not in _STRESS_MARKS:
+            out.append(ch)
+            index += 1
+            continue
+        if ch == _COMBINING_ACUTE:
+            # Already the obeyed form; it is meaningless unless a vowel precedes.
+            if out and out[-1][0] in _CYRILLIC_VOWELS:
+                out[-1] = out[-1][0] + _COMBINING_ACUTE
+            index += 1
+            continue
+        following = text[index + 1] if index + 1 < len(text) else ""
+        if following in _CYRILLIC_VOWELS:
+            out.append(following + _COMBINING_ACUTE)      # mark written first
+            index += 2
+            continue
+        if out and out[-1][0] in _CYRILLIC_VOWELS:
+            out[-1] = out[-1][0] + _COMBINING_ACUTE       # attach to the vowel
+            index += 1
+            continue
+        index += 1                                        # nothing to mark: drop
+    return "".join(out)
+
+
+def _strip_stress_marks(text: str) -> str:
+    """Drop stress marks from non-Russian text (meaningless to English voices)."""
+    return "".join(ch for ch in (text or "") if ch not in _STRESS_MARKS)
+
+
 def _spell_dates(text: str) -> str:
     """Convert bare years in speech text to spoken words.
 
@@ -184,7 +237,7 @@ def piper_binary() -> str | None:
 
 
 def voice_model_path(voice: str | None = None) -> Path | None:
-    name = voice or config.get("dj.voice", "en_US-amy-medium")
+    name = voice or config.get("dj.voice", "en_GB-alan-medium")
     # Allow tests/installs to point the voice library elsewhere (e.g. system
     # share dir) without duplicating multi-hundred-MB models.
     voices_dir = config.voices_dir()
@@ -229,7 +282,12 @@ def _clean_script(text: str, max_sentences: int,
     # Years must be spelled out so an English TTS reads them as dates, not a
     # string of numerals. Russian-track text is left as-is (digits) because the
     # Russian voice reads year numerals natively.
-    if language != "russian":
+    if language == "russian":
+        # Whatever accent character the model wrote becomes the combining acute
+        # espeak obeys, attached to the right vowel (see _normalize_stress_marks).
+        text = _normalize_stress_marks(text)
+    else:
+        text = _strip_stress_marks(text)
         text = _spell_dates(text)
     return text
 
@@ -361,6 +419,27 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
                 f"the intro."
             )
 
+    # How the text must be written so the voice reads it correctly. This is the
+    # difference between a catalogue entry and something a host can say: years
+    # and numbers as words, stylised names in their spoken form, and punctuation
+    # the engine actually pauses on. (Measured: the voice moves its pitch over
+    # ~19 semitones when the line is written for speech; it also cannot read
+    # "P!nk" or "1999" without mangling them.)
+    speech_line = (
+        "\nWrite it the way it will be SPOKEN, not as a catalogue listing:\n"
+        "- Write every year and every number as words, never as digits: "
+        "\"nineteen ninety-nine\", not \"1999\"; \"two songs\", not \"2 songs\"; "
+        "\"Blink one eighty-two\" for the band Blink-182.\n"
+        "- Write artist and song names in their spoken form. Normalise stylised "
+        "spellings and drop symbols that are not pronounced: P!nk is \"Pink\", "
+        "Ke$ha is \"Kesha\", Panic! at the Disco is \"Panic at the Disco\", "
+        "deadmau5 is \"dead mouse\". The names in the information block may be "
+        "stylised - say them plainly, but keep them recognisable and never "
+        "invent a different name.\n"
+        "- Keep the sentences short, and punctuate for breath: a comma is a "
+        "small pause, an em dash a longer one."
+    )
+
     lang_line = ""
     if is_russian:
         # The Russian voice speaks Russian natively; the intro must be written
@@ -375,12 +454,17 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
             "\nОБЯЗАТЕЛЬНО пиши свой ответ ПО-РУССКИ (на русском языке). "
             "Названия песен и имена исполнителей — на русском, сохраняй их "
             "смысл и форму, не переводи и не транслитерируй.\n"
-            "Чтобы голосовой движок правильно выговаривал слова, выполни два "
+            "Чтобы голосовой движок правильно выговаривал слова, выполни три "
             "обязательных правила:\n"
-            "1) Ставь знак ударения (аку́т, ´) над ударной гласной КАЖДОГО "
-            "слова, например: приве́т, музыка́льный, золото́й.\n"
-            "2) Всегда пиши букву Ё (ё) там, где она действительно есть в слове, "
-            "никогда не заменяй её на Е (е)."
+            "1) Ставь знак ударения ´ СРАЗУ ПОСЛЕ ударной гласной каждого "
+            "слова, например: приве´т, музыка´льный, золото´й, Ага´та Кри´сти. "
+            "Используй ТОЛЬКО ´ — никакие другие знаки (ʼ, ʹ, `, ‘, ’) не "
+            "ставь: движок их либо не видит, либо читает вслух как название "
+            "знака.\n"
+            "2) Всегда пиши букву Ё (ё) там, где она действительно есть в "
+            "слове, никогда не заменяй её на Е (е).\n"
+            "3) Годы и числа оставляй цифрами (например: \"1984\") — русский "
+            "голос читает их правильно сам. Словами их писать НЕ нужно."
         )
 
     user_prompt = (
@@ -388,7 +472,8 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
         f"Write at most {max_sentences} sentences introducing the next song.\n"
         f"Mention one genuinely interesting fact ONLY if the information block "
         f"below directly supports it. Do NOT state any release date or year "
-        f"that is not listed below.{prev_line}{program_line}{lang_line}\n\n"
+        f"that is not listed below."
+        f"{speech_line}{prev_line}{program_line}{lang_line}\n\n"
         f"Information about the next song:\n"
         f"{_facts_block(track, facts)}\n"
     )
@@ -441,16 +526,20 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
     return fallback_script(track, program=program, language=language)
 
 
-def _cache_path(text: str, voice: str, speed: float, noise_scale: float) -> Path:
+def _cache_path(text: str, voice: str, speed: float, noise_scale: float,
+                noise_w: float = 0.8, sentence_silence: float = 0.0) -> Path:
     digest = hashlib.sha256(
-        f"{voice}|{speed}|{noise_scale}|{text}".encode("utf-8")
+        f"{voice}|{speed}|{noise_scale}|{noise_w}|{sentence_silence}|{text}"
+        .encode("utf-8")
     ).hexdigest()[:32]
     return config.DJ_CACHE_DIR / f"{digest}.mp3"
 
 
 def synthesize(text: str, voice: str | None = None,
                speed: float | None = None,
-               noise_scale: float | None = None) -> Path | None:
+               noise_scale: float | None = None,
+               noise_w: float | None = None,
+               sentence_silence: float | None = None) -> Path | None:
     """Render ``text`` to an mp3 with Piper. Returns None on failure.
 
     The voice (``voice`` or the configured ``dj.voice``) determines the
@@ -462,7 +551,7 @@ def synthesize(text: str, voice: str | None = None,
     text = (text or "").strip()
     if not text:
         return None
-    voice = voice or config.get("dj.voice", "en_US-amy-medium")
+    voice = voice or config.get("dj.voice", "en_GB-alan-medium")
     language = voice_language(voice)
     # English voices mis-read bare numerals as digits, so years are spelled out
     # as words. The Russian voice, however, reads year numerals natively, so we
@@ -473,7 +562,10 @@ def synthesize(text: str, voice: str | None = None,
     # them as a Latin spelling the voice reads with roughly Russian pronunciation
     # (on-screen dj_text stays Cyrillic; this only affects the audio). The
     # Russian voice reads Cyrillic directly, so it is skipped for Russian.
-    if language != "russian":
+    if language == "russian":
+        text = _normalize_stress_marks(text)
+    else:
+        text = _strip_stress_marks(text)
         text = _transliterate_cyrillic(text)
 
     speed = float(speed if speed is not None else config.get("dj.speed", 1.0))
@@ -481,7 +573,15 @@ def synthesize(text: str, voice: str | None = None,
     noise_scale = float(noise_scale if noise_scale is not None
                         else config.get("dj.noise_scale", 0.667))
     noise_scale = max(0.1, min(noise_scale, 2.0))
-    out_path = _cache_path(text, voice, speed, noise_scale)
+    noise_w = float(noise_w if noise_w is not None
+                    else config.get("dj.noise_w", 0.8))
+    noise_w = max(0.0, min(noise_w, 2.0))
+    sentence_silence = float(
+        sentence_silence if sentence_silence is not None
+        else config.get("dj.sentence_silence", 0.25))
+    sentence_silence = max(0.0, min(sentence_silence, 2.0))
+    out_path = _cache_path(text, voice, speed, noise_scale, noise_w,
+                           sentence_silence)
     if out_path.exists() and out_path.stat().st_size > 0:
         return out_path
 
@@ -498,7 +598,12 @@ def synthesize(text: str, voice: str | None = None,
         length_scale = round(1.0 / speed, 4)
         cmd = [binary, "-m", str(model), "-f", str(wav_path),
                "--length_scale", str(length_scale),
-               "--noise_scale", str(round(noise_scale, 4))]
+               "--noise_scale", str(round(noise_scale, 4)),
+               # Phoneme-width (rhythm) jitter and the silence after each
+               # sentence. The model's own punctuation pauses only reach
+               # 0.10-0.26 s; without this the DJ sounds rushed.
+               "--noise_w_scale", str(round(noise_w, 4)),
+               "--sentence_silence", str(round(sentence_silence, 3))]
 
         try:
             proc = subprocess.run(

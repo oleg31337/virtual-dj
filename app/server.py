@@ -665,6 +665,10 @@ class PreviewRequest(BaseModel):
     voice: str | None = None
     speed: float | None = None
     noise_scale: float | None = None
+    # Piper's rhythm jitter and the pause after each sentence, so "test this
+    # voice" previews exactly what a saved setting will sound like.
+    noise_w: float | None = None
+    sentence_silence: float | None = None
 
 
 @app.post("/api/dj/preview")
@@ -686,6 +690,8 @@ def api_dj_preview(req: PreviewRequest):
         voice=req.voice,
         speed=req.speed,
         noise_scale=req.noise_scale,
+        noise_w=req.noise_w,
+        sentence_silence=req.sentence_silence,
     )
     return {
         "text": text,

@@ -416,6 +416,10 @@ async function loadConfig() {
   // Voice + prosody controls.
   $('dj-speed').value = Math.round((cfg.dj?.speed ?? 1.0) * 100);
   $('speed-val').textContent = ((cfg.dj?.speed ?? 1.0)).toFixed(2);
+  $('dj-noise-w').value = Math.round((cfg.dj?.noise_w ?? 0.8) * 1000);
+  $('noisew-val').textContent = (Number($('dj-noise-w').value) / 1000).toFixed(2);
+  $('dj-sentence-silence').value = Math.round((cfg.dj?.sentence_silence ?? 0.25) * 100);
+  $('pause-val').textContent = (Number($('dj-sentence-silence').value) / 100).toFixed(2);
   const ns = cfg.dj?.noise_scale ?? 0.667;
   // Per-mille, so the 0.667 default round-trips exactly (per-cent turned it
   // into 0.67 on every save).
@@ -1075,7 +1079,9 @@ function wire() {
         : 'Hey listeners, this is your Virtual DJ — let\'s keep the vibes flowing through the night.';
       const r = await api('/api/dj/preview', {
         method: 'POST',
-        body: JSON.stringify({ text, voice, speed, noise_scale: noise }),
+        body: JSON.stringify({ text, voice, speed, noise_scale: noise,
+                               noise_w: Number($('dj-noise-w').value) / 1000,
+                               sentence_silence: Number($('dj-sentence-silence').value) / 100 }),
       });
       if (r && r.audio_url) {
         const a = $('preview-audio');
@@ -1145,6 +1151,9 @@ function wire() {
           sent_max: smax,
           speed: Number($('dj-speed').value) / 100,
           noise_scale: Number($('dj-noise').value) / 1000,
+          // Piper's rhythm jitter and the pause after each sentence.
+          noise_w: Number($('dj-noise-w').value) / 1000,
+          sentence_silence: Number($('dj-sentence-silence').value) / 100,
           voice: $('dj-voice').value,
           style: $('dj-style').value.trim(),
         },
@@ -1166,6 +1175,10 @@ function wire() {
   $('dj-talk-max').oninput = refreshTalkLabel;
   $('dj-sent-min').oninput = refreshSentLabel;
   $('dj-sent-max').oninput = refreshSentLabel;
+  $('dj-noise-w').oninput = (e) =>
+    ($('noisew-val').textContent = (e.target.value / 1000).toFixed(2));
+  $('dj-sentence-silence').oninput = (e) =>
+    ($('pause-val').textContent = (e.target.value / 100).toFixed(2));
   $('dj-noise').oninput = (e) =>
     ($('expr-val').textContent = (e.target.value / 1000).toFixed(2));
   $('save-preset').onclick = async () => {

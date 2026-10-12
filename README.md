@@ -77,6 +77,7 @@ Point VLC, Winamp, Sonos, or any browser at the stream URL and it just plays.
   normalization* card (see [Volume normalization](#volume-normalization)).
 - **Web control panel** — live now-playing with the DJ's script, library
   browser/search, the *Genres/decades* selection, queue editing and reordering,
+  DJ voice settings with a "test this voice" preview,
   the *Programs* card (themes, rules, program length), presets, the loudness
   card with per-track gains, DJ/voice settings, Icecast control and a running
   report of temporary data with a **Clean now** button. Includes a browser
@@ -91,7 +92,7 @@ Point VLC, Winamp, Sonos, or any browser at the stream URL and it just plays.
   (optional — the station plays music fine without it; the DJ just stays
   silent until an Ollama endpoint is configured)
 - internet access on first run (optional), to auto-download the configured Piper
-  voice — the default is `en_US-amy-medium`, **~63 MB**
+  voice — the default is `en_GB-alan-medium`, **~60 MB**
 
 ## Install
 
@@ -114,7 +115,7 @@ To run the server directly instead: `python -m app.main --host 0.0.0.0 --port 84
 > No network at install time? The app still starts — voice download is
 > best-effort and retries at runtime. You can fetch voices any time from the
 > web UI (DJ Settings → Voice picker → **Test**), or with
-> `python -m app.voices [--all]` (or `python -m app.voices en_US-amy-medium`).
+> `python -m app.voices [--all]` (or `python -m app.voices en_GB-alan-medium`).
 
 Then open **http://localhost:8420**, set your music folder in the Library
 panel (or pre-seed it, see below), and hit **Rescan**.
@@ -135,7 +136,7 @@ rarely need to edit it by hand.
 
 The Piper voice models are large binary files (git-ignored) stored in
 `data/voices/`. On a **fresh install they are downloaded automatically** — the
-configured default (`dj.voice`, `en_US-amy-medium`) is fetched on first run,
+configured default (`dj.voice`, `en_GB-alan-medium`) is fetched on first run,
 and the web UI can download any other curated voice on demand.
 
 Any Piper voice works — drop the `.onnx` + `.onnx.json` pair in `data/voices/`
@@ -143,8 +144,8 @@ and pick it in the DJ Settings panel. To grab them manually:
 
 ```bash
 mkdir -p data/voices && cd data/voices
-curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx
-curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/amy/medium/en_US-amy-medium.onnx.json
+curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/alan/medium/en_GB-alan-medium.onnx
+curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/alan/medium/en_GB-alan-medium.onnx.json
 ```
 
 The catalogue is **16 curated voices** — 12 English (Amy, Lessac, LibriTTS-R,
@@ -152,6 +153,43 @@ Ryan, Bryce, Sam, Norman, Alan, Jenny, Southern English, HFC male/female) and 4
 Russian (Irina, Denis, Dmitri, Ruslan) — listed in `app/dj.py`
 (`VOICE_PROFILES`) and downloadable from the same HuggingFace repo via the web
 UI. Each is ~63 MB; `python -m app.voices --all` fetches the lot (**~1 GB**).
+
+### How the DJ's text is prepared
+
+Piper reads what it is given, so the *text* decides whether the delivery sounds
+like a host or like a catalogue entry. Three things are now enforced:
+
+- **Spelled-out dates and numbers.** The prompt asks the LLM for
+  "nineteen ninety-nine", never "1999", and the app spells any bare year that
+  still slips through (`1984` -> `nineteen eighty-four`) before synthesis.
+  Russian is deliberately different: the Russian voice reads numerals correctly
+  on its own, so years stay as digits there.
+- **Names in their spoken form.** Stylised spellings are written the way they are
+  said — P!nk is "Pink", Ke$ha is "Kesha", Panic! at the Disco is "Panic at the
+  Disco", deadmau5 is "dead mouse" — and symbols that are not pronounced are
+  dropped. The LLM is told to say them plainly but never to invent a different
+  name.
+- **Punctuation for breath.** Short clauses; a comma is a small pause, an em dash
+  a longer one. Measured: the engine's own punctuation pauses only reach
+  0.10–0.26 s, which is why `dj.sentence_silence` (below) adds a real sentence
+  gap on top.
+
+#### Russian stress marks: only one character works
+
+The Russian voice guesses stress, and guesses wrong on homographs
+(*за́мок* the castle vs *замо́к* the lock). espeak-ng obeys exactly one mark:
+
+| Written | Result |
+|---|---|
+| `´` **directly after** the stressed vowel (combining acute, U+0301) | correct stress ✅ |
+| `´` as a plain acute (U+00B4) — *what the prompt used to ask for* | **silently ignored** ❌ |
+| `ʼ` / `ʹ` (modifier letter/prime) | **read aloud as the character's name** 💥 |
+| mark written *before* the vowel | ignored ❌ |
+
+So the LLM is asked for a plain `´` after the vowel (easy to produce) and the app
+rewrites whatever it gets into the character espeak obeys, moving it to the far
+side of the vowel and dropping marks with no vowel to attach to. Ё is always
+written as `ё`, never `е`.
 
 **The chosen voice sets the DJ's language.** English voices (`en_US-*`,
 `en_GB-*`) make the DJ speak English; picking a Russian voice (Irina, Denis,
@@ -273,7 +311,7 @@ docker compose up -d --build
 Then open **http://localhost:8420**.
 
 On first start the container **auto-downloads the default voice model**
-(English, `en_US-amy-medium`, ~63 MB) into the volume; the DJ can speak out of
+(English, `en_GB-alan-medium`, ~60 MB) into the volume; the DJ can speak out of
 the box.
 It also **auto-scans `/music` on first boot** (the container's `music_dir`
 defaults to `/music`, which is where your host library is mounted), so the
@@ -378,7 +416,9 @@ The sections the web UI does not already document elsewhere in this file:
 | `playback.program.*` | see [Playlist rules](#playlist-rules) | Theming, program length, artist rules |
 | `playback.program.disabled.{genre,artist,decade}` | `[]` | Themes switched off in the *Programs* card (a stored exclusion list, so a new genre starts ON) |
 | `dj.enabled` | `true` | Speak between tracks at all |
-| `dj.voice` | `en_US-amy-medium` | Piper voice — also picks the DJ's language |
+| `dj.voice` | `en_GB-alan-medium` | Piper voice — also picks the DJ's language. Measured on one sentence: ~19 semitones of pitch movement, against ~7 for the previous default `en_US-amy-medium` (the flattest of 15 installed voices); `-high` models of the same voice measured no wider for twice the CPU |
+| `dj.noise_w` | `0.8` | Rhythm variation (phoneme-width jitter). Piper's own default |
+| `dj.sentence_silence` | `0.25` | Seconds of silence after each sentence — 0.25 gives the ~0.45 s gap of a real host, where the engine's own punctuation pauses only reach 0.1–0.26 s |
 | `dj.style` | _warm radio host_ | The LLM persona |
 | `dj.talk_min` / `dj.talk_max` | `2` / `4` | Tracks between DJ breaks (randomized) |
 | `dj.sent_min` / `dj.sent_max` | `1` / `3` | Sentences per DJ line |
@@ -564,7 +604,7 @@ The stream endpoint is a raw ASGI response on purpose — Starlette's
 ## Development
 
 ```bash
-.venv/bin/python -m pytest tests/ -q      # 303 tests, ~3.5 minutes
+.venv/bin/python -m pytest tests/ -q      # 320 tests, ~3.5 minutes
 ```
 
 The suite covers tag parsing, DJ prompt/fact grounding, scheduler cadence and

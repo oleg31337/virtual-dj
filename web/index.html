@@ -304,6 +304,16 @@
       <input type="range" id="dj-noise" min="100" max="1500" value="667" />
     </label>
     <label class="field">
+      <span>Rhythm variation: <b id="noisew-val">0.80</b>
+        <span class="dim">(timing jitter — lower is metronomic, higher is looser)</span></span>
+      <input type="range" id="dj-noise-w" min="0" max="1500" value="800" />
+    </label>
+    <label class="field">
+      <span>Pause after each sentence: <b id="pause-val">0.25</b>s
+        <span class="dim">(the model’s own punctuation pauses only reach ~0.2 s)</span></span>
+      <input type="range" id="dj-sentence-silence" min="0" max="100" value="25" />
+    </label>
+    <label class="field">
       <span>Persona / style</span>
       <textarea id="dj-style" rows="2"></textarea>
     </label>

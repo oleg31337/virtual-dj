@@ -96,12 +96,26 @@ DEFAULTS: dict[str, Any] = {
         # the voice's language decides the DJ's language (a Russian voice makes
         # the DJ speak Russian). All other dj.* settings (speed, noise_scale,
         # gain, sentence counts, cadence) apply to the chosen voice.
-        "voice": "en_US-amy-medium",
+        # Measured on the reference host, same sentence: alan-medium moves its
+        # pitch over ~19 semitones, ryan-medium ~15, the old default
+        # (en_US-amy-medium) only ~7 — the flattest of all 15 installed voices.
+        # The -high models of the same voices measured NO wider than their
+        # -medium siblings for twice the CPU, so this is a voice choice, not a
+        # quality tier. Change it in the DJ card.
+        "voice": "en_GB-alan-medium",
         "speed": 1.0,
         # Piper prosody: noise_scale controls expressive variation. Lower is
         # more monotone/robotic; higher is more lively/wobbly. The real lever
         # for "natural intonation" — no cloud service required.
         "noise_scale": 0.667,
+        # Piper's third synthesis knob: phoneme-WIDTH noise (timing jitter, the
+        # rhythm's naturalness). The model's own default is 0.8.
+        "noise_w": 0.8,
+        # Silence Piper inserts after each sentence it detects (seconds). The
+        # model's punctuation pauses are only 0.10-0.26 s, which reads as
+        # rushed; 0.25 s gives the ~0.45 s sentence gap of a real host, and the
+        # pause is exact rather than approximate.
+        "sentence_silence": 0.25,
         # Talk cadence: the DJ speaks after a random number of tracks between
         # talk_min and talk_max (inclusive). Equal values give a fixed cadence.
         # 0 means the DJ never talks (regardless of max).

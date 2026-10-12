@@ -71,7 +71,7 @@ def _download_file(url: str, dest: Path, timeout: float = 120.0) -> None:
 
 def voice_model_path(voice: str | None = None) -> Path | None:
     """Absolute path to ``voice``'s ``.onnx`` if present, else ``None``."""
-    name = voice or config.get("dj.voice", "en_US-amy-medium")
+    name = voice or config.get("dj.voice", "en_GB-alan-medium")
     voices_dir = config.voices_dir()
     path = voices_dir / f"{name}.onnx"
     return path if path.exists() else None
