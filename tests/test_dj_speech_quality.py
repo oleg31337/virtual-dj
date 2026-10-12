@@ -113,6 +113,39 @@ def test_the_cache_key_includes_the_new_knobs(tmp_path, monkeypatch):
     assert len({a.name, b.name, c.name}) == 3
 
 
+def test_the_llm_answering_produces_a_prepared_script(monkeypatch):
+    """The branch that a fuzzy edit broke: Ollama answers, so `content` is set.
+
+    Regression for a NameError ('raw') that made EVERY DJ break die inside the
+    prefetch thread — the LLM ran (GPU load) and no audio was ever prepared,
+    exactly the symptom reported from a host with Ollama. No test covered this
+    path because CI has no Ollama and always took the fallback branch.
+    """
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict:
+            return {"message": {"content": "That was from 1999 — a classic."}}
+
+    called: list[tuple] = []
+
+    def fake_post(url, **kw):
+        called.append((url, kw))
+        return FakeResponse()
+
+    monkeypatch.setattr(dj.httpx, "post", fake_post)
+    monkeypatch.setattr(config, "_CACHE", {"llm": {"enabled": True, "base_url": "http://x",
+                                                   "model": "m", "retries": 0}})
+
+    script = dj.generate_script({"id": 1, "title": "Time", "artist": "Pink Floyd",
+                                 "album": "DSOTM", "year": "1973"})
+    assert called, "the LLM must actually be called"
+    assert script, "the LLM's answer must come back as a script"
+    assert "1999" not in script, f"years must be spoken, got {script!r}"
+    assert "nineteen ninety-nine" in script
+
+
 def test_a_missing_voice_is_named_and_stops_the_llm_call(monkeypatch, tmp_path, caplog):
     """The silent-DJ trap: the configured voice has no model file.
 

@@ -531,7 +531,7 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
                 time.sleep(1.0 * (attempt + 1))
             continue
     if content:
-        return prepare_script(raw, voice=voice, max_sentences=max_sentences)
+        script = prepare_script(content, voice=voice, max_sentences=max_sentences)
         if script:
             return script
         log.warning("LLM returned an empty script; using fallback")
