@@ -54,6 +54,9 @@ main {
 .progress { height: 5px; background: #232838; border-radius: 3px;
             margin: 12px 0 6px; overflow: hidden; }
 #np-bar { height: 100%; width: 0; background: var(--accent); transition: width .4s linear; }
+/* Paused: the audio is held, so the bar is too — drain the colour so a still bar
+   reads as "stopped", not as "the song is stuck". */
+.progress.paused #np-bar { background: var(--dim); transition: none; }
 #loudness-bar { height: 100%; width: 0; background: var(--accent2); transition: width .3s linear; }
 .gain { color: var(--accent2); font-variant-numeric: tabular-nums; }
 button {

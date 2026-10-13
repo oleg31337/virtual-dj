@@ -15,6 +15,7 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -178,3 +179,58 @@ def test_the_stations_own_relay_does_not_keep_it_awake(presence_server):
                 f"the station's own relay counted as a listener: {state}")
             assert state["paused"] is True, (
                 f"the relay kept the station playing: {state}")
+
+
+def test_the_progress_bar_stops_with_the_audio(presence_server):
+    """End to end: the number the UI draws as a progress bar must stand still
+    while the station is paused, and move again when a listener returns.
+
+    It used to be `time.time() - started_at`, so a paused station showed a bar
+    crawling through a silent song and a listener had no way to tell that
+    nothing was playing.
+    """
+    base = presence_server
+    left = threading.Event()
+
+    def drain(response):
+        try:
+            for _ in response.iter_bytes(8192):
+                if left.is_set():
+                    break
+        except Exception:
+            pass
+
+    with httpx.stream("GET", f"{base}/stream.mp3", timeout=60) as resp:
+        assert resp.status_code == 200
+        threading.Thread(target=drain, args=(resp,), daemon=True).start()
+        playing = wait_for(base, lambda s: s["elapsed"] >= 1.0, timeout=25)
+        assert playing["elapsed"] >= 1.0, f"no progress while playing: {playing}"
+        moving = wait_for(base, lambda s: s["elapsed"] > playing["elapsed"],
+                          timeout=15)
+        assert moving["elapsed"] > playing["elapsed"], \
+            f"progress never advanced while playing: {moving}"
+    left.set()                            # the listener leaves
+
+    paused = wait_for(base, lambda s: s["paused"] is True, timeout=20)
+    assert paused["paused"] is True, f"never paused: {paused}"
+    frozen = paused["elapsed"]
+    time.sleep(4)                         # wall-clock time passes while paused
+    still = now_playing(base)["elapsed"]
+    assert still == frozen, (
+        f"the paused station kept reporting progress: {frozen} -> {still}")
+
+    with httpx.stream("GET", f"{base}/stream.mp3", timeout=60) as resp:
+        threading.Thread(target=drain, args=(resp,), daemon=True).start()
+        resumed = wait_for(base, lambda s: s["elapsed"] > 0.5, timeout=25)
+        assert resumed["elapsed"] > 0.5, f"progress never came back: {resumed}"
+        before = resumed
+        time.sleep(3)
+        after = now_playing(base)
+        # Moving forward, or the held track ended and the next one started —
+        # both mean the bar is alive again. A frozen number means it is not.
+        same_track = (((before.get("track") or {}).get("id"))
+                      == ((after.get("track") or {}).get("id")))
+        assert after["elapsed"] > before["elapsed"] or not same_track, (
+            f"progress stayed frozen with a listener connected: "
+            f"{before['elapsed']} -> {after['elapsed']}")
+    left.set()

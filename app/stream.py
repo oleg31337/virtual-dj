@@ -157,6 +157,12 @@ class Broadcaster:
         # while paused, so the Icecast source is never idle (see _pause_hold).
         self._silence: bytes | None = None
         self._silence_key: tuple[int, int, int] | None = None
+        # How much audio of the current item has actually gone out, in seconds.
+        # This — never a wall clock — is the progress the UI shows: it stops
+        # when the audio stops (a pause holds it, a stalled decoder too), where
+        # `time.time() - started_at` kept the progress bar crawling through a
+        # paused, silent song.
+        self._played_seconds = 0.0
         # Rolling history of recent broadcast bytes (Icecast-style burst
         # buffer): replayed to new listeners so players start with a full
         # jitter buffer instead of starving for the first few seconds.
@@ -165,7 +171,7 @@ class Broadcaster:
         self._history: deque[bytes] = deque(maxlen=256)
         self._now_playing: dict[str, Any] = {
             "kind": "idle", "track": None, "dj_text": None,
-            "started_at": None, "duration": None,
+            "duration": None,
         }
         # The last DJ phrase spoken, and the id of the track it announced.
         # The "DJ SAID" panel shows the phrase only while that announced track
@@ -367,6 +373,33 @@ class Broadcaster:
                 next_at = max(now, next_at) + 1.0
             time.sleep(0.05)
 
+    def _note_true_duration(self, kind: str, meta: dict[str, Any], played: float,
+                            returncode: int | None, reason: str) -> None:
+        """Replace a track's guessed length with the one we just measured.
+
+        The scanner stores mutagen's header estimate, which is wrong for VBR
+        files without a Xing header — often by a minute or more. The UI's
+        progress bar then reaches 100% while the song is still playing. A full
+        decode measures the file exactly (bytes broadcast / bytes per second),
+        so keep it: the scanner only rewrites `duration` for files whose size or
+        mtime changed, so this survives a rescan.
+        """
+        if kind != "track" or reason != "eof" or returncode != 0 or played < 1.0:
+            return
+        track = meta.get("track") or {}
+        track_id = track.get("id")
+        if not track_id:
+            return
+        stored = track.get("duration")
+        if stored and abs(played - float(stored)) <= max(3.0, 0.03 * float(stored)):
+            return  # the header estimate was close enough
+        try:
+            db.set_duration(int(track_id), played)
+            log.info("track %s measured at %.1fs (catalogue said %s)",
+                     track_id, played, stored)
+        except Exception:
+            log.debug("could not store the measured duration", exc_info=True)
+
     def _note_unplayable(self, path: str, kind: str, meta: dict[str, Any]) -> None:
         """Take a track whose file is gone out of the playable pool.
 
@@ -437,12 +470,12 @@ class Broadcaster:
             return False
 
         self._proc = proc
+        self._played_seconds = 0.0
         self._now_playing = {
             "kind": kind,
             "track": meta.get("track"),
             "dj_text": meta.get("dj_text"),
             "program": meta.get("program"),
-            "started_at": time.time(),
             "duration": meta.get("duration"),
         }
         # A DJ break carries the spoken phrase and the id of the track it
@@ -463,6 +496,7 @@ class Broadcaster:
         sent = 0
         start = time.monotonic()
         aligner = FrameAligner()
+        reason = "eof"
         try:
             while not self._stop.is_set() and not self._skip.is_set():
                 raw = proc.stdout.read(CHUNK)
@@ -483,13 +517,17 @@ class Broadcaster:
 
                 if self._paused.is_set():
                     # Hold the decoder where it is (so resuming continues the
-                    # same track) and keep the line alive with silence.
+                    # same track) and keep the line alive with silence. The
+                    # progress counter is deliberately NOT advanced here: the
+                    # audio is not moving, so neither is the UI's bar.
                     self._pause_hold()
                     start = time.monotonic() - (sent / bps)
 
                 self._broadcast(data)
                 sent += len(data)
+                self._played_seconds = sent / bps
         except Exception:
+            reason = "error"
             log.exception("error while streaming %s", path)
         finally:
             aligner.discard_leftover()  # never broadcast a partial frame
@@ -505,6 +543,11 @@ class Broadcaster:
             except Exception:
                 pass
             self._proc = None
+        # A skipped or stopped item only got part way through, so its byte count
+        # is not the file's length — only a natural end measures the whole file.
+        if self._skip.is_set() or self._stop.is_set():
+            reason = "cut"
+        self._note_true_duration(kind, meta, sent / bps, proc.returncode, reason)
         return sent > 0
 
     # --- main loop --------------------------------------------------------
@@ -521,9 +564,10 @@ class Broadcaster:
             "-t", "5", "-c:a", "libmp3lame", "-b:a", f"{bitrate}k",
             "-f", "mp3", "-write_xing", "0", "pipe:1",
         ]
+        self._played_seconds = 0.0
         self._now_playing = {
             "kind": "idle", "track": None, "dj_text": None,
-            "started_at": time.time(), "duration": 5.0,
+            "duration": 5.0,
         }
         self._notify_change()
         # Clear Icecast "now playing" while idle so players don't keep showing
@@ -551,6 +595,7 @@ class Broadcaster:
                     break
             self._broadcast(data)
             sent += len(data)
+            self._played_seconds = sent / bps
         aligner.discard_leftover()
         if proc.poll() is None:
             proc.kill()
@@ -636,9 +681,12 @@ class Broadcaster:
 
     def state(self) -> dict[str, Any]:
         now = self._now_playing
-        elapsed = None
-        if now.get("started_at"):
-            elapsed = round(time.time() - now["started_at"], 1)
+        # Progress = audio actually broadcast for the current item, so it stands
+        # still while the audio does (a pause, or a stalled decoder). It used to
+        # be `time.time() - started_at`, which kept the UI's progress bar
+        # crawling through a paused, silent song — the bar's clock and the audio
+        # were never the same thing.
+        elapsed = round(self._played_seconds, 1)
         # Show the remembered DJ phrase only for the track it introduced. Once
         # the next track starts (the announced song has ended) it clears.
         now_track = now.get("track") or {}

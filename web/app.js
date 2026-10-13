@@ -130,11 +130,19 @@ function renderState(s) {
       warn.hidden = true;
     }
   }
-  const pct = s.duration && s.elapsed ? Math.min(100, (s.elapsed / s.duration) * 100) : 0;
+  // Progress: what the server has actually broadcast of this item. It stops
+  // when the audio stops, so a paused station shows a still bar — and a track
+  // whose catalogue length is a bad header estimate is capped at 100% rather
+  // than running past the end forever.
+  const dur = Number(s.duration) || 0;
+  const el = Number(s.elapsed) || 0;
+  const pct = dur > 0 ? Math.min(100, (el / dur) * 100) : 0;
   $('np-bar').style.width = `${pct}%`;
-  $('np-time').textContent = s.duration
-    ? `${fmtTime(s.elapsed)} / ${fmtTime(s.duration)}`
-    : fmtTime(s.elapsed);
+  const bar = $('np-progress');
+  if (bar) bar.classList.toggle('paused', !!s.paused);
+  $('np-time').textContent = dur > 0
+    ? `${fmtTime(el)} / ${fmtTime(dur)}${s.paused ? ' · paused' : ''}`
+    : fmtTime(el);
   $('pauseresume').textContent = s.paused ? '▶ Resume broadcast' : '⏸ Pause broadcast';
   // External-player URL (Winamp / VLC / Sonos): point at the Icecast mount
   // when delivery is enabled, otherwise the app's own stream endpoint.

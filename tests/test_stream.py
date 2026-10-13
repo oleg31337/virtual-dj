@@ -375,3 +375,99 @@ def test_state_reports_the_presence_watcher():
     b.set_listener_watcher(Watcher())
     detail = b.state()["listeners_detail"]
     assert detail["total"] == 1 and detail["auto_paused"] is False
+
+
+def test_progress_measures_broadcast_audio_and_stops_when_the_audio_stops(
+        music_dir, has_ffmpeg):
+    """The UI's progress bar used to be `time.time() - started_at` — a wall clock
+    that kept running while the station was paused, so a stopped song looked like
+    it was still playing. Progress must be the audio actually broadcast, which
+    stands still exactly when the audio does."""
+    from tests.conftest import make_mp3
+
+    path = make_mp3(music_dir / "progress.mp3", seconds=20)
+    track = {"path": str(path), "title": "Progress", "duration": 20.0}
+    b = Broadcaster()
+    player = threading.Thread(
+        target=b._play_file, args=(str(path), "track", {"track": track}),
+        daemon=True)
+    player.start()
+
+    def wait_for(cond, timeout=20.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if cond():
+                return True
+            time.sleep(0.2)
+        return False
+
+    try:
+        assert wait_for(lambda: b.state()["elapsed"] >= 1.0), (
+            f"progress never started: {b.state()}")
+        b.pause()
+        frozen = b.state()["elapsed"]
+        time.sleep(4)                        # wall-clock time passes...
+        assert b.state()["elapsed"] == frozen, (
+            "the paused station still reported progress "
+            f"({frozen} -> {b.state()['elapsed']})")
+        b.resume()
+        assert wait_for(lambda: b.state()["elapsed"] > frozen + 1.0), (
+            f"progress did not resume: {b.state()}")
+    finally:
+        b.stop()
+        player.join(timeout=10)
+
+
+def test_the_measured_length_replaces_a_wrong_catalogue_one(music_dir, has_ffmpeg):
+    """The catalogue length is mutagen's header estimate, which lies about VBR
+    files without a Xing header — the bar then hits 100% mid-song. Playing a file
+    measures it exactly, so the wrong number is corrected at the natural end."""
+    from app import db
+    from tests.conftest import make_mp3
+
+    path = make_mp3(music_dir / "mismeasured.mp3", seconds=3)
+    conn = db.connect()
+    conn.execute("INSERT INTO tracks(path, title, duration) VALUES(?, ?, ?)",
+                 (str(path), "Mismeasured", 90.0))
+    conn.commit()
+    track_id = conn.execute("SELECT id FROM tracks WHERE path = ?",
+                            (str(path),)).fetchone()["id"]
+
+    b = Broadcaster()
+    assert b._play_file(str(path), "track",
+                        {"track": {"id": track_id, "path": str(path),
+                                   "duration": 90.0}}) is True
+    stored = db.connect().execute("SELECT duration FROM tracks WHERE id = ?",
+                                  (track_id,)).fetchone()["duration"]
+    assert 2.0 <= stored <= 4.5, (
+        f"the catalogue still claims {stored}s for a 3s file")
+
+
+def test_a_skipped_track_is_not_measured(music_dir, has_ffmpeg):
+    """Only a track that played to its end measures the whole file; a skip must
+    not rewrite the catalogue with how far it happened to get."""
+    from app import db
+    from tests.conftest import make_mp3
+
+    path = make_mp3(music_dir / "cut.mp3", seconds=20)
+    conn = db.connect()
+    conn.execute("INSERT INTO tracks(path, title, duration) VALUES(?, ?, ?)",
+                 (str(path), "Cut", 90.0))
+    conn.commit()
+    track_id = conn.execute("SELECT id FROM tracks WHERE path = ?",
+                            (str(path),)).fetchone()["id"]
+
+    b = Broadcaster()
+    player = threading.Thread(
+        target=b._play_file,
+        args=(str(path), "track", {"track": {"id": track_id, "path": str(path),
+                                             "duration": 90.0}}),
+        daemon=True)
+    player.start()
+    time.sleep(2.5)
+    b.skip()
+    player.join(timeout=10)
+
+    stored = db.connect().execute("SELECT duration FROM tracks WHERE id = ?",
+                                  (track_id,)).fetchone()["duration"]
+    assert stored == 90.0, f"a skipped play overwrote the length with {stored}s"

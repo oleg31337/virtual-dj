@@ -249,6 +249,23 @@ def unplayable_count() -> int:
 
 # --- history ---------------------------------------------------------------
 
+def set_duration(track_id: int, seconds: float) -> None:
+    """Store the length we actually played, in seconds.
+
+    The scan writes mutagen's header estimate, which is short (or long) for VBR
+    files without a Xing header, so the UI's progress bar hits 100% while the
+    song is still playing. A full decode knows the true length; the scanner only
+    rewrites `duration` for files whose size or mtime changed, so this sticks.
+    """
+    seconds = float(seconds)
+    if seconds <= 0:
+        return
+    conn = connect()
+    conn.execute("UPDATE tracks SET duration = ? WHERE id = ?",
+                 (round(seconds, 1), int(track_id)))
+    conn.commit()
+
+
 def record_play(track_id: int | None) -> None:
     if track_id is None:
         return
