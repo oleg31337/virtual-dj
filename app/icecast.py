@@ -27,7 +27,11 @@ log = logging.getLogger(__name__)
 
 # Within the container / on the host, the app reaches its own HTTP server on
 # loopback. The pusher reads the MP3 from there and pushes it to Icecast.
-_PUSH_SOURCE_URL = "http://127.0.0.1:{port}/stream.mp3"
+#
+# `?internal=1` marks this connection as the station's own plumbing: it must be
+# served like any other client, but it must NOT count as a listener, or presence
+# could never reach zero and the station would never pause itself.
+_PUSH_SOURCE_URL = "http://127.0.0.1:{port}/stream.mp3?internal=1"
 
 
 class IcecastPusher:

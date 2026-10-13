@@ -225,6 +225,18 @@
         <input type="number" id="program-min-size" min="1" max="10" step="1" value="2" />
         <span class="dim">tracks — a small genre's run</span></label>
     </div>
+    <div class="row">
+      <label class="field inline"><input type="checkbox" id="pause-without-listeners" checked />
+        <span>Stop when nobody is listening</span>
+        <span class="dim">web players and Winamp/VLC/Sonos alike</span></label>
+      <label class="field inline"><span>Wait before stopping</span>
+        <input type="number" id="listener-grace" min="0" max="3600" step="5" value="30" />
+        <span class="dim">seconds — a player that reconnects is not a stop</span></label>
+      <label class="field inline"><span>Check Icecast every</span>
+        <input type="number" id="listener-poll" min="1" max="300" step="1" value="5" />
+        <span class="dim">seconds</span></label>
+    </div>
+    <div class="dim" id="presence-note"></div>
     <button id="save-program" class="primary">Save programs</button>
     <button id="program-select-all" class="ghost"
             title="Switch every theme back on">All on</button>

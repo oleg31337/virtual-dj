@@ -63,6 +63,14 @@ services:
       # "Volume normalization" card can override it at runtime — a value saved
       # in data/config.json wins.
       VDJ_LOUDNESS_WORKERS: "${VDJ_LOUDNESS_WORKERS:-2}"
+      # Pause the station while nobody is listening (browser/stream clients and
+      # Icecast mount listeners alike) and resume on the next connection. While
+      # paused the app keeps sending silence so the Icecast mount stays up. The
+      # web UI's Playback card can override these at runtime — a value saved in
+      # data/config.json wins.
+      VDJ_PAUSE_WITHOUT_LISTENERS: "${VDJ_PAUSE_WITHOUT_LISTENERS:-1}"
+      VDJ_LISTENER_GRACE_S: "${VDJ_LISTENER_GRACE_S:-30}"
+      VDJ_LISTENER_POLL_S: "${VDJ_LISTENER_POLL_S:-5}"
     ports:
       # Web UI / app API.
       - "${HTTP_PORT:-8420}:8420"

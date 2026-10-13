@@ -79,7 +79,41 @@ function renderState(s) {
   } else {
     $('np-program').style.display = 'none';
   }
-  $('listeners').textContent = `${s.listeners} listener${s.listeners === 1 ? '' : 's'}`;
+  // Who is listening (web + Icecast) and whether WE paused for lack of an
+  // audience. One writer per element — a duplicate writer silently wins.
+  const pres = s.listeners_detail;
+  if (pres && pres.auto_paused) {
+    $('listeners').textContent = 'paused — nobody listening';
+    $('listeners').className = 'pill warn';
+  } else if (pres) {
+    const parts = [`${pres.web} web`];
+    if (pres.icecast !== null && pres.icecast !== undefined) {
+      parts.push(`${pres.icecast} icecast`);
+    }
+    $('listeners').textContent =
+      `${pres.total} listener${pres.total === 1 ? '' : 's'} (${parts.join(' · ')})`;
+    $('listeners').className = pres.total ? 'pill ok' : 'pill';
+  } else {
+    $('listeners').textContent = `${s.listeners} listener${s.listeners === 1 ? '' : 's'}`;
+    $('listeners').className = 'pill';
+  }
+  const pnote = $('presence-note');
+  if (pnote) {
+    if (!pres || pres.enabled === false) {
+      pnote.textContent = 'Playback runs whether or not anybody is listening.';
+    } else if (pres.icecast_error) {
+      // Fail-safe, made visible: an unreachable Icecast is NOT zero listeners.
+      pnote.textContent = `Icecast is not answering (${pres.icecast_error}) — who is `
+        + 'listening is unknown, so the music keeps playing.';
+    } else if (pres.auto_paused) {
+      pnote.textContent = 'Paused after the last listener left; the next connection '
+        + 'starts the music again.';
+    } else if (pres.grace_left !== null && pres.grace_left !== undefined) {
+      pnote.textContent = `Nobody listening — stopping in ${Math.ceil(pres.grace_left)}s.`;
+    } else {
+      pnote.textContent = '';
+    }
+  }
   const t = s.track;
   $('np-title').textContent = t ? (t.title || t.path.split('/').pop()) : '—';
   $('np-artist').textContent = t ? (t.artist || 'Unknown artist') : '';
@@ -419,6 +453,9 @@ async function loadConfig() {
   $('program-min-size').value = cfg.playback?.program?.min_size ?? 2;
   $('artist-gap').value = cfg.playback?.artist_gap ?? 10;
   $('repeat-window').value = cfg.playback?.repeat_window ?? 50;
+  $('pause-without-listeners').checked = cfg.playback?.pause_without_listeners ?? true;
+  $('listener-grace').value = cfg.playback?.listener_grace_s ?? 30;
+  $('listener-poll').value = cfg.playback?.listener_poll_s ?? 5;
   $('program-strategy-sel').value = cfg.playback?.program?.strategy ?? 'genre';
   // Voice + prosody controls.
   $('dj-speed').value = Math.round((cfg.dj?.speed ?? 1.0) * 100);
@@ -1132,6 +1169,13 @@ function wire() {
           // programs and in the flat shuffle, and spans refills.
           artist_gap:
             Math.min(500, Math.max(0, Number($('artist-gap').value) || 0)),
+          // Presence: stop the station when nobody is listening (web player or
+          // Icecast) and start it again when somebody connects.
+          pause_without_listeners: $('pause-without-listeners').checked,
+          listener_grace_s:
+            Math.min(3600, Math.max(0, Number($('listener-grace').value) || 0)),
+          listener_poll_s:
+            Math.min(300, Math.max(1, Number($('listener-poll').value) || 5)),
         },
       }),
     });

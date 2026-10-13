@@ -31,6 +31,11 @@ Point VLC, Winamp, Sonos, or any browser at the stream URL and it just plays.
 
 - **Real radio stream** — one continuous `/stream.mp3` any player can open. New
   listeners join mid-song and start hearing audio instantly.
+- **Stops when nobody listens** — with no listener connected (browser, Icecast or
+  both) the station pauses itself — no decoding, no track consumed, no DJ break
+  written — and starts again the moment somebody tunes in. While paused it keeps
+  sending silence, so the Icecast mount never disappears and a new player can
+  always dial in.
 - **Talking DJ** — an LLM writes a short intro from the track's actual metadata;
   Piper speaks it. Frequency, length, persona, voice, and speed are all tunable.
 - **Grounded facts** — tags first, then MusicBrainz/Wikipedia. The prompt is
@@ -259,6 +264,49 @@ per-theme on/off switches in the *Programs* card. All of them live in
 | Repeat window | over 600 songs the closest a song came back was 64 plays (211 with a 200-song window) |
 | Decade selection | chips 2000s 3,381 · 1990s 2,391 · 1980s 699 · 1970s 387 · 1960s 157 · 1950s 29 · 1940s 3 · 1930s 2 · 1920s 3, plus 2,527 tracks with no usable year; selecting 80s+90s gave a queue with 0 tracks outside them ("covers 3,090 tracks") |
 
+
+## Playback stops when nobody is listening
+
+A LAN radio spends most of its life with no audience. With
+`playback.pause_without_listeners` on (the default), the station **stops itself**
+once nobody is connected — no MP3 decoding, no track consumed, no DJ break
+written and spoken by the LLM — and **starts again the moment somebody tunes in**.
+
+Presence is counted from two independent places, because the two kinds of
+listener are visible in different ways:
+
+| Listening via | Counted by | Reaction |
+|---|---|---|
+| Browser player or `mpv`/`curl` on `/stream.mp3` | the broadcaster, exactly | within half a second |
+| Winamp / VLC / Sonos on the Icecast mount | Icecast's status page, polled every `playback.listener_poll_s` (5 s) | within one poll |
+
+The app's own Icecast relay also reads `/stream.mp3` (it is marked `?internal=1`):
+it is served like any other client but never counts as an audience — otherwise
+presence could never reach zero and the station would never stop.
+
+Three knobs (Playback card in the web UI, `playback.*` in `config.json`, or the
+`VDJ_PAUSE_WITHOUT_LISTENERS` / `VDJ_LISTENER_GRACE_S` / `VDJ_LISTENER_POLL_S`
+environment variables):
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `pause_without_listeners` | `true` | The whole feature. Off = play to an empty room, as before. |
+| `listener_grace_s` | `30` | How long to keep playing after the last listener leaves, so a player that reconnects is not a stop. `0` = stop immediately. |
+| `listener_poll_s` | `5` | How often Icecast is asked how many listeners the mount has. |
+
+**Paused still means on air.** A pause broadcasts silence instead of going quiet,
+and that is deliberate: the app relays `/stream.mp3` into Icecast, and Icecast
+disconnects a source that sends nothing for `<source-timeout>` (30 s in the
+bundled `icecast.xml`). A silent pause would therefore remove the mount — every
+connected player dropped, and a new one unable to connect at all, so nothing
+could ever trigger the resume. The silence keeps the mount, and any player that
+dials in hears music again within a poll. The queue is not touched while paused:
+the next track starts where it left off.
+
+**An Icecast that cannot be asked is not an empty room.** If Icecast is enabled
+but its status page does not answer, presence is *unknown*, the music keeps
+playing, and the Playback card says so. A monitoring outage must never take the
+station off air.
 
 ## Listening
 

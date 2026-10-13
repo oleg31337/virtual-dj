@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 import threading
 import time
@@ -279,3 +280,98 @@ def test_failure_breaker_backs_off_and_reports_the_error():
     # Playing something successfully clears it.
     b._register_success()
     assert b.state()["error"] is None
+
+
+# --- pausing must not silence the socket --------------------------------------
+#
+# Icecast disconnects a source that sends nothing for <source-timeout> (30 s in
+# the bundled icecast.xml). The first pause implementation simply stopped
+# emitting bytes while it held the track, so a pause longer than that removed
+# the mount: listeners were dropped, and a new one could not even connect — so
+# nothing could ever trigger the resume. A pause now broadcasts silence.
+
+def test_a_pause_keeps_sending_audio(has_ffmpeg):
+    b = Broadcaster()
+    listener = b.add_listener()
+    b.pause()
+    worker = threading.Thread(target=b._pause_hold, daemon=True)
+    worker.start()
+    try:
+        data = listener.queue.get(timeout=15)
+        assert data, "a paused station must still send bytes"
+        assert data[0] == 0xFF and (data[1] & 0xE0) == 0xE0, (
+            "the stream must stay whole MPEG frames")
+    finally:
+        b.resume()
+        worker.join(timeout=5)
+    assert b.paused is False
+
+
+def test_the_pause_silence_is_really_silent(has_ffmpeg):
+    """Not just valid frames — frames that decode to (near) silence."""
+    frames = Broadcaster()._silence_frames()
+    assert frames, "silence must be generated"
+    probe = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "info", "-f", "mp3", "-i", "pipe:0",
+         "-af", "volumedetect", "-f", "null", "-"],
+        input=frames, capture_output=True, timeout=60,
+    )
+    text = probe.stderr.decode("utf-8", "replace")
+    assert "mean_volume" in text, f"ffmpeg could not decode the silence: {text[:300]}"
+    mean_db = float(text.split("mean_volume:")[1].split("dB")[0])
+    assert mean_db < -60, f"pause audio is not silent (mean {mean_db} dB)"
+
+
+def test_pause_silence_follows_the_stream_format(has_ffmpeg):
+    """A format change must re-encode rather than mix sample rates."""
+    config.save_config({"stream": {"bitrate_kbps": 192, "sample_rate": 48000}})
+    b = Broadcaster()
+    frames = b._silence_frames()
+    assert b._silence_key == (192, 48000, 2)
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "stream=sample_rate",
+         "-of", "json", "-"], input=frames, capture_output=True, timeout=30,
+    )
+    streams = json.loads(probe.stdout or b"{}").get("streams") or []
+    assert streams and int(streams[0]["sample_rate"]) == 48000
+
+
+# --- presence wiring ----------------------------------------------------------
+
+def test_listener_changes_notify_subscribers():
+    b = Broadcaster()
+    hits: list[int] = []
+    b.on_listeners_changed(lambda: hits.append(1))
+    listener = b.add_listener()
+    b.remove_listener(listener)
+    assert len(hits) == 2, "connect and disconnect must both notify"
+
+
+def test_the_apps_own_relay_is_served_but_never_counts_as_a_listener():
+    """The Icecast pusher holds a /stream.mp3 connection for the whole lifetime
+    of the app. If it counted, presence could never reach zero and the station
+    would never pause itself — exactly what the first live run showed (web=1
+    forever, nobody listening). It must still receive audio."""
+    b = Broadcaster()
+    relay = b.add_listener(audience=False)
+    assert b.listener_count() == 0
+    b._broadcast(b"audio")
+    assert relay.queue.get_nowait() == b"audio", "the relay must still be fed"
+
+    real = b.add_listener()
+    assert b.listener_count() == 1
+    b.remove_listener(real)
+    assert b.listener_count() == 0
+    b.remove_listener(relay)
+
+
+def test_state_reports_the_presence_watcher():
+    class Watcher:
+        def status(self):
+            return {"web": 1, "icecast": 0, "total": 1, "auto_paused": False}
+
+    b = Broadcaster()
+    assert b.state()["listeners_detail"] is None   # nothing attached yet
+    b.set_listener_watcher(Watcher())
+    detail = b.state()["listeners_detail"]
+    assert detail["total"] == 1 and detail["auto_paused"] is False

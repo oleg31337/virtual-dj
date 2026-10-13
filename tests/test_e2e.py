@@ -42,11 +42,15 @@ def live_server(tmp_path_factory):
 
     # DJ off: this test isolates the audio transport. The DJ pipeline has its
     # own live test below.
+    # Presence off too: these tests measure bytes on the wire, and auto-pause
+    # would (correctly) stop the station between tests. Presence has its own
+    # end-to-end file: tests/test_presence_e2e.py.
     (data_dir / "config.json").write_text(json.dumps({
         "music_dir": str(music),
         "dj": {"enabled": False},
         "enrich": {"enabled": False},
         "llm": {"enabled": False},
+        "playback": {"pause_without_listeners": False},
     }))
 
     port = _free_port()

@@ -269,6 +269,17 @@ DEFAULTS: dict[str, Any] = {
         # across programs, refills and the flat shuffle; relaxed (and counted)
         # only when the pool has too few artists to space. 0 disables it.
         "artist_gap": 10,
+        # Presence: stop the station when nobody is listening, start it again
+        # the moment somebody connects. Counts both the app's own /stream.mp3
+        # clients (the web player) and Icecast mount listeners (Winamp / VLC /
+        # Sonos), which are polled from Icecast's own status page.
+        "pause_without_listeners": env_flag("VDJ_PAUSE_WITHOUT_LISTENERS", True),
+        # How long the station keeps playing after the last listener leaves, so
+        # a player that reconnects (or a Sonos that reloads) does not make the
+        # music stop and start. 0 = pause immediately.
+        "listener_grace_s": env_int("VDJ_LISTENER_GRACE_S", 30),
+        # How often Icecast is asked how many listeners the mount has.
+        "listener_poll_s": env_int("VDJ_LISTENER_POLL_S", 5),
     },
     # Icecast delivery. When enabled, the app runs a *managed* Icecast2 server
     # (bundled in the same container) and a background ffmpeg ("the pusher")

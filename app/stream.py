@@ -99,12 +99,19 @@ class FrameAligner:
 
 
 class Listener:
-    """One connected client."""
+    """One connected client.
 
-    __slots__ = ("queue", "id", "connected_at", "dropped")
+    ``audience`` marks a real listener (a browser player, mpv, curl). The app's
+    own Icecast relay also holds a /stream.mp3 connection — it must be served,
+    but it must NOT count as somebody listening, or presence could never reach
+    zero and the station would never pause itself.
+    """
 
-    def __init__(self, listener_id: int) -> None:
+    __slots__ = ("queue", "id", "connected_at", "dropped", "audience")
+
+    def __init__(self, listener_id: int, audience: bool = True) -> None:
         self.id = listener_id
+        self.audience = audience
         self.queue: queue.Queue[bytes | None] = queue.Queue(maxsize=CLIENT_BUFFER_CHUNKS)
         self.connected_at = time.time()
         self.dropped = False
@@ -143,6 +150,13 @@ class Broadcaster:
         self._skip = threading.Event()
         self._paused = threading.Event()
         self._proc: subprocess.Popen | None = None
+        # Presence watcher (app/listeners.py), attached at startup so state()
+        # can report who is listening and who paused the station.
+        self._watcher: Any = None
+        # Cached silence, encoded once per stream format: what we broadcast
+        # while paused, so the Icecast source is never idle (see _pause_hold).
+        self._silence: bytes | None = None
+        self._silence_key: tuple[int, int, int] | None = None
         # Rolling history of recent broadcast bytes (Icecast-style burst
         # buffer): replayed to new listeners so players start with a full
         # jitter buffer instead of starving for the first few seconds.
@@ -171,16 +185,18 @@ class Broadcaster:
 
     # --- listener registry ------------------------------------------------
 
-    def add_listener(self) -> Listener:
+    def add_listener(self, audience: bool = True) -> Listener:
+        """Register a client. ``audience=False`` for the app's own relay."""
         with self._lock:
             self._listener_seq += 1
-            listener = Listener(self._listener_seq)
+            listener = Listener(self._listener_seq, audience=audience)
             burst_chunks = max(1, int(BURST_SECONDS * self._bytes_per_second()
                                       / CHUNK))
             for item in list(self._history)[-burst_chunks:]:
                 listener.put(item)
             self._listeners[listener.id] = listener
         self._notify_change()
+        self._notify_listeners_changed()
         return listener
 
     def remove_listener(self, listener: Listener) -> None:
@@ -188,10 +204,31 @@ class Broadcaster:
             self._listeners.pop(listener.id, None)
         listener.close()
         self._notify_change()
+        self._notify_listeners_changed()
 
     def listener_count(self) -> int:
+        """How many people are listening (the app's own relay does not count)."""
         with self._lock:
-            return len(self._listeners)
+            return sum(1 for listener in self._listeners.values() if listener.audience)
+
+    def on_listeners_changed(self, callback: Callable[[], None]) -> None:
+        """Called when a listener connects or leaves (never on a track change).
+
+        The presence watcher uses this to react the instant a browser connects
+        instead of waiting for its next tick.
+        """
+        self._listeners_changed.append(callback)
+
+    def _notify_listeners_changed(self) -> None:
+        for callback in list(self._listeners_changed):
+            try:
+                callback()
+            except Exception:
+                log.debug("listeners-changed callback failed", exc_info=True)
+
+    def set_listener_watcher(self, watcher: Any) -> None:
+        """Attach the presence watcher so ``state()`` can report it."""
+        self._watcher = watcher
 
     def _broadcast(self, data: bytes) -> None:
         with self._lock:
@@ -277,6 +314,58 @@ class Broadcaster:
 
     def _bytes_per_second(self) -> float:
         return int(config.get("stream.bitrate_kbps", 128)) * 1000.0 / 8.0
+
+    def _silence_frames(self) -> bytes:
+        """One second of MP3 silence as whole frames, cached per format.
+
+        This is what a pause broadcasts (see ``_pause_hold``). Anullsrc goes
+        through the same aligner as real audio so the stream never carries a
+        partial frame, and the format follows the stream config, so changing
+        bitrate/sample rate re-encodes instead of mixing formats.
+        """
+        bitrate = int(config.get("stream.bitrate_kbps", 128))
+        rate = int(config.get("stream.sample_rate", 44100))
+        channels = int(config.get("stream.channels", 2))
+        key = (bitrate, rate, channels)
+        if self._silence is not None and self._silence_key == key:
+            return self._silence
+        args = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+            "-f", "lavfi", "-i",
+            f"anullsrc=r={rate}:cl={'stereo' if channels == 2 else 'mono'}",
+            "-t", "1", "-c:a", "libmp3lame", "-b:a", f"{bitrate}k",
+            "-ar", str(rate), "-ac", str(channels),
+            "-f", "mp3", "-write_xing", "0", "-id3v2_version", "0", "pipe:1",
+        ]
+        try:
+            proc = subprocess.run(args, stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, timeout=20)
+            raw = proc.stdout or b""
+        except Exception:
+            log.warning("could not generate pause silence", exc_info=True)
+            return b""
+        frames = FrameAligner().feed(raw)  # whole frames only
+        self._silence, self._silence_key = frames, key
+        return frames
+
+    def _pause_hold(self) -> None:
+        """Wait out a pause while broadcasting silence in real time.
+
+        Emitting NOTHING is what the first implementation did, and it is wrong:
+        the app's own relay feeds Icecast, and Icecast disconnects a source that
+        sends nothing for ``source-timeout`` (30 s in the bundled icecast.xml).
+        The mount then disappears — so a listener arriving during the pause gets
+        no stream and can never trigger the resume.
+        """
+        frames = self._silence_frames()
+        next_at = time.monotonic()
+        while (self._paused.is_set() and not self._stop.is_set()
+               and not self._skip.is_set()):
+            now = time.monotonic()
+            if frames and now >= next_at:
+                self._broadcast(frames)
+                next_at = max(now, next_at) + 1.0
+            time.sleep(0.05)
 
     def _note_unplayable(self, path: str, kind: str, meta: dict[str, Any]) -> None:
         """Take a track whose file is gone out of the playable pool.
@@ -393,10 +482,9 @@ class Broadcaster:
                     time.sleep(min(ahead - MAX_AHEAD_SECONDS, 0.25))
 
                 if self._paused.is_set():
-                    # Hold the position; emit nothing (clients buffer/underrun
-                    # gracefully) until resumed.
-                    while self._paused.is_set() and not self._stop.is_set():
-                        time.sleep(0.2)
+                    # Hold the decoder where it is (so resuming continues the
+                    # same track) and keep the line alive with silence.
+                    self._pause_hold()
                     start = time.monotonic() - (sent / bps)
 
                 self._broadcast(data)
@@ -471,6 +559,12 @@ class Broadcaster:
         log.info("broadcaster started")
         while not self._stop.is_set():
             try:
+                if self._paused.is_set():
+                    # Nobody is listening: stay off the queue entirely, so no
+                    # track is consumed and no DJ break is aired to an empty
+                    # house, while the silence keeps the mount alive.
+                    self._pause_hold()
+                    continue
                 nxt = SCHEDULER.pop_next()
                 if nxt is None:
                     self._idle_tone()
@@ -561,6 +655,9 @@ class Broadcaster:
             "duration": now.get("duration"),
             "paused": self.paused,
             "listeners": self.listener_count(),
+            # Who is listening and who paused the station (web + Icecast, with
+            # "unknown" spelled out), so the UI can explain an auto-pause.
+            "listeners_detail": (self._watcher.status() if self._watcher else None),
             # Set when queued files keep failing to play (library not mounted /
             # moved). The UI shows this as a warning instead of looking idle.
             "error": self._playback_error,

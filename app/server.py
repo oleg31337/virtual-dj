@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from . import config, db, dj, library, websearch, ai_meta
 from . import icecast as icecast_mod
 from . import icecast_server as icecast_server_mod
+from . import listeners
 from . import loudness
 from . import maintenance
 from .scheduler import SCHEDULER
@@ -64,6 +65,10 @@ async def lifespan(app: FastAPI):
     SCHEDULER.start()
     BROADCASTER.on_change(_push_state)
     BROADCASTER.start()
+    # Presence: pause the station when nobody is listening (web or Icecast) and
+    # resume when somebody connects. Started after the broadcaster so the first
+    # decision already has a live listener count.
+    listeners.start_watcher(BROADCASTER)
     # Managed Icecast server (bundled) must be up before the pusher feeds it.
     icecast_server_mod.SERVER.start()
     icecast_mod.PUSHER.start()
@@ -79,6 +84,8 @@ async def lifespan(app: FastAPI):
     finally:
         maintenance.MAINTAINER.stop()
         loudness.ANALYZER.stop(timeout_s=3.0)
+        if listeners.WATCHER is not None:
+            listeners.WATCHER.stop()
         icecast_mod.PUSHER.stop()
         icecast_server_mod.SERVER.stop()
         BROADCASTER.stop()
@@ -204,8 +211,14 @@ def _get_chunk(listener) -> bytes | None:
 
 @app.get("/stream.mp3", response_class=_RawStreamResponse)
 async def stream_mp3(request: Request):
-    """Infinite MP3 stream. Compatible with VLC, Winamp, Sonos, browsers."""
-    listener = BROADCASTER.add_listener()
+    """Infinite MP3 stream. Compatible with VLC, Winamp, Sonos, browsers.
+
+    ``?internal=1`` is the app's own Icecast relay reading this stream: it gets
+    the same audio but is not counted as somebody listening (see
+    app/listeners.py — presence drives the auto-pause).
+    """
+    internal = bool(request.query_params.get("internal"))
+    listener = BROADCASTER.add_listener(audience=not internal)
     return _RawStreamResponse(
         listener,
         config.get("stream.station_name", "Virtual DJ"),
@@ -309,38 +322,15 @@ def api_programs():
 def api_icecast_status():
     """Live Icecast mount info (listener count, connected) for the web UI.
 
-    Icecast's own status endpoint isn't CORS-reachable from the browser, so
-    the app proxies it server-side. Returns a small shape regardless of
-    whether Icecast is enabled or reachable.
+    Icecast's own status endpoint isn't CORS-reachable from the browser, so the
+    app proxies it server-side. ``app/listeners.py`` owns the fetch, because the
+    presence watcher needs exactly the same answer. ``known`` is false when
+    Icecast could not be asked at all — that is NOT the same as "no listeners",
+    and the watcher keeps playing in that case.
     """
     if not config.get("icecast.enabled", False):
         return {"enabled": False}
-    host = config.get("icecast.host", "127.0.0.1")
-    port = int(config.get("icecast.port", 8008))
-    mount = "/" + str(config.get("icecast.mount", "virtualdj")).lstrip("/")
-    try:
-        import httpx
-        r = httpx.get(
-            f"http://{host}:{port}/status-json.xsl?mount={mount}",
-            timeout=4.0,
-        )
-        if r.status_code == 200:
-            src = r.json().get("icestats", {}).get("source", {})
-            if isinstance(src, list):
-                src = src[0] if src else {}
-            return {
-                "enabled": True,
-                "connected": True,
-                "mount": mount,
-                "listeners": int(src.get("listeners", 0) or 0),
-                "server_name": src.get("server_name"),
-                "bitrate": src.get("bitrate"),
-            }
-        return {"enabled": True, "connected": False, "mount": mount,
-                "listeners": 0, "error": f"icecast returned {r.status_code}"}
-    except Exception as exc:  # noqa: BLE001 - report any connectivity issue
-        return {"enabled": True, "connected": False, "mount": mount,
-                "listeners": 0, "error": str(exc)}
+    return listeners.icecast_status()
 
 
 @app.post("/api/icecast/restart")
