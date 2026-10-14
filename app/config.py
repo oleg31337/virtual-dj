@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import random
 import threading
@@ -362,6 +363,12 @@ def unknown_paths(patch: dict[str, Any], *, allow_prefixes: tuple[str, ...] = ()
     def walk(node, prefix: str) -> None:
         for key, value in (node or {}).items():
             path = f"{prefix}.{key}" if prefix else str(key)
+            if str(key).startswith("_"):
+                # `config.example.json` documents every knob with `_`-prefixed
+                # comment keys (and the README tells users to copy that file to
+                # data/config.json), so a stored comment must not turn a later
+                # write into a 422.
+                continue
             if any(path == p or path.startswith(p + ".") for p in allow_prefixes):
                 continue
             if path not in known:
@@ -389,7 +396,18 @@ def load_config(force: bool = False) -> dict[str, Any]:
         if CONFIG_PATH.exists():
             try:
                 stored = json.loads(CONFIG_PATH.read_text("utf-8"))
-            except (json.JSONDecodeError, OSError):
+            except (json.JSONDecodeError, OSError) as exc:
+                # Never fatal — but never silent either: running entirely on
+                # DEFAULTS means the user's music_dir, voice and filters are all
+                # gone, which otherwise looks like "the library emptied itself".
+                log.warning("could not read %s (%s); using defaults",
+                            CONFIG_PATH, exc)
+                stored = {}
+            if not isinstance(stored, dict):
+                # A JSON array/string/scalar here would make the merge below
+                # raise AttributeError and take the whole app down at startup.
+                log.warning("%s does not hold a JSON object (%s); using defaults",
+                            CONFIG_PATH, type(stored).__name__)
                 stored = {}
         _CACHE = _deep_merge(DEFAULTS, stored)
         return deepcopy(_CACHE)
@@ -424,6 +442,28 @@ def get(dotpath: str, default: Any = None) -> Any:
             return default
         node = node[part]
     return node
+
+
+def number(dotpath: str, default: float, lo: float | None = None,
+           hi: float | None = None) -> float:
+    """Read a numeric setting, tolerating junk in a hand-edited config.
+
+    ``int(config.get("cache.dj_keep_files"))`` raises on "100 files" or on a
+    list, and a config file is editable by hand and through ``PUT /api/config``
+    (which validates key NAMES, not types). A junk value must never kill the
+    thread or the endpoint that reads it, so every numeric knob goes through here.
+    """
+    try:
+        value = float(get(dotpath, default))
+    except (TypeError, ValueError):
+        return default
+    if not math.isfinite(value):
+        return default
+    if lo is not None:
+        value = max(lo, value)
+    if hi is not None:
+        value = min(value, hi)
+    return value
 
 
 def randint_range(dot_min: str, dot_max: str, default_min: int,

@@ -179,3 +179,33 @@ def test_startup_sweep_runs_on_start(data_dir):
         assert not (config.DJ_CACHE_DIR / "ancient.mp3").exists(), "no startup sweep"
     finally:
         m.stop()
+
+
+def test_junk_cache_config_cannot_break_the_sweep_or_the_stats(data_dir, monkeypatch):
+    """A hand-edited (or API-written) value is a type the code never expected:
+    it used to raise out of the housekeeping thread, which stopped all further
+    pruning for the life of the process — and made /api/cache/stats a 500."""
+    _break("a.mp3")
+    monkeypatch.setitem(config._CACHE, "cache", {
+        "enabled": True, "cleanup_interval_minutes": "10 minutes",
+        "dj_keep_files": ["lots"], "dj_max_age_hours": None,
+        "dj_max_mb": "256MB", "tmp_grace_minutes": "",
+    })
+    stats = maintenance.cache_stats()               # must not raise
+    assert stats["interval_minutes"] == 10          # documented defaults
+    assert stats["keep_files"] == 100
+    assert maintenance.clean()["removed_files"] == 0  # newest file is kept
+
+
+def test_a_file_whose_timestamp_is_unreadable_is_kept(data_dir, monkeypatch):
+    """'Could not stat' is not 'created in 1970': a transient failure must not
+    delete a file (or a DJ break the queue is about to play)."""
+    victim = _break("ancient.mp3", age_s=10 * 24 * 3600)
+    real_mtime = maintenance._mtime
+    monkeypatch.setattr(maintenance, "_mtime",
+                        lambda p: None if p.name == victim.name else real_mtime(p))
+
+    report = maintenance.clean()
+
+    assert victim.exists()
+    assert all("ancient.mp3" not in entry for entry in report["removed"])

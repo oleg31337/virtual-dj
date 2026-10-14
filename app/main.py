@@ -5,11 +5,10 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 
 import uvicorn
 
-from . import config
+from . import config, normalize_level
 
 log = logging.getLogger("virtual_dj")
 
@@ -68,31 +67,19 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001 - never block boot on a check
         log.debug("could not check the DJ voice: %s", exc)
 
-    # Stop the Icecast daemon + pusher promptly on SIGTERM (e.g. `docker stop`)
-    # so the open /stream.mp3 connection the pusher holds closes *before*
-    # uvicorn drains, keeping shutdown quiet. The lifespan `finally` also
-    # stops these on the shutdown event; this just front-runs it.
-    def _stop_streaming_services(*_sig) -> None:
-        try:
-            from . import icecast as _icecast, icecast_server as _icecast_srv
-            _icecast.PUSHER.stop()
-            _icecast_srv.SERVER.stop()
-        except Exception:  # noqa: BLE001 - never let a signal handler crash
-            pass
-
-    import signal as _signal
-    try:
-        _signal.signal(_signal.SIGTERM, _stop_streaming_services)
-        _signal.signal(_signal.SIGINT, _stop_streaming_services)
-    except ValueError:
-        pass  # not in main thread (e.g. reload worker); safe to skip
-
+    # SIGTERM (`docker stop`) is uvicorn's to handle: Server.run() installs its
+    # own handlers and would overwrite anything set here, so the services are
+    # stopped by the lifespan's shutdown path instead (app/server.py).
     uvicorn.run(
         "app.server:app",
         host=args.host,
         port=args.port,
         reload=args.reload,
-        log_level=args.log_level.lower(),
+        # uvicorn does LOG_LEVELS[level.lower()] and raises KeyError on an
+        # unknown name, so an odd VDJ_LOG_LEVEL must be downgraded here too
+        # (uvicorn's own set includes "trace", which `logging` does not know).
+        log_level=normalize_level(args.log_level, default="info",
+                                  extra=("TRACE",)).lower(),
         access_log=False,
         # The Icecast pusher keeps an open /stream.mp3 connection for the whole
         # lifetime of the app. On `docker stop` we cancel that task promptly

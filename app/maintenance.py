@@ -26,7 +26,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from . import config
 
@@ -56,11 +56,23 @@ def _size(path: Path) -> int:
         return 0
 
 
-def _mtime(path: Path) -> float:
+def _mtime(path: Path) -> float | None:
+    """Modification time, or None when it cannot be read.
+
+    Returning 0.0 instead ("the epoch") made an unreadable file look ancient:
+    a transient stat failure on the media mount was enough to delete a file (or
+    a DJ break the queue was about to play) instead of skipping it.
+    """
     try:
         return path.stat().st_mtime
     except OSError:
-        return 0.0
+        return None
+
+
+def _age_ok(path: Path) -> float | None:
+    """Age in hours, or None when the mtime could not be read."""
+    mtime = _mtime(path)
+    return None if mtime is None else (time.time() - mtime) / 3600.0
 
 
 def protected_names() -> set[str]:
@@ -87,18 +99,21 @@ def cache_stats() -> dict[str, Any]:
     """Current footprint of everything the app may prune."""
     dj = _files(config.DJ_CACHE_DIR, (".mp3",))
     stale = _stale_files()
+    known = [m for m in (_mtime(p) for p in dj) if m is not None]
     return {
         "dj_files": len(dj),
         "dj_bytes": sum(_size(p) for p in dj),
-        "dj_oldest_hours": round((time.time() - min((_mtime(p) for p in dj), default=time.time())) / 3600, 1),
+        "dj_oldest_hours": round((time.time() - min(known, default=time.time())) / 3600, 1),
         "stale_files": len(stale),
         "stale_bytes": sum(_size(p) for p in stale),
         "voices_bytes": sum(_size(p) for p in _files(config.voices_dir())),
         "enabled": bool(config.get("cache.enabled", True)),
-        "interval_minutes": int(config.get("cache.cleanup_interval_minutes", 10) or 10),
-        "keep_files": int(config.get("cache.dj_keep_files", 100) or 0),
-        "max_age_hours": float(config.get("cache.dj_max_age_hours", 48) or 0),
-        "max_mb": float(config.get("cache.dj_max_mb", 256) or 0),
+        # config.number never raises: a hand-edited value used to 500 this
+        # endpoint (and kill the housekeeping thread, see Maintainer._run).
+        "interval_minutes": int(config.number("cache.cleanup_interval_minutes", 10, 1)),
+        "keep_files": int(config.number("cache.dj_keep_files", 100, 0)),
+        "max_age_hours": config.number("cache.dj_max_age_hours", 48, 0),
+        "max_mb": config.number("cache.dj_max_mb", 256, 0),
         "last_run": _LAST.get("at"),
         "last_removed_files": _LAST.get("removed_files", 0),
         "last_removed_bytes": _LAST.get("removed_bytes", 0),
@@ -106,12 +121,13 @@ def cache_stats() -> dict[str, Any]:
 
 
 def _stale_files() -> list[Path]:
-    grace = float(config.get("cache.tmp_grace_minutes", 60) or 0) * 60
+    grace = config.number("cache.tmp_grace_minutes", 60, 0) * 60
     cutoff = time.time() - grace
     found: list[Path] = []
     for directory in (config.DATA_DIR, config.CACHE_DIR, config.voices_dir()):
         for path in _files(directory, STALE_SUFFIXES):
-            if _mtime(path) < cutoff:
+            mtime = _mtime(path)
+            if mtime is not None and mtime < cutoff:  # unknown age: keep it
                 found.append(path)
     return found
 
@@ -135,6 +151,12 @@ def clean(force: bool = False) -> dict[str, Any]:
 
     def drop(path: Path, why: str) -> None:
         nonlocal freed
+        if path.name in protected_names():
+            # Re-read the queue immediately before every unlink: the scheduler
+            # prepares breaks while this sweep runs, and deleting the file of a
+            # talk that is about to air silences the DJ for that track.
+            log.debug("keeping %s: the queue is about to play it", path.name)
+            return
         try:
             size = _size(path)
             path.unlink()
@@ -149,21 +171,20 @@ def clean(force: bool = False) -> dict[str, Any]:
         drop(path, "stale temporary file")
 
     # 2. the DJ audio cache, newest-first, respecting the queue
-    keep_count = int(config.get("cache.dj_keep_files", 100) or 0)
-    max_age_h = float(config.get("cache.dj_max_age_hours", 48) or 0)
-    max_bytes = float(config.get("cache.dj_max_mb", 256) or 0) * 1024 * 1024
-    now = time.time()
+    keep_count = int(config.number("cache.dj_keep_files", 100, 0))
+    max_age_h = config.number("cache.dj_max_age_hours", 48, 0)
+    max_bytes = config.number("cache.dj_max_mb", 256, 0) * 1024 * 1024
 
     entries = sorted(
         (p for p in _files(config.DJ_CACHE_DIR, (".mp3",)) if p.name not in protect),
-        key=_mtime,
+        key=lambda p: _mtime(p) or 0.0,
         reverse=True,
     )
     kept_bytes = 0
     for index, path in enumerate(entries):
-        age_h = (now - _mtime(path)) / 3600
+        age_h = _age_ok(path)
         over_count = keep_count and index >= keep_count
-        too_old = max_age_h and age_h > max_age_h
+        too_old = bool(max_age_h) and age_h is not None and age_h > max_age_h
         over_size = max_bytes and kept_bytes + _size(path) > max_bytes
         if over_count or too_old or over_size:
             # Protected files were filtered out above; anything here is safe.
@@ -206,7 +227,10 @@ class Maintainer:
         except Exception as exc:  # noqa: BLE001
             log.debug("startup cache cleanup failed: %s", exc)
         while not self._stop.is_set():
-            minutes = int(config.get("cache.cleanup_interval_minutes", 10) or 10)
+            # config.number cannot raise: a junk interval used to escape this
+            # thread (the read sat outside the try), which stopped all further
+            # pruning for the life of the process.
+            minutes = int(config.number("cache.cleanup_interval_minutes", 10, 1))
             # Re-read the interval each tick so a config change (or a disabled
             # cache) takes effect without a restart.
             if self._stop.wait(max(60, minutes * 60)):
