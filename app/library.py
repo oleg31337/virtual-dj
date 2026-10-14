@@ -83,6 +83,10 @@ class ScanStatus:
     genres_found: int = 0
     ai_genres: int = 0
     ai_resolved_count: int = 0
+    # Files whose *name* cannot be stored: os.walk decodes a non-UTF-8 name with
+    # surrogateescape, and SQLite refuses those surrogates. They are skipped and
+    # counted (instead of aborting the whole scan) so the report can say so.
+    skipped_names: int = 0
     reasons: dict[str, int] = field(default_factory=dict)
     started_at: float | None = None
     finished_at: float | None = None
@@ -109,6 +113,7 @@ class ScanStatus:
                 "genres_found": self.genres_found,
                 "ai_genres": self.ai_genres,
                 "ai_resolved": self.ai_resolved_count,
+                "skipped_names": self.skipped_names,
                 "reasons": dict(self.reasons),
                 "reason_labels": {
                     key: REJECTION_LABELS.get(key, key)
@@ -123,6 +128,24 @@ class ScanStatus:
 
 
 STATUS = ScanStatus()
+
+# A scan may remove vanishing files, but never this many-and-more-than-half at
+# once: that shape means the mount returned a partial listing, not that the
+# user deleted their collection (the 0-file case has its own guard).
+_MASS_DELETE_MIN = 25
+
+
+def _as_int(value: object, default: int | None = None) -> int | None:
+    """Coerce a config value to ``int`` without raising.
+
+    Config values come from the web UI and from a hand-editable config.json, so
+    a stray string must not 500 the card that reads it. ``None`` (or a value
+    that cannot be parsed) yields ``default``.
+    """
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
 
 
 def _first_tag(tags: Any, keys: tuple[str, ...]) -> str | None:
@@ -329,6 +352,19 @@ def iter_audio_files(root: Path) -> Iterator[Path]:
                 yield Path(dirpath) / name
 
 
+def _under(path: str, root: str) -> bool:
+    """Is ``path`` the scanned ``root`` or inside it? (path-component test)
+
+    A raw ``str.startswith`` is not a boundary test: with root ``/mnt/mp3`` an
+    indexed ``/mnt/mp3-flac/...`` or ``/mnt/mp31/...`` row looks "inside" and
+    would be deleted by a scan that never walked it.
+    """
+    if not root:
+        return False
+    prefix = root if root.endswith(os.sep) else root + os.sep
+    return path == root or path.startswith(prefix)
+
+
 def scan_library(music_dir: str | None = None, full: bool = False,
                  use_web: bool | None = None) -> dict[str, Any]:
     """Index every audio file under ``music_dir``.
@@ -353,6 +389,7 @@ def scan_library(music_dir: str | None = None, full: bool = False,
         STATUS.from_tags = STATUS.from_path = STATUS.from_web = STATUS.from_ai = 0
         STATUS.excluded = STATUS.web_lookups = STATUS.genres_found = 0
         STATUS.ai_genres = STATUS.ai_resolved_count = 0
+        STATUS.skipped_names = 0
         STATUS.reasons = {}
         STATUS.started_at = time.time()
         STATUS.finished_at = None
@@ -440,31 +477,46 @@ def scan_library(music_dir: str | None = None, full: bool = False,
                     reason = meta.get("exclude_reason") or "unknown"
                     STATUS.reasons[reason] = STATUS.reasons.get(reason, 0) + 1
 
-            if prior is None:
-                conn.execute(
-                    "INSERT INTO tracks(path,title,artist,album,genre,year,duration,"
-                    "mtime,size,missing,excluded,exclude_reason,meta_source,"
-                    "ai_resolved,ai_genre) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,0,?,?,?,?,?)",
-                    (spath, meta["title"], meta["artist"], meta["album"],
-                     meta["genre"], meta["year"], meta["duration"],
-                     stat.st_mtime, stat.st_size,
-                     meta["excluded"], meta["exclude_reason"], meta["meta_source"],
-                     meta["ai_resolved"], meta["ai_genre"]),
-                )
-                STATUS.added += 1
-            else:
-                conn.execute(
-                    "UPDATE tracks SET title=?,artist=?,album=?,genre=?,year=?,"
-                    "duration=?,mtime=?,size=?,missing=0,excluded=?,"
-                    "exclude_reason=?,meta_source=?,ai_resolved=?,ai_genre=? "
-                    "WHERE id=?",
-                    (meta["title"], meta["artist"], meta["album"], meta["genre"],
-                     meta["year"], meta["duration"], stat.st_mtime, stat.st_size,
-                     meta["excluded"], meta["exclude_reason"], meta["meta_source"],
-                     meta["ai_resolved"], meta["ai_genre"], prior[0]),
-                )
-                STATUS.updated += 1
+            try:
+                if prior is None:
+                    conn.execute(
+                        "INSERT INTO tracks(path,title,artist,album,genre,year,duration,"
+                        "mtime,size,missing,excluded,exclude_reason,meta_source,"
+                        "ai_resolved,ai_genre) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,0,?,?,?,?,?)",
+                        (spath, meta["title"], meta["artist"], meta["album"],
+                         meta["genre"], meta["year"], meta["duration"],
+                         stat.st_mtime, stat.st_size,
+                         meta["excluded"], meta["exclude_reason"], meta["meta_source"],
+                         meta["ai_resolved"], meta["ai_genre"]),
+                    )
+                    STATUS.added += 1
+                else:
+                    conn.execute(
+                        "UPDATE tracks SET title=?,artist=?,album=?,genre=?,year=?,"
+                        "duration=?,mtime=?,size=?,missing=0,excluded=?,"
+                        "exclude_reason=?,meta_source=?,ai_resolved=?,ai_genre=? "
+                        "WHERE id=?",
+                        (meta["title"], meta["artist"], meta["album"], meta["genre"],
+                         meta["year"], meta["duration"], stat.st_mtime, stat.st_size,
+                         meta["excluded"], meta["exclude_reason"], meta["meta_source"],
+                         meta["ai_resolved"], meta["ai_genre"], prior[0]),
+                    )
+                    STATUS.updated += 1
+            except UnicodeEncodeError:
+                # The file name is not valid UTF-8: os.walk decoded it with
+                # surrogateescape and SQLite refuses to store those surrogates.
+                # Skip THIS file and keep going -- one such name used to raise
+                # out of the whole scan, leaving every later file unindexed.
+                # The file itself is untouched and still plays; rename it (to
+                # valid UTF-8) and rescan to index it.
+                with STATUS.lock:
+                    STATUS.skipped_names += 1
+                log.warning(
+                    "library scan: cannot store the name of %r (not valid "
+                    "UTF-8); rename it and rescan", spath)
+                conn.rollback()
+                continue
 
             # Commit per file: read_metadata (web/AI lookups) runs before the
             # INSERT/UPDATE above, so committing now means the write lock is
@@ -483,8 +535,16 @@ def scan_library(music_dir: str | None = None, full: bool = False,
             log.warning("library scan: %s", msg)
             with STATUS.lock:
                 STATUS.error = msg
+        elif STATUS.skipped_names:
+            log.warning(
+                "library scan: %d file(s) were not indexed because their names "
+                "are not valid UTF-8; rename them and rescan",
+                STATUS.skipped_names,
+            )
 
-        gone = [p for p in existing if p not in seen and p.startswith(str(root))]
+        root_str = str(root)
+        under_root = [p for p in existing if _under(p, root_str)]
+        gone = [p for p in under_root if p not in seen]
         if gone and STATUS.total_seen == 0:
             # The folder is empty / not mounted (0 files seen). Deleting every
             # previously-indexed track here would wipe the library on a
@@ -499,6 +559,30 @@ def scan_library(music_dir: str | None = None, full: bool = False,
                     f"0 files found in {root} but {len(gone)} tracks are "
                     "indexed — nothing was removed. Check the mount, then "
                     "rescan."
+                )
+            gone = []
+        if (gone and not full
+                and len(gone) >= _MASS_DELETE_MIN
+                and len(gone) * 2 > len(under_root)):
+            # Same class of failure, one step milder: a stale or partially
+            # listed mount can return SOME files while hiding whole
+            # directories, so total_seen > 0 and the 0-file guard above never
+            # fires. Deleting half the library -- and its play history -- on
+            # such a walk is worse than keeping rows for files we could not see
+            # this time: nothing is lost by rescanning once the mount is back.
+            # A FULL scan means the user asked for the deep pass, so it is the
+            # way to confirm that files really are gone.
+            log.warning(
+                "scan would remove %d of %d indexed tracks under %s; skipping "
+                "removal (partial/stale mount? run a full scan to confirm the "
+                "files are really gone)", len(gone), len(under_root), root,
+            )
+            with STATUS.lock:
+                STATUS.error = (
+                    f"{len(gone)} of {len(under_root)} indexed tracks under "
+                    f"{root} were not seen by this scan — nothing was removed "
+                    "(partial mount?). Check the mount, then rescan, or run a "
+                    "full scan to remove them for real."
                 )
             gone = []
         if gone:
@@ -672,9 +756,10 @@ def decade_selection(decades: list[int] | None = None) -> dict[str, Any]:
     those are unreachable while a selection is active and the card must say so
     instead of letting them look lost.
     """
-    selected = [int(d) for d in (decades if decades is not None
-                                else (config.get("playback", {}) or {}).get("decades")
-                                or [])]
+    selected = [n for n in (_as_int(d) for d in (
+        decades if decades is not None
+        else (config.get("playback", {}) or {}).get("decades") or []
+    )) if n]
     row = db.connect().execute(
         "SELECT COUNT(*) AS n FROM tracks WHERE missing=0 AND excluded=0 "
         "AND (year IS NULL OR TRIM(year) = '' "
@@ -839,8 +924,10 @@ def artist_run_cap() -> int:
 def _selected_decades(playback: dict[str, Any] | None = None) -> list[int] | None:
     """The decade selection as `query_tracks(decades=...)` wants it."""
     playback = playback if playback is not None else (config.get("playback", {}) or {})
-    selected = [int(d) for d in (playback.get("decades") or [])
-                if str(d).strip() != ""]
+    selected = [n for n in (
+        _as_int(d) for d in ((playback or {}).get("decades") or [])
+        if str(d).strip() != ""
+    ) if n]
     return selected or None
 
 
@@ -879,7 +966,7 @@ def gap_is_enforceable(gap: int | None = None) -> bool:
     ``gap_break``. Like ``cap_is_enforceable`` this is a hint for the card — the
     queue builder is the authority and never goes silent over it.
     """
-    gap = artist_gap() if gap is None else max(0, int(gap))
+    gap = artist_gap() if gap is None else max(0, _as_int(gap, 0) or 0)
     if gap <= 1:
         return True
     playback = config.get("playback", {}) or {}
@@ -1092,8 +1179,8 @@ def program_selection(strategy: str, size: int, limit: int) -> dict[str, Any]:
     to be able to fill. Requiring a full ``size`` of tracks from an artist would
     hide artists that can host a (short) program and make the cap unreachable.
     """
-    size = max(2, int(size))
-    limit = max(1, int(limit))
+    size = max(2, _as_int(size, 2) or 2)
+    limit = max(1, _as_int(limit, 1) or 1)
     cap = artist_run_cap()
     themes = program_themes(strategy)
     counts = [int(t.get("n", 0) or 0) for t in themes]

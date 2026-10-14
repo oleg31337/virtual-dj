@@ -311,6 +311,17 @@ def recent_played_artists(window: int = 50) -> list[str]:
 
 
 def recent_history(limit: int = 50) -> list[dict[str, Any]]:
+    """The last ``limit`` plays for the History panel.
+
+    Clamped: this comes straight from a query string, and SQLite reads
+    ``LIMIT -1`` as *no limit* — so ``?limit=-1`` used to return the whole play
+    history, and ``?limit=99999999`` the same.
+    """
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 50
+    limit = max(1, min(limit, 500))
     rows = connect().execute(
         "SELECT h.played_at, t.id, t.title, t.artist, t.album "
         "FROM history h LEFT JOIN tracks t ON t.id = h.track_id "

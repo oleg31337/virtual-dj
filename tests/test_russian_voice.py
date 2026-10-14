@@ -115,3 +115,22 @@ def test_fallback_script_russian():
     assert "две тысячи семь" not in out
     # Must be Cyrillic (not transliterated).
     assert "Котики" in out
+
+
+def test_prepare_script_uses_the_configured_voice_language(monkeypatch):
+    """The on-air path resolves the language from the CONFIGURED voice.
+
+    generate_script resolves language from `voice or config["dj.voice"]` and
+    then calls prepare_script without a voice id, so a Russian setup used to be
+    cleaned on the English branch: stress marks stripped and the year spelled as
+    English words (the Russian voice reads numerals natively).
+    """
+    monkeypatch.setitem(config.DEFAULTS["dj"], "voice", "ru_RU-irina-medium")
+    out = dj.prepare_script("Приве\u0301т, слушаем хит 1984 года.")
+    assert "1984" in out
+    assert "nineteen" not in out
+    # The accent survived as the combining acute espeak-ng obeys.
+    assert "\u0301" in out
+    # An explicit language still wins over the configured voice.
+    assert "nineteen eighty-four" in dj.prepare_script(
+        "hit from 1984", language="english")

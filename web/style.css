@@ -139,7 +139,7 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .pc-label { font-weight: 600; }
 .pc-len {
   color: var(--accent); font-size: 11px; font-weight: 600;
-  border: 1px solid var(--line); border-radius: 4px; padding: 0 4px;
+  border: 1px solid var(--border); border-radius: 4px; padding: 0 4px;
 }
 .pc-len::after { content: " tracks"; font-weight: 400; color: var(--dim); }
 .pc-n { color: var(--dim); font-size: 11px; }

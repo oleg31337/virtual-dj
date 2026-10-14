@@ -83,3 +83,33 @@ def test_infer_genre_none_when_disabled(monkeypatch):
     monkeypatch.setattr(ai_meta.config, "get",
                         lambda dot, d=None: False if dot == "ai.free_text_genre" else d)
     assert ai_meta.infer_genre("X", "Y") is None
+
+
+def test_unreachable_model_is_not_cached(monkeypatch):
+    """A down (or switched-off) model must not be remembered as "no genre".
+
+    _ollama_chat returns None both for "answered nothing" and, previously, for
+    "could not be reached" -- and the None answer was cached, so one outage
+    froze every track it saw as genre-less across rescans.
+    """
+    calls = {"n": 0}
+
+    def unavailable(*a, **k):
+        calls["n"] += 1
+        raise ai_meta.LLMUnavailable("model is down")
+
+    monkeypatch.setattr(ai_meta, "_ollama_chat", unavailable)
+    assert ai_meta.infer_genre("X", "Y") is None
+    assert ai_meta.infer_genre("X", "Y") is None
+    # Both calls reached the model: the first answer was not cached.
+    assert calls["n"] == 2
+    res = ai_meta.recover_names("X", "Y")
+    assert res["confident"] is False
+    assert calls["n"] == 3
+
+
+def test_canon_prefers_the_longest_genre_match():
+    # "progressive rock" is Progressive, not the earlier-listed "Rock".
+    assert ai_meta._canon("progressive rock") == "Progressive"
+    assert ai_meta._canon("indie rock") == "Indie"
+    assert ai_meta._canon("heavy metal") == "Metal"

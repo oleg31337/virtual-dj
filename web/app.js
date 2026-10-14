@@ -21,6 +21,27 @@ const state = {
   playing: false,
 };
 
+// Handles of the two self-recursive pollers. They exist so a poller is started
+// at most once (see startLoudnessPoll/startScanPoll).
+let scanPoll = null;
+let loudnessPoll = null;
+
+// Run a mutating action, surfacing a failure. Without this a failed save (or a
+// rejected POST) was a silent no-op: the UI kept showing the old values and the
+// user had no way to tell the change never landed.
+async function act(label, fn) {
+  try {
+    return await fn();
+  } catch (e) {
+    alert(`${label} failed: ${e.message}`);
+    return null;
+  }
+}
+
+// Refreshing the config after a save must not become an unhandled rejection.
+const refreshConfig = () =>
+  loadConfig().catch((e) => console.warn('config reload failed:', e));
+
 const fmtTime = (s) => {
   if (!s && s !== 0) return '0:00';
   const m = Math.floor(s / 60);
@@ -49,20 +70,32 @@ const fmtNum = (n) => Number(n || 0).toLocaleString();
 
 let audio = null;
 
+// Put the Listen button back to its idle state. Called when playback stops by
+// itself (the stream dropped) — otherwise the button kept saying "⏹ Stop" while
+// nothing was playing.
+function stopListening() {
+  if (audio) {
+    try { audio.pause(); audio.src = ''; audio.load(); } catch (e) { /* already gone */ }
+    audio = null;
+  }
+  state.playing = false;
+  $('listen').textContent = '▶ Listen';
+}
+
 function toggleListen() {
   if (state.playing) {
-    if (audio) { audio.pause(); audio.src = ''; audio.load(); audio = null; }
-    state.playing = false;
-    $('listen').textContent = '▶ Listen';
+    stopListening();
     return;
   }
   // Cache-bust so the browser opens a fresh live connection every time.
   audio = new Audio(`/stream.mp3?t=${Date.now()}`);
   audio.volume = $('volume').value / 100;
+  audio.onerror = () => { stopListening(); };
   audio.play().then(() => {
     state.playing = true;
     $('listen').textContent = '⏹ Stop';
   }).catch((err) => {
+    stopListening();
     alert(`Could not start playback: ${err.message}`);
   });
 }
@@ -193,13 +226,13 @@ async function loadIcecastStatus() {
   const url = $('icecast-url');
   if (!status) return;
   try {
-    const d = await (await fetch('/api/icecast/status')).json();
+    const d = await api('/api/icecast/status');
     if (!d.enabled) {
       status.textContent = 'disabled';
       status.className = 'pill';
       listeners.textContent = '';
       note.textContent = 'Icecast delivery is off — set icecast.enabled in config or run with VDJ_ICECAST_ENABLED=1.';
-      url.value = '(icecast disabled)';
+      if (document.activeElement !== url) url.value = '(icecast disabled)';
       return;
     }
     if (d.connected) {
@@ -210,7 +243,9 @@ async function loadIcecastStatus() {
       if (d.server_name) parts.push(`on ${d.server_name}`);
       if (d.bitrate) parts.push(`${d.bitrate} kbps`);
       note.textContent = parts.join(' · ');
-      url.value = `http://${icecastExternalHost()}:${icecastPublicPort()}/${d.mount.replace(/^\//, '')}`;
+      if (document.activeElement !== url) {
+        url.value = `http://${icecastExternalHost()}:${icecastPublicPort()}/${d.mount.replace(/^\//, '')}`;
+      }
     } else {
       status.textContent = '○ not connected';
       status.className = 'pill warn';
@@ -218,8 +253,12 @@ async function loadIcecastStatus() {
       note.textContent = 'App pusher not connected to Icecast — is the Icecast server running?';
     }
   } catch (e) {
+    // Clear the numbers too: leaving the last good listener count and URL on
+    // screen while the endpoint is down makes stale data look live.
     status.textContent = '?';
     status.className = 'pill warn';
+    listeners.textContent = '';
+    note.textContent = `icecast status unavailable — ${e.message}`;
   }
 }
 
@@ -232,7 +271,14 @@ function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
   ws.onmessage = (ev) => {
-    const msg = JSON.parse(ev.data);
+    let msg;
+    try {
+      msg = JSON.parse(ev.data);
+    } catch (e) {
+      // A malformed frame must not throw inside the handler.
+      console.warn('ignoring a malformed websocket frame:', e);
+      return;
+    }
     if (msg.type === 'state') { renderState(msg.data); loadQueue(); }
   };
   ws.onclose = () => setTimeout(connectWS, 3000);
@@ -245,8 +291,15 @@ async function loadTracks(search) {
   if (search) q.set('search', search);
   if (state.activeGenres.size) q.set('genre', [...state.activeGenres].join(','));
   if (state.activeDecades.size) q.set('decades', [...state.activeDecades].join(','));
-  state.tracks = await api(`/api/library/tracks?${q}`);
   const box = $('tracks');
+  try {
+    state.tracks = await api(`/api/library/tracks?${q}`);
+  } catch (e) {
+    // Say it in the list instead of leaving the previous results looking like
+    // the answer to the current search/filter.
+    box.innerHTML = `<div class="meta warn">could not load tracks: ${esc(e.message)}</div>`;
+    return;
+  }
   box.innerHTML = '';
   for (const tr of state.tracks) {
     const div = document.createElement('div');
@@ -338,7 +391,13 @@ function renderDecadeNote() {
 }
 
 async function loadQueue() {
-  const items = await api('/api/queue?limit=40');
+  let items;
+  try {
+    items = await api('/api/queue?limit=40');
+  } catch (e) {
+    console.warn('queue reload failed:', e);
+    return;
+  }
   const box = $('queue');
   box.innerHTML = '';
   for (const it of items) {
@@ -351,8 +410,8 @@ async function loadQueue() {
       `<div class="x">✕</div>`;
     div.querySelector('.x').onclick = async (e) => {
       e.stopPropagation();
-      await api(`/api/queue/${it.uid}`, { method: 'DELETE' });
-      loadQueue();
+      const ok = await act('Remove from queue', () => api(`/api/queue/${it.uid}`, { method: 'DELETE' }));
+      if (ok !== null) loadQueue();
     };
     if (it.dj_text) div.title = it.dj_text;
     box.appendChild(div);
@@ -360,7 +419,13 @@ async function loadQueue() {
 }
 
 async function loadHistory() {
-  const rows = await api('/api/history?limit=30');
+  let rows;
+  try {
+    rows = await api('/api/history?limit=30');
+  } catch (e) {
+    console.warn('history reload failed:', e);
+    return;
+  }
   $('history').innerHTML = rows.map((r) =>
     `<div class="item"><div class="t"><div>${esc(r.title || '—')}</div>` +
     `<div class="a">${esc(r.artist || '')}</div></div>` +
@@ -396,24 +461,25 @@ async function loadPresets() {
 async function loadConfig() {
   const cfg = await api('/api/config');
   state.config = cfg;
-  $('station-name').textContent = cfg.stream.station_name;
-  $('music-dir').value = cfg.music_dir;
-  const tmin = cfg.dj.talk_min ?? 2, tmax = cfg.dj.talk_max ?? 4;
+  // Guarded field access throughout: a missing/renamed field must degrade to a
+  // blank control, never throw (a throw here aborts the whole init chain and
+  // leaves the UI on "connecting…" with every API healthy).
+  $('station-name').textContent = cfg.stream?.station_name ?? '';
+  $('music-dir').value = cfg.music_dir ?? '';
+  const tmin = cfg.dj?.talk_min ?? 2, tmax = cfg.dj?.talk_max ?? 4;
   $('dj-talk-min').value = tmin;
   $('dj-talk-max').value = tmax;
   $('talk-val').textContent = (tmax === 0) ? 'never' : `${tmin}–${tmax}`;
-  const smin = cfg.dj.sent_min ?? 1, smax = cfg.dj.sent_max ?? 3;
+  const smin = cfg.dj?.sent_min ?? 1, smax = cfg.dj?.sent_max ?? 3;
   $('dj-sent-min').value = smin;
   $('dj-sent-max').value = smax;
   $('sent-val').textContent = `${smin}–${smax}`;
-  $('dj-speed').value = Math.round(cfg.dj.speed * 100);
-  $('speed-val').textContent = cfg.dj.speed.toFixed(2);
-  $('dj-style').value = cfg.dj.style;
-  $('dj-enabled').checked = cfg.dj.enabled;
-  $('enrich-enabled').checked = cfg.enrich.enabled;
-  $('shuffle').checked = cfg.playback.shuffle;
-  state.activeGenres = new Set(cfg.playback.genres || []);
-  state.activeDecades = new Set(cfg.playback.decades || []);
+  $('dj-style').value = cfg.dj?.style ?? '';
+  $('dj-enabled').checked = cfg.dj?.enabled ?? true;
+  $('enrich-enabled').checked = cfg.enrich?.enabled ?? true;
+  $('shuffle').checked = cfg.playback?.shuffle ?? false;
+  state.activeGenres = new Set(cfg.playback?.genres || []);
+  state.activeDecades = new Set(cfg.playback?.decades || []);
   // Artist filter (playback.artists). It narrows the queue the same way the genre
   // chips do, and it is what makes the artist-run cap unsatisfiable when it names
   // a single band — the Programs card says so.
@@ -452,15 +518,13 @@ async function loadConfig() {
     $('dj-voice-note').textContent = sel && sel.note ? sel.note : '';
   }
 
-  // Program grouping settings.
+  // Program grouping settings. The five RULES (limit, max-consecutive,
+  // min-size, artist-gap, repeat-window) are owned by loadPrograms(), which
+  // reads /api/programs: writing them here too meant two endpoints racing for
+  // the same inputs on init, with whichever resolved last silently winning.
   $('program-enabled').checked = !!(cfg.playback?.program?.enabled ?? true);
   $('program-size').value = cfg.playback?.program?.size ?? 6;
   $('program-size-val').textContent = $('program-size').value;
-  $('program-limit').value = cfg.playback?.program?.limit ?? 20;
-  $('program-max-consec').value = cfg.playback?.program?.max_consecutive_artist ?? 2;
-  $('program-min-size').value = cfg.playback?.program?.min_size ?? 2;
-  $('artist-gap').value = cfg.playback?.artist_gap ?? 10;
-  $('repeat-window').value = cfg.playback?.repeat_window ?? 50;
   $('pause-without-listeners').checked = cfg.playback?.pause_without_listeners ?? true;
   $('listener-grace').value = cfg.playback?.listener_grace_s ?? 30;
   $('listener-poll').value = cfg.playback?.listener_poll_s ?? 5;
@@ -606,7 +670,7 @@ async function loadPrograms() {
     $('program-strategy').textContent =
       `(${{ genre: 'by genre', artist: 'by artist', decade: 'by decade' }[p.strategy] || p.strategy})`;
     $('program-limit').value = p.limit;
-    if (p.max_consecutive_artist) $('program-max-consec').value = p.max_consecutive_artist;
+    if (p.max_consecutive_artist !== undefined) $('program-max-consec').value = p.max_consecutive_artist;
     if (p.repeat_window !== undefined) $('repeat-window').value = p.repeat_window;
     if (p.artist_gap !== undefined) $('artist-gap').value = p.artist_gap;
     if (p.min_size !== undefined) $('program-min-size').value = p.min_size;
@@ -793,21 +857,39 @@ async function loadLibraryStats() {
 }
 
 async function pollScan() {
-  const s = await api('/api/library/scan');
+  let s;
+  try {
+    s = await api('/api/library/scan');
+  } catch (e) {
+    scanPoll = null;  // let the next press start a fresh chain
+    return;
+  }
   const el = $('scan-status');
   if (s.running) {
     el.textContent = `scanning… ${s.total_seen} files seen, ${s.added} new`;
     el.className = 'meta dim';
-    setTimeout(pollScan, 1500);
-  } else if (s.error) {
+    scanPoll = setTimeout(pollScan, 1500);
+    return;
+  }
+  scanPoll = null;
+  if (s.error) {
     el.textContent = `⚠ ${s.error}`;
     el.className = 'meta warn';
     loadHealth();
   } else {
+    const skipped = Number(s.skipped_names) || 0;
     el.textContent = s.finished_at
       ? `last scan: +${s.added} new, ${s.updated} updated`
       : 'idle';
-    el.className = 'meta dim';
+    if (skipped) {
+      // Files whose names are not valid UTF-8 cannot be stored in the index;
+      // say so here instead of letting them look like they were scanned.
+      el.textContent += ` · ${fmtNum(skipped)} file(s) skipped (names are not `
+        + 'valid UTF-8 — rename and rescan)';
+      el.className = 'meta warn';
+    } else {
+      el.className = 'meta dim';
+    }
     loadGenres(); loadDecades(); loadHealth(); loadLibraryStats();
     // A scan can add files that still need a loudness measurement — refresh
     // the volume card so its backlog count is never stale.
@@ -878,14 +960,27 @@ async function pollLoudness() {
   try {
     s = await api('/api/loudness/status');
   } catch (e) {
+    loudnessPoll = null;  // a failed poll ends the chain; a button restarts it
     return;
   }
   renderLoudness(s);
   // Keep polling while a pass runs (2 s) and while a backlog exists (5 s), so
   // the numbers stay truthful after a scan adds files while nothing is running.
   const pending = Number(s.queue) || 0;
-  if (s.running) setTimeout(pollLoudness, 2000);
-  else if (pending) setTimeout(pollLoudness, 5000);
+  if (s.running) loudnessPoll = setTimeout(pollLoudness, 2000);
+  else if (pending) loudnessPoll = setTimeout(pollLoudness, 5000);
+  else loudnessPoll = null;
+}
+
+// Start the poller unless one is already running. Every loudness button and the
+// init path call THIS, not pollLoudness(): the chain is self-recursive, and
+// calling it directly added one more concurrent loop per press.
+function startLoudnessPoll() {
+  if (!loudnessPoll) pollLoudness();
+}
+
+function startScanPoll() {
+  if (!scanPoll) pollScan();
 }
 
 /* ---------- wiring ---------- */
@@ -953,10 +1048,11 @@ function wire() {
     }
   };
 
-  $('skip').onclick = () => api('/api/transport/skip', { method: 'POST' });
+  $('skip').onclick = () => act('Skip', () => api('/api/transport/skip', { method: 'POST' }));
   $('pauseresume').onclick = async () => {
     const paused = $('pauseresume').textContent.includes('Resume');
-    await api(`/api/transport/${paused ? 'resume' : 'pause'}`, { method: 'POST' });
+    await act(paused ? 'Resume' : 'Pause',
+      () => api(`/api/transport/${paused ? 'resume' : 'pause'}`, { method: 'POST' }));
   };
   $('preview').onclick = async () => {
     $('preview').disabled = true;
@@ -974,10 +1070,10 @@ function wire() {
   };
 
   $('save-dir').onclick = async () => {
-    await api('/api/config', {
+    const ok = await act('Save directory', () => api('/api/config', {
       method: 'PUT', body: JSON.stringify({ music_dir: $('music-dir').value.trim() }),
-    });
-    loadConfig();
+    }));
+    if (ok !== null) refreshConfig();
   };
   $('llm-load-models').onclick = () => loadLLMModels();
   $('llm-test').onclick = () => testLLM();
@@ -1004,11 +1100,26 @@ function wire() {
   };
   $('llm-url').onchange = () => { $('llm-model').innerHTML = '<option value="">— click Load models —</option>'; };
   $('scan').onclick = async () => {
-    await api('/api/library/scan', {
+    const ok = await act('Library scan', () => api('/api/library/scan', {
       method: 'POST',
       body: JSON.stringify({ music_dir: $('music-dir').value.trim() }),
-    });
-    pollScan();
+    }));
+    if (ok !== null) startScanPoll();
+  };
+  $('scan-full').onclick = async () => {
+    // A full scan re-identifies every file (web/AI lookups included) and is the
+    // only way to confirm that many files really are gone: a normal rescan
+    // refuses to delete when most of the library disappeared at once, because
+    // that usually means a stale mount rather than a tidy-up.
+    if (!confirm('Full rescan: re-identify every file (slower, uses the web/AI '
+                 + 'lookups again) AND remove rows for files that are really '
+                 + 'gone — including their play history.\n\nUse this only if '
+                 + 'the files were genuinely deleted. Continue?')) return;
+    const ok = await act('Full scan', () => api('/api/library/scan', {
+      method: 'POST',
+      body: JSON.stringify({ music_dir: $('music-dir').value.trim(), full: true }),
+    }));
+    if (ok !== null) startScanPoll();
   };
   $('cache-clean').onclick = async () => {
     const btn = $('cache-clean');
@@ -1045,11 +1156,12 @@ function wire() {
     state.selected.clear(); loadTracks($('search').value.trim()); loadQueue();
   };
   $('clear-queue').onclick = async () => {
-    await api('/api/queue/clear', { method: 'POST' }); loadQueue();
+    const ok = await act('Clear the queue', () => api('/api/queue/clear', { method: 'POST' }));
+    if (ok !== null) loadQueue();
   };
 
   $('apply-filters').onclick = async () => {
-    await api('/api/config', {
+    const ok = await act('Apply filters', () => api('/api/config', {
       method: 'PUT',
       body: JSON.stringify({
         playback: {
@@ -1061,8 +1173,9 @@ function wire() {
           artists: parseArtistList($('filter-artists') ? $('filter-artists').value : ''),
         },
       }),
-    });
-    await api('/api/queue/clear', { method: 'POST' });
+    }));
+    if (ok === null) return;
+    await act('Rebuild the queue', () => api('/api/queue/clear', { method: 'POST' }));
     loadTracks($('search').value.trim()); loadQueue(); loadDecades();
   };
 
@@ -1152,7 +1265,7 @@ function wire() {
     }
   };
   $('save-program').onclick = async () => {
-    await api('/api/config', {
+    const ok = await act('Save programs', () => api('/api/config', {
       method: 'PUT',
       body: JSON.stringify({
         playback: {
@@ -1186,8 +1299,8 @@ function wire() {
             Math.min(300, Math.max(1, Number($('listener-poll').value) || 5)),
         },
       }),
-    });
-    await loadPrograms();
+    }));
+    if (ok !== null) await loadPrograms();
   };
   $('program-select-all').onclick = () => {
     for (const chip of document.querySelectorAll('#programs .program-chip')) {
@@ -1202,7 +1315,7 @@ function wire() {
     if (tmax < tmin) [tmin, tmax] = [tmax, tmin];
     let smin = Number($('dj-sent-min').value), smax = Number($('dj-sent-max').value);
     if (smax < smin) [smin, smax] = [smax, smin];
-    await api('/api/config', {
+    const ok = await act('Save DJ settings', () => api('/api/config', {
       method: 'PUT',
       body: JSON.stringify({
         dj: {
@@ -1221,8 +1334,8 @@ function wire() {
         },
         enrich: { enabled: $('enrich-enabled').checked },
       }),
-    });
-    loadConfig();
+    }));
+    if (ok !== null) refreshConfig();
   };
   const refreshTalkLabel = () => {
     const tmin = Number($('dj-talk-min').value), tmax = Number($('dj-talk-max').value);
@@ -1246,7 +1359,8 @@ function wire() {
   $('save-preset').onclick = async () => {
     const name = $('preset-name').value.trim();
     if (!name) return;
-    await api('/api/presets', { method: 'POST', body: JSON.stringify({ name }) });
+    const ok = await act('Save preset', () => api('/api/presets', { method: 'POST', body: JSON.stringify({ name }) }));
+    if (ok === null) return;
     $('preset-name').value = ''; loadPresets();
   };
 
@@ -1279,16 +1393,31 @@ function wire() {
         },
       }),
     });
-    await loadConfig();
-    pollLoudness();
+    const ok = await act('Save volume settings', () => api('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify({
+        loudness: {
+          enabled: $('loudness-enabled').checked,
+          target_lufs: num('loudness-target', -16),
+          true_peak_ceiling: num('loudness-tp', -1.5),
+          max_boost_db: num('loudness-boost', 6),
+          min_gain_db: num('loudness-min', -12),
+          window_seconds: Math.round(num('loudness-window', 120)),
+          workers: Math.round(num('loudness-workers', 2)),
+        },
+      }),
+    }));
+    if (ok === null) return;
+    await refreshConfig();
+    startLoudnessPoll();
   };
   $('loudness-analyze').onclick = async () => {
-    await api('/api/loudness/analyze', { method: 'POST', body: '{}' });
-    pollLoudness();
+    const ok = await act('Start measuring', () => api('/api/loudness/analyze', { method: 'POST', body: '{}' }));
+    if (ok !== null) startLoudnessPoll();
   };
   $('loudness-stop').onclick = async () => {
-    await api('/api/loudness/stop', { method: 'POST', body: '{}' });
-    pollLoudness();
+    const ok = await act('Stop measuring', () => api('/api/loudness/stop', { method: 'POST', body: '{}' }));
+    if (ok !== null) startLoudnessPoll();
   };
   $('loudness-reset').onclick = async () => {
     const st = await api('/api/loudness/status').catch(() => null);
@@ -1300,32 +1429,34 @@ function wire() {
                  + 'to refresh stale results. New/unmeasured tracks are covered by '
                  + '"Measure missing" instead. Playback continues normally while '
                  + 'this runs.')) return;
-    await api('/api/loudness/reset', { method: 'POST', body: '{}' });
-    pollLoudness();
+    const ok = await act('Reset measurements', () => api('/api/loudness/reset', { method: 'POST', body: '{}' }));
+    if (ok !== null) startLoudnessPoll();
   };
 }
 
 async function init() {
   wire();
-  await loadConfig();
-  // Run the data loaders concurrently, but don't let one failing loader
-  // abort the rest (and thereby the WebSocket + live status). Each loader
-  // already swallows its own errors where appropriate; we add a safety net so
-  // a single bad response can never leave the UI stuck on "connecting…".
+  // Everything below is inside the safety net, INCLUDING loadConfig: it used to
+  // run before `safe` existed, so any throw in it aborted the whole init chain
+  // (no loaders, no WebSocket, no pollers) and left the UI on "connecting…"
+  // while every API was healthy.
   const safe = (p) => Promise.resolve(p).catch((e) => console.warn('loader failed:', e));
+  await safe(loadConfig());
+  // Run the data loaders concurrently, but don't let one failing loader
+  // abort the rest (and thereby the WebSocket + live status).
   await Promise.all([
     safe(loadGenres()), safe(loadDecades()), safe(loadTracks('')),
     safe(loadQueue()), safe(loadPresets()), safe(loadHistory()),
     safe(loadHealth()), safe(loadPrograms()), safe(loadLLMConfig()),
     safe(loadLoudness()), safe(loadCacheStats()), safe(loadArtistOptions()),
   ]);
-  pollScan();
-  pollLoudness();
+  startScanPoll();
+  startLoudnessPoll();
   connectWS();
   loadIcecastStatus();
-  setInterval(loadHistory, 30000);
-  setInterval(loadHealth, 30000);
-  setInterval(loadIcecastStatus, 5000);
+  setInterval(() => safe(loadHistory()), 30000);
+  setInterval(() => safe(loadHealth()), 30000);
+  setInterval(() => safe(loadIcecastStatus()), 5000);
 }
 
-init();
+init().catch((e) => console.error('init failed:', e));

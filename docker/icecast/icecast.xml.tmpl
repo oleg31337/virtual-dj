@@ -57,11 +57,13 @@
     <logsize>10000</logsize>
   </logging>
 
-  <!-- Explicit /virtualdj mount, declared as MP3 so Icecast registers the
-       source correctly (combined with /etc/mime.types this makes the mount
-       serve to listeners). -->
+  <!-- Explicit mount, declared as MP3 so Icecast registers the source
+       correctly (combined with /etc/mime.types this makes the mount serve to
+       listeners). The name comes from the app (icecast.mount / VDJ_ICECAST_MOUNT)
+       so the mount block always describes the mount the pusher actually
+       streams to. -->
   <mount>
-    <mount-name>/virtualdj</mount-name>
+    <mount-name>/${ICECAST_MOUNT}</mount-name>
     <mount-type>7</mount-type>
     <stream-name>${ICECAST_STREAM_NAME}</stream-name>
     <stream-genre>Various</stream-genre>

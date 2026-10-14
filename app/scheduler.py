@@ -94,33 +94,42 @@ class Scheduler:
               program_start: bool = False) -> dict[str, Any]:
         # Decide whether THIS track gets a DJ break. The decision is stamped
         # here, at enqueue time, so the consumer and prefetch worker agree.
-        if with_dj is None:
-            with_dj = False
-            if config.get("dj.enabled", True):
-                if self._tracks_until_talk is None:
-                    # First track is never a talk; begin the countdown.
-                    self._schedule_next()
-                elif self._tracks_until_talk:
-                    self._tracks_until_talk -= 1
-                    if self._tracks_until_talk == 0:
-                        with_dj = True
+        #
+        # Under the lock: the cadence counter and the uid sequence are shared by
+        # every producer — an API thread enqueueing/refilling, the broadcaster
+        # popping, the prefetch worker refilling — so two producers racing here
+        # would either double-decrement the cadence (the DJ talks off schedule)
+        # or hand out the same uid twice (a prepared break could then be played
+        # against the wrong track). The lock is re-entrant, so callers that
+        # already hold it are unaffected.
+        with self._lock:
+            if with_dj is None:
+                with_dj = False
+                if config.get("dj.enabled", True):
+                    if self._tracks_until_talk is None:
+                        # First track is never a talk; begin the countdown.
                         self._schedule_next()
-        else:
-            # Explicit decision (e.g. a forced program-start talk). A real talk
-            # here starts a fresh random interval for whatever follows.
-            if with_dj and config.get("dj.enabled", True):
-                self._schedule_next()
-        return {
-            "uid": self._next_uid(),
-            "track": track,
-            "dj_requested": with_dj,
-            "program": program,
-            # Whether this track OPENS its program. `dj_requested` cannot say:
-            # it is also set by the periodic talk cadence, which is why a
-            # playlist audit that keyed program boundaries off it saw phantom
-            # 2-4 song "programs" (the DJ talks every 2-4 tracks).
-            "program_start": program_start,
-        }
+                    elif self._tracks_until_talk:
+                        self._tracks_until_talk -= 1
+                        if self._tracks_until_talk == 0:
+                            with_dj = True
+                            self._schedule_next()
+            else:
+                # Explicit decision (e.g. a forced program-start talk). A real
+                # talk here starts a fresh random interval for what follows.
+                if with_dj and config.get("dj.enabled", True):
+                    self._schedule_next()
+            return {
+                "uid": self._next_uid(),
+                "track": track,
+                "dj_requested": with_dj,
+                "program": program,
+                # Whether this track OPENS its program. `dj_requested` cannot
+                # say: it is also set by the periodic talk cadence, which is why
+                # a playlist audit that keyed program boundaries off it saw
+                # phantom 2-4 song "programs" (the DJ talks every 2-4 tracks).
+                "program_start": program_start,
+            }
 
     def _do_not_repeat(self, window: int | None = None) -> set[int]:
         """Track ids the next songs must avoid.
@@ -545,7 +554,8 @@ class Scheduler:
         if not tracks:
             return 0
         if not playback.get("shuffle", True):
-            existing_paths = {i["track"]["path"] for i in self._queue}
+            with self._lock:
+                existing_paths = {i["track"]["path"] for i in self._queue}
             tracks = [t for t in tracks if t["path"] not in existing_paths]
         else:
             random.shuffle(tracks)
@@ -578,6 +588,11 @@ class Scheduler:
             self.refill(max(need, 10))
 
     def peek(self, limit: int = 50) -> list[dict[str, Any]]:
+        # Clamped: the queue endpoint takes this from a query string.
+        try:
+            limit = max(1, min(int(limit), 500))
+        except (TypeError, ValueError):
+            limit = 50
         with self._lock:
             items = self._queue[:limit]
             return [
@@ -665,9 +680,12 @@ class Scheduler:
             program = item.get("program")
         self._wake.set()
         if due and prepared is None:
-            # Look-ahead missed this one (fresh start, slow LLM). Prepare it
-            # inline only if it is cheap; otherwise skip the break.
-            prepared = None
+            # The look-ahead missed this one (fresh start, slow LLM, or every
+            # attempt failed). The break is simply skipped: preparation is
+            # deliberately NOT attempted here, because this runs on the
+            # broadcaster thread and an LLM call (up to llm.timeout_s) would
+            # stall the stream. The station plays the song without its intro.
+            log.debug("DJ break for uid %s was not ready; skipping it", item["uid"])
         return item["track"], (prepared if due else None), program
 
     def previous_track(self) -> dict[str, Any] | None:

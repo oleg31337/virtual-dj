@@ -63,7 +63,7 @@ _TRACK_LABEL = re.compile(
     r"^(?:track|trk|audiotrack|pista|titel|song)\s*[-_. ]?\s*\d{1,3}$",
     re.IGNORECASE,
 )
-_LEADING_TRACKNUM = re.compile(r"^\s*\(?\d{1,3}\)?\s*(?:[-._)\]]|\s)\s*")
+_LEADING_NUM = re.compile(r"^\s*\(?(\d{1,3})\)?(\s*[-._)\]]\s*|\s+)(.*)", re.DOTALL)
 _TRAILING_NOISE = re.compile(
     r"\s*[\(\[]\s*(?:official|hq|hd|audio|lyrics?|video|remaster(?:ed)?"
     r"|explicit|album version|www\.[^\)\]]*)\s*[^\)\]]*[\)\]]\s*$",
@@ -213,7 +213,41 @@ def is_container_folder(name: str | None) -> bool:
     return clean_name(name).casefold() in _CONTAINER_FOLDERS
 
 
-_SEPARATORS = (" - ", " – ", " — ", " -- ", "_-_", " _ ")
+# Language / theme / platform folders: they organise a collection, they do not
+# name a band. Kept SEPARATE from _CONTAINER_FOLDERS on purpose -- that set is
+# also applied to an artist that came from the tags, and some of these words are
+# real band names ("Electronic"), so they must only rule out a *guessed* folder
+# artist, never a tagged one.
+_NON_ARTIST_FOLDERS = {
+    "english", "russian", "french", "german", "spanish", "italian",
+    "portuguese", "polish", "ukrainian", "instrumental", "classical", "jazz",
+    "rock", "pop", "metal", "electronic", "dance", "hip hop", "rap",
+    "soundtracks", "halloween music", "christmas music",
+    # AI-music generators and download sources: container folders in practice.
+    "udio", "suno", "youtube", "soundcloud", "bandcamp",
+}
+
+
+def is_artist_folder(name: str | None) -> bool:
+    """Could this folder name BE the artist, in the single-level layout?
+
+    Only consulted when nothing else identified the artist, so it errs towards
+    "no": a language/genre/platform folder, or anything ending in "music", is a
+    collection — announcing it as the band on air would be worse than leaving
+    the artist unknown.
+    """
+    if not name:
+        return False
+    cleaned = clean_name(name)
+    if not cleaned or not _LETTERS.search(cleaned):
+        return False
+    if is_container_folder(cleaned):
+        return False
+    low = cleaned.casefold()
+    return low not in _NON_ARTIST_FOLDERS and not low.endswith(" music")
+
+
+_SEPARATORS = (" - ", " – ", " — ")
 
 # Album folders are often prefixed with a year: "1987 One Second",
 # "1987-The Uplift Mofo Party Plan", "(2012) Panic".
@@ -236,6 +270,44 @@ def clean_name(text: str | None) -> str:
     return out
 
 
+def _drop_leading_track_number(text: str) -> str:
+    """Drop a LEADING track/disc number — but never a name that starts with one.
+
+    "01 - Title", "001 - Path" and "101 apocalyptica - ..." (disc+track codes)
+    are markers and must go; "2 Unlimited - No limit", "50 Cent - In da club"
+    and "311 - Down" are not, and stripping them invents an artist ("Unlimited",
+    "Cent"). The shapes are decided by what follows the number:
+
+    * a bare hyphen ("105-amy-winehouse-...") is rip-tool numbering -> marker
+    * any other punctuation ("01. Title") -> marker
+    * " - " (spaced hyphen) -> marker only when the number is marker-shaped
+      (see :func:`_looks_like_track_marker`), so "01 - Title" goes while
+      "311 - Down" keeps its band name
+    * a plain space -> marker unless the remainder is itself an "Artist -
+      Title" pair, so "10 Keeper of the Flame" is a track number but
+      "2 Unlimited - No limit" is a band.
+    """
+    m = _LEADING_NUM.match(text)
+    if not m:
+        return text
+    digits, sep, rest = m.group(1), m.group(2), m.group(3)
+    core = sep.strip()
+    if core in ("-", "–", "—"):
+        if sep == core:  # "105-Title", no spaces: rip-tool numbering
+            return rest
+        return rest if _looks_like_track_marker(digits) else text
+    if core:
+        return rest  # "01. Title" / "02) Title"
+    # Plain space: a marker unless the remainder is itself an "Artist - Title"
+    # pair whose artist would then start with the number -- "10 Keeper of the
+    # Flame" is a track number and so is the zero-padded "01 The Addams Family
+    # - Main Theme", while "2 Unlimited - No limit" and "50 Cent - In da club"
+    # are bands (a band name is never zero-padded), and a three-digit "101
+    # apocalyptica - ..." is a disc+track code.
+    keep = " - " in rest and len(digits) < 3 and not digits.startswith("0")
+    return text if keep else rest
+
+
 def strip_leading_junk(text: str) -> str:
     """Drop disc markers, track numbers and year prefixes from the front."""
     out = text or ""
@@ -243,14 +315,20 @@ def strip_leading_junk(text: str) -> str:
         before = out
         out = _DISC_PREFIX.sub("", out)
         out = _YEAR_PREFIX.sub("", out)
-        out = _LEADING_TRACKNUM.sub("", out)
+        out = _drop_leading_track_number(out)
         if out == before:
             break
     return out.strip()
 
 
 def _split_pair(stem: str) -> tuple[str | None, str | None]:
-    """Split "Artist - Title" into its two halves, if that shape is present."""
+    """Split "Artist - Title" into its two halves, if that shape is present.
+
+    Callers pass text that has already been through :func:`strip_decorations`,
+    which normalises underscore art and collapses decorated runs -- so only the
+    three plain separators below can still occur (``"_-_"``, ``" _ "`` and
+    ``" -- "`` were listed here but are unreachable by construction).
+    """
     for sep in _SEPARATORS:
         if sep in stem:
             left, right = stem.split(sep, 1)
@@ -264,6 +342,39 @@ def _split_pair(stem: str) -> tuple[str | None, str | None]:
         if len(left) > 2 and len(right) > 2 and " " in f"{left}{right}":
             return clean_name(left), clean_name(right)
     return None, None
+
+
+def _looks_like_track_marker(text: str) -> bool:
+    """Is an all-digit left side a track/disc NUMBER rather than a name?
+
+    "01", "8", "12", "001" and the disc+track codes "101"/"205" (middle digit
+    zero) are markers left over from "CD2 08 ..." style names. "311", "702" and
+    "112" are bands whose entire name is digits, and
+    :func:`is_artist_label_junk` protects exactly that kind of short real name.
+    """
+    digits = (text or "").strip()
+    if not digits.isdigit():
+        return False
+    if len(digits) <= 2 or len(digits) >= 4:
+        return True
+    return digits.startswith("0") or digits[1] == "0"
+
+
+def _is_usable_artist(name: str | None) -> bool:
+    """Is this guessed name worth keeping as an artist?
+
+    Rejects a year ("1987"), a collection folder ("Mp3", "Soundtracks") and a
+    bare track/disc number ("01", "101") — but keeps a genuinely numeric band
+    name ("311", "702"), which is why the numeric test is *marker-shaped*
+    rather than "contains no letters".
+    """
+    if not name:
+        return False
+    if _YEAR_ONLY.match(name) or is_container_folder(name):
+        return False
+    if _LETTERS.search(name):
+        return True
+    return name.strip().isdigit() and not _looks_like_track_marker(name)
 
 
 def guess_from_path(path: Path, root: Path | None = None) -> dict[str, str | None]:
@@ -283,9 +394,10 @@ def guess_from_path(path: Path, root: Path | None = None) -> dict[str, str | Non
     artist, title = _split_pair(raw_stem)
 
     if artist and title:
-        # "CD2 08 Snap Do You See The Light" style leftovers: a split that
-        # produced a numeric-only left side is not an artist.
-        if not _LETTERS.search(artist):
+        # "CD2 08 Snap Do You See The Light" style leftovers: a split that put a
+        # track number (or a year, or a collection word) on the left is not an
+        # artist. "311 - Down.mp3" keeps its numeric BAND name.
+        if not _is_usable_artist(artist):
             artist, title = None, clean_name(raw_stem)
     if not title:
         title = clean_name(raw_stem) or None
@@ -333,15 +445,32 @@ def guess_from_path(path: Path, root: Path | None = None) -> dict[str, str | Non
             folder_artist = candidate
             break
 
+    # Single-level layout `<root>/Artist/Track.mp3`: the only ancestor folder was
+    # taken as the ALBUM above, so the band name was lost and every track under
+    # it ended up with artist "Unknown" even though the folder names the band.
+    # Use that folder as the artist -- and drop it as the album, because it is
+    # one or the other, never both.
+    #
+    # Only when the file sits EXACTLY one folder below the scan root: a folder
+    # deeper in the tree is an album/OST/soundtrack folder ("Soundtracks/Mamma
+    # Mia!/..."), where the collector's convention is the opposite. The
+    # non-artist theme/language folders at that level are filtered too.
+    if not artist and not folder_artist and len(parents) == 1 and album_raw:
+        # clean_name, not strip_leading_junk: a FOLDER named "2 Unlimited" or
+        # "10cc" is a band, and the disc/track-number prefixes this would strip
+        # belong to file names.
+        candidate = clean_name(album_raw)
+        if (candidate and not _YEAR_ONLY.match(candidate)
+                and is_artist_folder(candidate)):
+            folder_artist = candidate
+            album = None
+
     if not artist:
         artist = folder_artist
 
-    # A "1987" or "Mp3" style folder is not an artist name.
-    if artist and (
-        _YEAR_ONLY.match(artist)
-        or not _LETTERS.search(artist)
-        or is_container_folder(artist)
-    ):
+    # A "1987", "Mp3" or bare track-number folder is not an artist name — but a
+    # numeric band folder ("311", "702") is.
+    if artist and not _is_usable_artist(artist):
         artist = None
 
     return {

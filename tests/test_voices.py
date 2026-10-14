@@ -7,7 +7,9 @@ and the ``voice_model_path`` resolver.
 
 from __future__ import annotations
 
-from app import config, voices
+import pytest
+
+from app import config, dj, voices
 
 
 def _fake_stream(payload: bytes, status: int = 200):
@@ -69,8 +71,10 @@ def test_download_voice_writes_onnx_and_json(monkeypatch):
     assert voices.voice_model_path("en_US-amy-medium") == path
 
 
-def test_download_voice_missing_json_is_non_fatal(monkeypatch):
-    # The .onnx.json sidecar is optional; a failure there must not abort.
+def test_download_voice_requires_the_json_sidecar(monkeypatch):
+    # Piper loads "<model>.onnx.json" whenever it loads a model, so a sidecar
+    # failure must fail the download (and drop the orphaned model) instead of
+    # looking like success and then silently dropping every DJ break.
     onnx_payload = b"X" * (2 * 1024 * 1024)
 
     class _FakeClient:
@@ -80,9 +84,22 @@ def test_download_voice_missing_json_is_non_fatal(monkeypatch):
             return _fake_stream(onnx_payload)
 
     monkeypatch.setattr(voices.httpx, "stream", _FakeClient().stream)
-    path = voices.download_voice("en_US-amy-medium")
-    assert path.exists()
-    assert not (path.with_suffix(".onnx.json")).exists()
+    with pytest.raises(RuntimeError):
+        voices.download_voice("en_US-amy-medium")
+    onnx = config.voices_dir() / "en_US-amy-medium.onnx"
+    assert not onnx.exists()
+    assert voices.voice_model_path("en_US-amy-medium") is None
+
+
+def test_voice_without_sidecar_is_not_installed(tmp_path, monkeypatch):
+    # A model that landed without its sidecar must not be offered as installed.
+    monkeypatch.setattr(config, "voices_dir", lambda: tmp_path)
+    (tmp_path / "en_US-amy-medium.onnx").write_bytes(b"X" * 10)
+    assert voices.voice_model_path("en_US-amy-medium") is None
+    (tmp_path / "en_US-amy-medium.onnx.json").write_text("{}")
+    assert voices.voice_model_path("en_US-amy-medium") is not None
+    # The UI's voice list is the same test, so the picker agrees.
+    assert dj.available_voices() == ["en_US-amy-medium"]
 
 
 def test_ensure_default_voices_fetches_missing(monkeypatch):

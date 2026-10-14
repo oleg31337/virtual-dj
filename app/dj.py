@@ -10,7 +10,6 @@ and if TTS fails the stream simply skips the DJ break rather than stalling.
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import re
 import shutil
@@ -23,7 +22,7 @@ from typing import Any
 
 import httpx
 
-from . import config, db, enrich
+from . import config, db, enrich, voices
 
 log = logging.getLogger(__name__)
 
@@ -31,11 +30,9 @@ _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
 # Piper (and most TTS) read bare digits as individual numerals — "1984" comes
-# out as "one nine eight four" instead of a year. Years and numbers the DJ
-# should *speak* are converted to words before synthesis so the voice model
-# reads them as dates/quantities, not digits.
+# out as "one nine eight four" instead of a year. Years are converted to words
+# before synthesis so the voice model reads them as dates, not digits.
 _YEAR_RE = re.compile(r"\b(19|20)(\d{2})\b")
-_NUM_RE = re.compile(r"\b\d+\b")
 
 _UNITS = ["zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
           "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
@@ -53,7 +50,7 @@ def _int_to_words(n: int) -> str:
     if n < 1000:
         h, r = divmod(n, 100)
         return _UNITS[h] + " hundred" + (f" {_int_to_words(r)}" if r else "")
-    if n < 2000:
+    if 1900 <= n < 2000:
         # 19xx reads as "nineteen" + the two-digit tail (e.g. 1984 -> "nineteen eighty-four").
         return f"nineteen {_int_to_words(n - 1900)}"
     if n < 2100:
@@ -237,19 +234,29 @@ def piper_binary() -> str | None:
 
 
 def voice_model_path(voice: str | None = None) -> Path | None:
-    name = voice or config.get("dj.voice", "en_GB-alan-medium")
-    # Allow tests/installs to point the voice library elsewhere (e.g. system
-    # share dir) without duplicating multi-hundred-MB models.
-    voices_dir = config.voices_dir()
-    path = voices_dir / f"{name}.onnx"
-    return path if path.exists() else None
+    """Path to the voice's model, or ``None`` when the voice is not usable.
+
+    Delegates to :mod:`app.voices` so the "installed" test has one definition:
+    a model counts only together with its ``.onnx.json`` sidecar, which piper
+    needs to load it.
+    """
+    return voices.voice_model_path(voice)
 
 
 def available_voices() -> list[str]:
+    """Installed voice ids — models that also have their ``.onnx.json``.
+
+    The web UI's voice picker and ``tts_problem()`` both read this, so a model
+    whose sidecar never landed is reported as missing instead of being offered
+    and then failing to speak.
+    """
     voices_dir = config.voices_dir()
     if not voices_dir.is_dir():
         return []
-    return sorted(p.stem for p in voices_dir.glob("*.onnx"))
+    return sorted(
+        p.stem for p in voices_dir.glob("*.onnx")
+        if p.with_name(p.name + ".json").exists()
+    )
 
 
 def voice_language(voice_id: str | None) -> str:
@@ -293,7 +300,8 @@ def _clean_script(text: str, max_sentences: int,
 
 
 def prepare_script(text: str, voice: str | None = None,
-                   max_sentences: int = 99) -> str:
+                   max_sentences: int = 99,
+                   language: str | None = None) -> str:
     """The display-level prep every spoken line goes through.
 
     Called for LLM output (via ``generate_script``) and for text handed straight
@@ -301,9 +309,17 @@ def prepare_script(text: str, voice: str | None = None,
     given: years spelled out, and Russian stress marks rewritten into the
     character espeak-ng actually obeys. Deliberately does NOT transliterate —
     Cyrillic stays Cyrillic on screen.
+
+    ``language`` is the language already resolved by the caller. When it is not
+    given, the language is derived the same way :func:`generate_script` derives
+    it — from the voice id, or from the CONFIGURED ``dj.voice`` when the caller
+    passes none (the on-air path never repeats the voice id down the call
+    chain). Without that fallback a Russian script would be cleaned on the
+    ENGLISH branch: stress marks stripped, years spelled as English words.
     """
-    return _clean_script(text, max_sentences,
-                         language=voice_language(voice))
+    return _clean_script(
+        text, max_sentences,
+        language=language or voice_language(voice or config.get("dj.voice")))
 
 
 def fallback_script(track: dict[str, Any],
@@ -531,7 +547,9 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
                 time.sleep(1.0 * (attempt + 1))
             continue
     if content:
-        script = prepare_script(content, voice=voice, max_sentences=max_sentences)
+        script = prepare_script(content, voice=voice,
+                                max_sentences=max_sentences,
+                                language=language)
         if script:
             return script
         log.warning("LLM returned an empty script; using fallback")
@@ -819,7 +837,7 @@ def tts_health() -> dict[str, Any]:
 __all__ = [
     "generate_script", "synthesize", "prepare_break", "fallback_script",
     "available_voices", "voice_profiles", "voice_language", "llm_health",
-    "tts_health", "audio_duration", "json", "_spell_dates",
+    "tts_health", "audio_duration", "_spell_dates",
 ]
 
 # Human-readable descriptions of the bundled voices, with notes from community

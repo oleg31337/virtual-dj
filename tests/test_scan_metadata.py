@@ -143,3 +143,41 @@ def test_confirm_track_disabled(monkeypatch):
     out = websearch.confirm_track("Metallica", "Fade To Black")
     assert out["confirmed"] is False
     assert out["confidence"] == 0.0
+
+
+def test_confirm_track_does_not_cache_a_transport_failure(monkeypatch):
+    """An outage is not an answer.
+
+    store_lookup used to run even when the HTTP client itself failed, so one
+    offline scan cached "not confirmed, no genre" for every track it touched --
+    and cached_lookup short-circuits every later call, so the library stayed
+    genreless forever.
+    """
+    import httpx
+
+    class _Boom:
+        def __init__(self, *a, **k):
+            raise httpx.ConnectError("no network")
+
+    monkeypatch.setattr(websearch.httpx, "Client", _Boom)
+    out = websearch.confirm_track("Nobody", "Nothing")
+    assert out["confirmed"] is False
+    # Nothing was remembered, so the next lookup will try again.
+    assert websearch.cached_lookup("nobody|nothing") is None
+
+
+def test_confirm_track_keeps_bitrate_style_album_of_the_winning_hit(monkeypatch):
+    """album/year come from the best-scoring hit, not from provider order."""
+    def mb(client, artist, title):
+        return {"artist": artist, "title": title, "album": "MB Album",
+                "year": "1999", "score": 0.9, "provider": "musicbrainz"}
+
+    def itunes(client, artist, title):
+        return {"artist": artist, "title": title, "album": "iTunes Album",
+                "year": "2001", "score": 0.4, "provider": "itunes"}
+
+    monkeypatch.setattr(websearch, "_mb_search", mb)
+    monkeypatch.setattr(websearch, "_itunes_search", itunes)
+    out = websearch.confirm_track("Band", "Song")
+    assert out["album"] == "MB Album"
+    assert out["year"] == "1999"

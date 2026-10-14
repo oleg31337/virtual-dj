@@ -43,9 +43,11 @@ def temp_lib(tmp_path, monkeypatch):
     (music / "Guess Artist - Guess Song.mp3").write_bytes(b"x")
 
     # No usable title or artist -> registered by file name, artist "Unknown"
-    # (never excluded — every file stays playable).
-    (music / "Just A Folder").mkdir()
-    (music / "Just A Folder" / "Track 03.mp3").write_bytes(b"x")
+    # (never excluded — every file stays playable). It sits directly under the
+    # root: a folder between the root and the file would NAME the artist (see
+    # test_library.test_single_level_folder_names_the_artist), so the no-identity
+    # case is the one with no artist-ish folder at all.
+    (music / "Track 03.mp3").write_bytes(b"x")
 
     # Non-Latin (Cyrillic) artist -> now KEPT and playable, web-confirmed (or
     # kept as a clean filename guess even if the web can't verify it).
@@ -113,3 +115,65 @@ def test_scan_sources_recorded(temp_lib):
     # At least one track was identified from tags and one from the web.
     assert sources.get("tags", 0) >= 1
     assert sources.get("web", 0) >= 1
+
+
+# --- the library mirror must not be destroyed by a bad walk ---------------
+
+def test_scan_survives_a_non_utf8_filename(temp_lib):
+    """One un-storable name must not abort the whole scan.
+
+    os.walk decodes a non-UTF-8 file name with surrogateescape and SQLite
+    refuses those surrogates, so binding the path raised UnicodeEncodeError
+    inside scan_library's single top-level try -- every file after it stayed
+    unindexed. The file is skipped and counted instead.
+    """
+    import os
+
+    raw = os.fsencode(str(temp_lib)) + b"/bad-\xff\xfe-name.mp3"
+    with open(raw, "wb") as fh:
+        fh.write(b"x")
+
+    snap = library.scan_library(str(temp_lib), full=True, use_web=False)
+    assert snap["error"] is None, snap
+    assert snap["skipped_names"] == 1, snap
+    # The files around it are still indexed.
+    assert library.query_tracks(search="Track 03")
+
+
+def test_partial_mount_does_not_delete_half_the_library(tmp_path, monkeypatch):
+    """A scan that suddenly cannot see most files must remove nothing.
+
+    This is the partial/stale-mount case the 0-file guard does not cover: some
+    files are listed, whole directories are not, and a naive scan would delete
+    those rows (and their play history).
+    """
+    monkeypatch.setattr(ai_meta, "infer_genre", lambda *a, **k: None)
+    monkeypatch.setattr(websearch, "confirm_track",
+                        lambda *a, **k: {"confirmed": False, "genre": None,
+                                         "confidence": 0.0, "sources": []})
+    music = tmp_path / "mount"
+    music.mkdir()
+    for i in range(30):
+        (music / f"Band {i}" / f"Track {i}.mp3").parent.mkdir(exist_ok=True)
+        (music / f"Band {i}" / f"Track {i}.mp3").write_bytes(b"x")
+
+    # A normal rescan (full=False) is what the Rescan button and the boot scan
+    # do, so that is the path the guard has to protect.
+    first = library.scan_library(str(music), full=False, use_web=False)
+    assert first["added"] == 30, first
+    assert first["error"] is None
+
+    # The mount now shows only two of the thirty files.
+    for i in range(2, 30):
+        (music / f"Band {i}" / f"Track {i}.mp3").unlink()
+    second = library.scan_library(str(music), full=False, use_web=False)
+
+    assert library.library_stats()["total"] == 30, "nothing may be deleted"
+    assert second["removed"] == 0
+    assert second["error"] and "nothing was removed" in second["error"], second
+
+    # The documented escape hatch: a FULL scan says "the files really are gone",
+    # so it performs the removals a normal rescan refuses.
+    third = library.scan_library(str(music), full=True, use_web=False)
+    assert third["removed"] == 28, third
+    assert library.library_stats()["total"] == 2

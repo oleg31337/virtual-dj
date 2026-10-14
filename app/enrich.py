@@ -30,6 +30,8 @@ WIKI_ROOT_RU = "https://ru.wikipedia.org/api/rest_v1/page/summary"
 # untagged/unfindable artist used to re-probe on every single play.
 _WIKI_MISSES: dict[str, float] = {}
 _WIKI_MISS_TTL_S = 6 * 60 * 60
+# Cap on remembered misses; expired entries are dropped when this is reached.
+_WIKI_MISSES_MAX = 5000
 
 
 def _has_cyrillic(text: str) -> bool:
@@ -122,7 +124,7 @@ def _wikipedia(client: httpx.Client, term: str) -> dict[str, Any]:
 
     if _has_cyrillic(term):
         hosts = [WIKI_ROOT_RU, WIKI_ROOT]
-        suffixes = ["", "_(группа)", "_(музыкант)", "_(певица)", "_(группа)"]
+        suffixes = ["", "_(группа)", "_(музыкант)", "_(певица)"]
     else:
         hosts = [WIKI_ROOT]
         suffixes = ["", "_(band)", "_(musician)", "_(singer)",
@@ -147,19 +149,33 @@ def _wikipedia(client: httpx.Client, term: str) -> dict[str, Any]:
             _WIKI_MISSES.pop(term, None)
             return {"summary": extract[:1200], "wikipedia_title": data.get("title")}
 
+    if len(_WIKI_MISSES) >= _WIKI_MISSES_MAX:
+        # The dict is only ever emptied per-term (a success pops its own key)
+        # and the TTL is checked on lookup, so an appliance that scans a 13k
+        # library would otherwise accumulate one entry per unresolvable name
+        # forever. Drop what has expired before adding more.
+        now = time.time()
+        for key, when in list(_WIKI_MISSES.items()):
+            if now - when >= _WIKI_MISS_TTL_S:
+                del _WIKI_MISSES[key]
     _WIKI_MISSES[term] = time.time()
     return {}
 
 
-def _musicbrainz_artist_tags(name: str) -> list[str]:
+def _musicbrainz_artist_tags(client: httpx.Client, name: str) -> list[str]:
     """Best-effort artist tags from MusicBrainz (genre/style facts for the LLM).
 
     Recording searches rarely carry tags, so the reliable tag source is the
     artist. Returns up to a handful of tag names, or ``[]`` if unresolved.
+
+    Takes the caller's client so this call carries the same timeout,
+    ``User-Agent`` and redirect policy as every other lookup (MusicBrainz'
+    API policy expects a descriptive UA, and a bare module-level request
+    silently failed without one).
     """
     query = f'artist:"{name}"'
     _throttle()
-    resp = httpx.get(
+    resp = client.get(
         f"{MB_ROOT}/artist",
         params={"query": query, "fmt": "json", "limit": 1},
     )
@@ -214,7 +230,7 @@ def enrich_track(track: dict[str, Any], force: bool = False) -> dict[str, Any]:
             except Exception as exc:
                 log.debug("wikipedia lookup failed for %s: %s", artist, exc)
             try:
-                artist_tags = _musicbrainz_artist_tags(artist)
+                artist_tags = _musicbrainz_artist_tags(client, artist)
                 if artist_tags:
                     # Merge with any tags from the recording lookup, de-duped.
                     merged = list(facts.get("tags") or [])

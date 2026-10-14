@@ -14,8 +14,9 @@ it is relaunched after a short backoff, so the relay is self-healing.
 
 from __future__ import annotations
 
+import collections
 import logging
-import os
+import re
 import shutil
 import subprocess
 import threading
@@ -32,6 +33,25 @@ log = logging.getLogger(__name__)
 # served like any other client, but it must NOT count as a listener, or presence
 # could never reach zero and the station would never pause itself.
 _PUSH_SOURCE_URL = "http://127.0.0.1:{port}/stream.mp3?internal=1"
+
+
+def _as_int(value: object, default: int) -> int:
+    """A config-file integer that never raises: empty/junk -> ``default``."""
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _mask(cmd: list[str]) -> str:
+    """Command line for the log with any URL userinfo replaced by ``***``.
+
+    The pusher's Icecast URL carries the source password, so the raw command
+    must never be logged.
+    """
+    return " ".join(
+        re.sub(r"://([^:/@\s]+):[^@\s]*@", r"://\1:***@", part) for part in cmd
+    )
 
 
 class IcecastPusher:
@@ -79,10 +99,13 @@ class IcecastPusher:
 
     def _build_cmd(self) -> list[str]:
         host = config.get("icecast.host", "127.0.0.1")
-        port = int(config.get("icecast.port", 8008))
+        port = _as_int(config.get("icecast.port", 8008), 8008)
         mount = config.get("icecast.mount", "virtualdj")
         password = config.get("icecast.source_password", "hackme")
-        app_port = int(os.environ.get("VDJ_PORT", "8420"))
+        # env_int, not int(os.environ[...]): compose forwards an unset var as
+        # the empty string, and int("") used to raise ValueError inside the
+        # supervisor thread -- killing the pusher for good.
+        app_port = config.env_int("VDJ_PORT", 8420)
         source = _PUSH_SOURCE_URL.format(port=app_port)
         # Icecast requires the source to declare a Content-Type. ffmpeg's
         # icecast muxer sends audio/mpeg for mp3; we make it explicit.
@@ -120,8 +143,19 @@ class IcecastPusher:
     def _supervise(self) -> None:
         backoff = 1.0
         while not self._stop.is_set():
-            cmd = self._build_cmd()
-            log.info("icecast pusher launching: %s", " ".join(cmd))
+            # Build INSIDE the loop's guard: a bad config value (or a missing
+            # ffmpeg) must be logged and retried, never allowed to escape and
+            # kill this supervisor thread for the life of the process.
+            try:
+                cmd = self._build_cmd()
+            except Exception as exc:  # noqa: BLE001 - keep the supervisor alive
+                log.error("cannot build the icecast pusher command: %s", exc)
+                if self._stop.wait(min(backoff, 15)):
+                    break
+                backoff = min(backoff * 2, 15)
+                continue
+            # The command embeds the source password; log it masked.
+            log.info("icecast pusher launching: %s", _mask(cmd))
             try:
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -137,13 +171,17 @@ class IcecastPusher:
                 self._proc = proc
 
             # Wait for it to exit (or for stop). Drain stderr so the pipe
-            # doesn't block the child, and log ffmpeg's complaints.
-            stderr = []
+            # doesn't block the child, and log ffmpeg's complaints. The buffer
+            # is bounded: with -reconnect ffmpeg stays alive for days, and only
+            # the tail is ever reported.
+            stderr: collections.deque[bytes] = collections.deque(maxlen=20)
+            logged = 0
             while not self._stop.is_set():
                 line = proc.stderr.readline() if proc.stderr else b""
                 if line:
                     stderr.append(line)
-                    if len(stderr) <= 20:
+                    if logged < 20:
+                        logged += 1
                         log.warning("icecast pusher: %s",
                                     line.decode("utf-8", "replace").rstrip())
                 if proc.poll() is not None:
@@ -161,7 +199,7 @@ class IcecastPusher:
 
             # Unexpected exit (Icecast down, auth error, ...). Log and retry.
             code = proc.wait() if proc.poll() is None else proc.returncode
-            tail = b"".join(stderr[-5:]).decode("utf-8", "replace").rstrip()
+            tail = b"".join(list(stderr)[-5:]).decode("utf-8", "replace").rstrip()
             log.warning("icecast pusher exited (code %s); restarting. %s",
                         code, tail)
             if self._stop.wait(backoff):

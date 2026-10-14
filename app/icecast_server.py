@@ -26,6 +26,7 @@ import socket
 import subprocess
 import threading
 import time
+from xml.sax.saxutils import escape as _xml_escape
 
 from . import config
 
@@ -45,6 +46,14 @@ _LOGDIR = "/tmp/icecast"
 _PIDFILE = os.path.join(_LOGDIR, "icecast.pid")
 
 
+def _as_int(value: object, default: int) -> int:
+    """A config-file integer that never raises: empty/junk -> ``default``."""
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
 class ManagedIcecast:
     """Render config and supervise an ``icecast2 -b`` daemon (managed mode)."""
 
@@ -52,7 +61,6 @@ class ManagedIcecast:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
-        self._proc: subprocess.Popen | None = None
         self._daemon_pid: int | None = None
 
     # --- lifecycle ---------------------------------------------------------
@@ -144,7 +152,10 @@ class ManagedIcecast:
             ("${ICECAST_MOUNT}", mount),
             ("${ICECAST_STREAM_NAME}", stream_name),
         ):
-            rendered = rendered.replace(ph, val)
+            # XML-escape every substituted value: they come from config.json /
+            # the web UI, and one "&" or "<" (a station name, a password) would
+            # make icecast reject the whole rendered file.
+            rendered = rendered.replace(ph, _xml_escape(val))
         with open(_RENDERED_PATH, "w", encoding="utf-8") as fh:
             fh.write(rendered)
         log.info(
@@ -190,6 +201,31 @@ class ManagedIcecast:
             time.sleep(0.5)
         return False
 
+    def _terminate_daemon(self) -> None:
+        """SIGTERM the daemon we recorded, if it is still alive."""
+        with self._lock:
+            pid = self._daemon_pid
+            self._daemon_pid = None
+        if pid and self._pid_alive(pid):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+
+    def _kill_pidfile_daemon(self) -> None:
+        """SIGTERM the daemon named by the pidfile.
+
+        Used on the stop path *before* the pid has been recorded on
+        ``self._daemon_pid``: ``icecast2 -b`` has already forked by then, and a
+        daemon nobody remembers is one ``stop()`` cannot kill.
+        """
+        pid = self._read_daemon_pid()
+        if pid and self._pid_alive(pid):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+
     def _supervise(self) -> None:
         backoff = 1.0
         while not self._stop.is_set():
@@ -199,9 +235,21 @@ class ManagedIcecast:
                     os.remove(_PIDFILE)
                 except OSError:
                     pass
-            cfg = self.render_config()
-            port = int(config.get("icecast.port", 8008))
-            cmd = ["icecast2", "-b", "-c", cfg]
+            # Render the config and build the command INSIDE the guard: a
+            # missing template or an unwritable log dir must be logged and
+            # retried, never allowed to escape and kill the supervisor thread
+            # (that is how managed Icecast used to vanish until the whole app
+            # was restarted).
+            try:
+                cfg = self.render_config()
+                port = _as_int(config.get("icecast.port", 8008), 8008)
+                cmd = ["icecast2", "-b", "-c", cfg]
+            except Exception as exc:  # noqa: BLE001 - keep the supervisor alive
+                log.error("cannot prepare the icecast server config: %s", exc)
+                if self._stop.wait(min(backoff, 15)):
+                    break
+                backoff = min(backoff * 2, 15)
+                continue
             log.info("icecast server launching: %s", " ".join(cmd))
             try:
                 proc = subprocess.Popen(
@@ -213,9 +261,6 @@ class ManagedIcecast:
                 if not self._stop.wait(min(backoff, 15)):
                     backoff = min(backoff * 2, 15)
                 continue
-
-            with self._lock:
-                self._proc = proc
 
             # `icecast2 -b` daemonizes: the launcher exits (code 0) once forked.
             # We confirm the daemon is actually up by polling the listening
@@ -231,6 +276,13 @@ class ManagedIcecast:
                     "icecast server failed to start: %s",
                     tail.decode("utf-8", "replace").rstrip()[:600],
                 )
+                # `_wait_listening` returns False when a stop was requested
+                # mid-start, and `icecast2 -b` may already have forked the
+                # daemon by then -- it is recorded only *below*, so clean it up
+                # here or it outlives stop().
+                if self._stop.is_set():
+                    self._kill_pidfile_daemon()
+                    break
                 if self._stop.wait(backoff):
                     break
                 backoff = min(backoff * 2, 15)
@@ -248,17 +300,14 @@ class ManagedIcecast:
             while not self._stop.is_set():
                 if not self._is_listening(port):
                     log.warning("icecast daemon stopped serving; restarting")
+                    # A daemon that is alive but no longer serving would
+                    # collide with the relaunch on its own port ("Could not
+                    # create listener socket"); terminate it first.
+                    self._terminate_daemon()
                     break
                 time.sleep(1.0)
             else:
-                with self._lock:
-                    pid = self._daemon_pid
-                    self._daemon_pid = None
-                if pid and self._pid_alive(pid):
-                    try:
-                        os.kill(pid, signal.SIGTERM)
-                    except OSError:
-                        pass
+                self._terminate_daemon()
                 break
 
 

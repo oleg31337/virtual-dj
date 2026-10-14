@@ -64,14 +64,30 @@ _SYSTEM_RECOVER = (
 _lock = threading.Lock()
 
 
+class LLMUnavailable(RuntimeError):
+    """The local model could not be asked: switched off, unconfigured, or down.
+
+    Deliberately distinct from "the model answered nothing". Callers must not
+    cache an unasked question as a final answer: a cached empty genre survives
+    rescans, so one outage (or a scan run with the LLM switched off) would
+    otherwise leave every track it touched without a genre forever, while the
+    library report blames the model.
+    """
+
+
 def _ollama_chat(system: str, user: str, temperature: float = 0.2,
                  max_tokens: int = 64) -> str | None:
-    """One chat completion against the local model. Returns text or None."""
+    """One chat completion against the local model. Returns text or None.
+
+    Raises :class:`LLMUnavailable` when the model could not be asked at all (it
+    is disabled, ``llm.base_url`` is empty, or the call failed), so the caller
+    can tell "no answer" from "no model".
+    """
     if not config.get("llm.enabled", True):
-        return None
+        raise LLMUnavailable("llm.enabled is off")
     base_url = str(config.get("llm.base_url", "")).rstrip("/")
     if not base_url:
-        return None
+        raise LLMUnavailable("llm.base_url is not configured")
     model = config.get("llm.model", "qwen3.5:9b")
     timeout = float(config.get("llm.timeout_s", 120))
     try:
@@ -96,7 +112,7 @@ def _ollama_chat(system: str, user: str, temperature: float = 0.2,
         return (resp.json().get("message") or {}).get("content", "") or None
     except Exception as exc:
         log.debug("local LLM call failed: %s", exc)
-        return None
+        raise LLMUnavailable(str(exc)) from exc
 
 
 def _cache_get(table: str, key: str) -> dict[str, Any] | None:
@@ -135,9 +151,13 @@ def _canon(text: str) -> str | None:
     low = t.lower()
     if low in _GENRE_WORDS:
         return _GENRE_WORDS[low]
-    for choice in GENRE_CHOICES:
-        if choice.lower() in low:
-            return choice
+    # Longest match wins: "progressive rock" is Progressive, not the "Rock" that
+    # happens to appear earlier in GENRE_CHOICES. websearch.canonical_genre picks
+    # the longest match the same way, so a web-derived and an AI-derived genre
+    # for one record land in the same bucket.
+    matches = [choice for choice in GENRE_CHOICES if choice.lower() in low]
+    if matches:
+        return max(matches, key=len)
     # Single plausible capitalized word.
     if re.fullmatch(r"[A-Za-z][A-Za-z ]{1,20}", t):
         return t
@@ -170,8 +190,14 @@ def infer_genre(artist: str | None, title: str | None, album: str | None = None,
         bits.append(f"Album: {album}")
     if path:
         bits.append(f"File: {path}")
-    text = _ollama_chat(_SYSTEM_GENRE, "\n".join(bits), temperature=0.1,
-                        max_tokens=24)
+    try:
+        text = _ollama_chat(_SYSTEM_GENRE, "\n".join(bits), temperature=0.1,
+                            max_tokens=24)
+    except LLMUnavailable as exc:
+        # No model, no answer: leave the cache empty so a later scan (with the
+        # model back up) asks again instead of remembering this as "no genre".
+        log.debug("genre inference skipped for %s - %s: %s", artist, title, exc)
+        return None
     genre = _canon(text or "") if text else None
     if use_cache:
         _cache_put("ai_lookups", key, {"genre": genre})
@@ -209,8 +235,14 @@ def recover_names(artist_guess: str | None, title_guess: str | None,
         bits.append(f"Album guess: {album_guess}")
     if path:
         bits.append(f"Path: {path}")
-    text = _ollama_chat(_SYSTEM_RECOVER, "\n".join(bits), temperature=0.2,
-                        max_tokens=160)
+    try:
+        text = _ollama_chat(_SYSTEM_RECOVER, "\n".join(bits), temperature=0.2,
+                            max_tokens=160)
+    except LLMUnavailable as exc:
+        # Not an answer -- do not cache it as one (see LLMUnavailable).
+        log.debug("name recovery skipped for %r: %s",
+                  artist_guess or title_guess, exc)
+        return {"artist": None, "title": None, "album": None, "confident": False}
     result: dict[str, Any] = {
         "artist": None, "title": None, "album": None,
         "confident": False,

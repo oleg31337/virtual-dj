@@ -28,9 +28,27 @@ def test_rendered_icecast_config_is_bounded_and_substituted(tmp_path, monkeypatc
     text = open(icecast_server.SERVER.render_config(), encoding="utf-8").read()
     assert "<source-password>srcpw</source-password>" in text
     assert "<hostname>boombox</hostname>" in text
+    # The mount block must describe the mount the PUSHER streams to: it used to
+    # be hardcoded to /virtualdj, so a configured mount was declared nowhere and
+    # lost its stream-name/mount-type while the pusher used it anyway.
+    assert "<mount-name>/virtualdj</mount-name>" in text
     # Icecast rotates its own access/error logs; without logsize they would grow
     # forever in /tmp/icecast next to the rendered config.
     assert "<logsize>10000</logsize>" in text
+
+
+def test_rendered_icecast_config_follows_the_configured_mount(tmp_path, monkeypatch):
+    monkeypatch.setattr(icecast_server, "_RENDERED_PATH", str(tmp_path / "icecast.xml"))
+    monkeypatch.setattr(config, "_CACHE", {
+        "icecast": {"enabled": True, "port": 8123, "mount": "/boombox & co",
+                    "hostname": "boombox", "source_password": "srcpw"},
+        "stream": {"station_name": "Radio & Roll"},
+    })
+    text = open(icecast_server.SERVER.render_config(), encoding="utf-8").read()
+    # Mount and station name are escaped: one "&" in the config used to render
+    # an icecast.xml that icecast could not parse at all.
+    assert "<mount-name>/boombox &amp; co</mount-name>" in text
+    assert "<stream-name>Radio &amp; Roll</stream-name>" in text
 
 
 def test_defaults_present():
@@ -150,3 +168,28 @@ def test_facts_block_excludes_misleading_musicbrainz_release_fields():
 def test_synthesize_rejects_empty_text():
     assert dj.synthesize("") is None
     assert dj.synthesize("   ") is None
+
+
+def test_config_holding_a_non_object_does_not_take_the_app_down():
+    """A JSON array or scalar in config.json must not crash the merge.
+
+    `_deep_merge` calls `.items()` on whatever was read, so a valid-JSON-but-not-
+    an-object file used to raise AttributeError at startup — a much worse failure
+    than falling back to the defaults.
+    """
+    config.CONFIG_PATH.write_text("[1, 2, 3]", "utf-8")
+    config._CACHE = None
+    assert config.load_config()["stream"]["bitrate_kbps"] == \
+        config.DEFAULTS["stream"]["bitrate_kbps"]
+
+
+def test_underscore_comment_keys_never_reject_a_write():
+    """`config.example.json` documents every knob with `_`-prefixed comment keys
+    and the README tells users to copy it to data/config.json — a stored comment
+    must not turn a later config write into a 422."""
+    assert config.unknown_paths({
+        "_comment": "docs", "playback": {"_genres": "docs", "repeat_window": 40},
+    }) == []
+    # A genuine typo is still reported.
+    assert config.unknown_paths({"playback": {"repeat_windows": 40}}) == \
+        ["playback.repeat_windows"]

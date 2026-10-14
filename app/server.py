@@ -168,6 +168,12 @@ class _RawStreamResponse(Response):
                     break
                 await send({"type": "http.response.body", "body": chunk,
                             "more_body": True})
+            # Terminate the body properly. Every frame above says more_body=True,
+            # so without this final one the response never completes when the
+            # server is the one ending it (listener closed, broadcaster stopped)
+            # and uvicorn logs an unfinished-response warning.
+            await send({"type": "http.response.body", "body": b"",
+                        "more_body": False})
         except asyncio.CancelledError:
             # Server is shutting down (e.g. `docker stop`) while a listener is
             # connected, or the client vanished mid-stream. Stop streaming
@@ -176,13 +182,6 @@ class _RawStreamResponse(Response):
         finally:
             watcher.cancel()
             BROADCASTER.remove_listener(self.listener)
-
-
-# Size of one relayed body chunk. Small enough to keep the client's buffer
-# topped up continuously (no multi-second silence between clumps), large enough
-# to avoid per-byte syscall/throttle overhead. At 128 kbps this is ~0.25-0.5 s
-# of audio -- well within any player's jitter buffer.
-SEND_CHUNK = 4096
 
 
 def _get_chunk(listener) -> bytes | None:

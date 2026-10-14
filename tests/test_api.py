@@ -381,3 +381,12 @@ def test_programs_endpoint_reports_an_unenforceable_cap(client, music_dir):
     finally:
         client.put("/api/config", json={"playback": {"artists": []}})
     assert client.get("/api/programs").json()["cap_enforceable"] is True
+
+
+def test_history_limit_cannot_ask_for_everything(client):
+    """SQLite reads `LIMIT -1` as *no limit*, so `?limit=-1` used to dump the
+    entire play history, and any huge value did the same."""
+    for asked in ("-1", "0", "99999999"):
+        r = client.get(f"/api/history?limit={asked}")
+        assert r.status_code == 200
+        assert len(r.json()) <= 500

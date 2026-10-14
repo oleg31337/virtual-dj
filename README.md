@@ -145,7 +145,11 @@ configured default (`dj.voice`, `en_GB-alan-medium`) is fetched on first run,
 and the web UI can download any other curated voice on demand.
 
 Any Piper voice works — drop the `.onnx` + `.onnx.json` pair in `data/voices/`
-and pick it in the DJ Settings panel. To grab them manually:
+and pick it in the DJ Settings panel. **Both files count**: piper loads
+`<model>.onnx.json` whenever it loads a model, so a voice whose sidecar is
+missing is reported as *not installed* in the picker rather than failing
+silently at DJ time (a download that cannot fetch the sidecar fails instead of
+leaving a half-voice behind). To grab them manually:
 
 ```bash
 mkdir -p data/voices && cd data/voices
@@ -344,6 +348,17 @@ between attempts) instead of burning through the queue. Remount the share, then
 run a **library scan** to restore the affected tracks (the scan clears the flag
 for files that are back and removes the rows for files that are gone).
 
+**A scan will not delete a library that suddenly vanished.** Rows for files that
+are gone are removed on a rescan, but two guards stop a *broken walk* from being
+mistaken for a tidy-up: a scan that sees **0 files** under the root removes
+nothing, and so does a scan that would remove **25+ files and more than half**
+of the indexed tracks under that root — both report *"nothing was removed"* in
+the Library panel. That is the failure mode worth guarding: a stale NFS mount
+can return some directories and hide others, and deleting those rows would also
+throw away their play history (which the repeat window and artist spacing rely
+on). When files really were deleted, **Full rescan** in the Library panel is the
+way to say so — it re-identifies every file and performs the removals.
+
 Without those guards an unmounted share is pathological: every miss returns
 instantly, so the queue is consumed at ~700 items/second and re-filled forever —
 and because each refill stamps new DJ talks, the DJ LLM gets called continuously
@@ -433,7 +448,7 @@ the app (a blank numeric value used to raise `int("")` at import).
 |-----|---------|---------|
 | `HTTP_PORT` | `8420` | Host port published for the UI + stream |
 | `MUSIC_DIR` | `/mnt/mp3` | **Host** path to your music (mounted `:ro` at `/music`) |
-| `VDJ_LOG_LEVEL` | `info` | Log verbosity (`debug`, `info`, `warning`, `error`) |
+| `VDJ_LOG_LEVEL` | `info` | Log verbosity (`debug`, `info`, `warning`, `error`); an unrecognised value logs a warning and falls back to `info` instead of failing the boot |
 | `VDJ_NO_VOICE_DOWNLOAD` | `0` | `1` = skip the first-run voice download |
 | `VDJ_ICECAST_ENABLED` | `1` | `0` disables Icecast delivery (the browser player still works) |
 | `ICECAST_PORT` | `8008` | Icecast listen **and** published host port (both sides of the mapping — change together) |
@@ -611,6 +626,14 @@ Notes:
   they keep the dynamic fallback and are never retried in a loop.
 - A row whose file is gone from disk (a stale index) is stamped the same way and
   counted separately in the card — the next rescan removes such rows entirely.
+- A file *too hot to normalize without clipping* (true peak so far above the
+  ceiling that the allowed cut would make it inaudible) is also left on the
+  dynamic fallback rather than boosted over the ceiling.
+- **If ffmpeg itself is unusable** (missing, killed, timing out) the pass stops
+  and says so in the card instead of marking the library as measured — the rows
+  stay queued, so a working ffmpeg measures them later. The same applies when a
+  measurement cannot be written to the database. *Re-analyze all* is not needed
+  for either case.
 - The DJ voice is deliberately excluded: every spoken clip comes from the same
   Piper model, so its level is already consistent, and `dj.gain_db` remains the
   artistic trim. Music now meets it at a known target instead.

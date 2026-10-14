@@ -254,16 +254,61 @@ def test_asf_tag_aliases_map_without_real_file(monkeypatch):
 # --- unidentifiable files are registered, never excluded -------------------
 
 def test_unidentifiable_file_registered_by_filename(monkeypatch, tmp_path):
-    # No tags at all and a filename that yields no usable artist/title:
-    # the file must stay playable as "Unknown - <file name>".
+    # No tags at all and a filename that yields no usable artist/title, and no
+    # folder that could name the artist: the file must stay playable as
+    # "Unknown - <file name>".
     monkeypatch.setattr(library, "MutagenFile", lambda path, easy=True: None)
-    p = tmp_path / "Just A Folder" / "Track 03.wma"
+    p = tmp_path / "Track 03.wma"
     m = library.read_metadata(p, root=tmp_path, allow_web=False)
     assert m["excluded"] == 0
     assert m["exclude_reason"] is None
     assert m["artist"] == "Unknown"
     assert m["title"] == "Track 03"
     assert m["meta_source"] == "path"
+
+
+# --- single-level <root>/<Artist>/<file> layout ----------------------------
+
+def test_single_level_folder_names_the_artist(monkeypatch, tmp_path):
+    # "Oscar Benton Blues Band/01 Track 1.wma": the only folder between the
+    # scan root and the file is the band, so the band name must survive as the
+    # artist instead of being registered as "Unknown" (and it is NOT also the
+    # album -- it is one or the other).
+    monkeypatch.setattr(library, "MutagenFile", lambda path, easy=True: None)
+    p = tmp_path / "Oscar Benton Blues Band" / "01 Track 1.wma"
+    m = library.read_metadata(p, root=tmp_path, allow_web=False)
+    assert m["artist"] == "Oscar Benton Blues Band"
+    assert m["album"] is None
+
+
+def test_theme_folder_is_not_an_artist(monkeypatch, tmp_path):
+    # A language/theme folder organises a collection; announcing it as the band
+    # would be worse than "Unknown", so the fallback declines it.
+    monkeypatch.setattr(library, "MutagenFile", lambda path, easy=True: None)
+    for folder in ("Halloween music", "Classical"):
+        p = tmp_path / folder / "Some Track.mp3"
+        m = library.read_metadata(p, root=tmp_path, allow_web=False)
+        assert m["artist"] == "Unknown", folder
+        assert m["album"] == folder
+
+
+def test_deeper_folder_is_an_album_not_an_artist(monkeypatch, tmp_path):
+    # "Soundtracks/Mamma Mia!/02 Honey.wma": two levels down the convention is
+    # album/OST folder, so the band must NOT be invented from it.
+    monkeypatch.setattr(library, "MutagenFile", lambda path, easy=True: None)
+    p = tmp_path / "Soundtracks" / "Mamma Mia!" / "02 Honey.wma"
+    m = library.read_metadata(p, root=tmp_path, allow_web=False)
+    assert m["artist"] == "Unknown"
+
+
+def test_numeric_band_name_from_filename():
+    # A band whose whole name is digits keeps it (see is_artist_label_junk);
+    # only track-number-shaped left sides are discarded.
+    from app import textq
+    assert textq.guess_from_path(Path("/mnt/mp3/311 - Down.mp3"),
+                                Path("/mnt/mp3"))["artist"] == "311"
+    assert textq.guess_from_path(Path("/mnt/mp3/07 - Down.mp3"),
+                                Path("/mnt/mp3"))["artist"] is None
 
 
 def test_short_numeric_artist_name_is_kept(monkeypatch):
@@ -377,3 +422,13 @@ def test_decade_themes_skip_implausible_years(isolated_data):
     # The odd-year tracks are still in the playable pool.
     titles = {t["title"] for t in library.query_tracks(limit=50)}
     assert {"Two-digit", "Junk", "Empty", "Null"} <= titles
+
+
+def test_scan_root_boundary_is_a_path_component():
+    # A raw startswith() test treated /mnt/mp31 and /mnt/mp3-flac as "inside"
+    # /mnt/mp3, so a scan of /mnt/mp3 deleted rows it had never walked.
+    assert library._under("/mnt/mp3/a.mp3", "/mnt/mp3")
+    assert library._under("/mnt/mp3", "/mnt/mp3")
+    assert not library._under("/mnt/mp31/a.mp3", "/mnt/mp3")
+    assert not library._under("/mnt/mp3-flac/a.mp3", "/mnt/mp3")
+    assert not library._under("/mnt/mp3/a.mp3", "")

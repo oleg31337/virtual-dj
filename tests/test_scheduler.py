@@ -226,3 +226,49 @@ def test_break_attempts_are_cleared_when_the_queue_is_rebuilt(music_dir, has_ffm
     sched._attempts[12345] = 2
     sched.clear()
     assert sched._attempts == {}
+
+
+def test_peek_window_is_clamped():
+    """The queue endpoint takes its limit from the query string."""
+    sched = Scheduler()
+    with sched._lock:
+        sched._queue = [
+            {"uid": i, "track": {"id": i, "path": f"/x/{i}.mp3"}}
+            for i in range(20)
+        ]
+    assert len(sched.peek(5)) == 5
+    assert len(sched.peek(99999)) == 20
+    assert len(sched.peek(-1)) == 1          # negatives no longer mean "all"
+
+
+def test_wrap_hands_out_unique_uids_under_concurrency():
+    """`_wrap` stamps both the DJ cadence counter and the queue uid, and it is
+    called from API threads, the broadcaster and the prefetch worker.
+
+    Without the lock two producers could hand out the same uid — and then a DJ
+    break prepared for one queue item would be played against another track.
+    """
+    import sys
+    import threading
+
+    sched = Scheduler()
+    track = {"id": 1, "path": "/x/a.mp3"}
+    seen: list[int] = []
+    collect = threading.Lock()
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)          # force frequent thread switches
+    try:
+        def worker():
+            mine = [sched._wrap(dict(track))["uid"] for _ in range(200)]
+            with collect:
+                seen.extend(mine)
+
+        threads = [threading.Thread(target=worker) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        sys.setswitchinterval(interval)
+    assert len(seen) == 1600
+    assert len(set(seen)) == 1600, "duplicate queue uids handed out"

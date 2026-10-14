@@ -69,12 +69,29 @@ def _download_file(url: str, dest: Path, timeout: float = 120.0) -> None:
                 pass
 
 
+def voice_config_path(voice: str) -> Path:
+    """Path of a voice's ``.onnx.json`` sidecar.
+
+    Piper opens ``<model>.onnx.json`` unconditionally when a model is loaded
+    (``piper.voice`` defaults ``config_path`` to ``model_path + ".json"``), so
+    this file is part of the voice, not optional metadata.
+    """
+    return config.voices_dir() / f"{voice}.onnx.json"
+
+
 def voice_model_path(voice: str | None = None) -> Path | None:
-    """Absolute path to ``voice``'s ``.onnx`` if present, else ``None``."""
+    """Absolute path to ``voice``'s ``.onnx`` if it is usable, else ``None``.
+
+    Both files must be present: a model whose sidecar is missing is reported as
+    not installed, because it cannot be loaded — saying "installed" and then
+    dropping every break at synthesis time is the failure this guards.
+    """
     name = voice or config.get("dj.voice", "en_GB-alan-medium")
     voices_dir = config.voices_dir()
     path = voices_dir / f"{name}.onnx"
-    return path if path.exists() else None
+    if path.exists() and voice_config_path(name).exists():
+        return path
+    return None
 
 
 def download_voice(voice: str, timeout: float = 180.0) -> Path:
@@ -97,11 +114,17 @@ def download_voice(voice: str, timeout: float = 180.0) -> Path:
         onnx_path.unlink(missing_ok=True)
         raise RuntimeError(
             f"voice {voice} downloaded but file looks truncated ({size} bytes)")
-    # The .onnx.json sidecar is metadata; not fatal if it is missing.
+    # The sidecar is NOT optional: piper loads "<model>.onnx.json" whenever it
+    # loads the model, so a model without it is dead weight that every
+    # "installed?" check would report as ready. Fail the download loudly (and
+    # remove the orphaned model) so the caller can retry instead.
     try:
         _download_file(json_url, json_path, timeout=timeout)
-    except Exception as exc:  # noqa: BLE001 - sidecar is optional
-        log.warning("voice %s: metadata json unavailable (%s)", voice, exc)
+    except Exception as exc:  # noqa: BLE001 - re-raised below with context
+        onnx_path.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"voice {voice} downloaded without its .onnx.json sidecar ({exc})"
+        ) from exc
     return onnx_path
 
 

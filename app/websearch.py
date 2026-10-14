@@ -118,11 +118,20 @@ def _similar(left: str, right: str) -> float:
 
 
 def _throttle(key: str, interval: float) -> None:
+    """Rate-limit calls sharing ``key`` to one per ``interval`` seconds.
+
+    The wait is computed under the lock but *slept* outside it: the providers
+    run concurrently on purpose (a lookup costs the max of their latencies, not
+    the sum), and sleeping while holding the lock would serialize them again.
+    """
     with _lock:
-        delta = time.monotonic() - _last_call.get(key, 0.0)
-        if delta < interval:
-            time.sleep(interval - delta)
-        _last_call[key] = time.monotonic()
+        wait = interval - (time.monotonic() - _last_call.get(key, 0.0))
+        if wait <= 0:
+            _last_call[key] = time.monotonic()
+            return
+        # Book the slot now so a second caller waits for *its* own slot.
+        _last_call[key] = time.monotonic() + wait
+    time.sleep(wait)
 
 
 # --- cache -----------------------------------------------------------------
@@ -307,10 +316,15 @@ def confirm_track(artist: str | None, title: str | None,
     timeout = float(config.get("websearch.timeout_s", 12))
     headers = {"User-Agent": config.get("enrich.user_agent", "VirtualDJ/1.0")}
     best_score = 0.0
+    transport_ok = False
 
     try:
         with httpx.Client(timeout=timeout, headers=headers,
                           follow_redirects=True) as client:
+            # The client is up: from here on an empty result is a real answer
+            # ("these databases do not know this track") and may be cached.
+            # A failure to get this far is an OUTAGE and must not be.
+            transport_ok = True
             # Run the music databases concurrently so a lookup costs the *max* of
             # their latencies, not the sum. Each provider still respects its own
             # rate limit inside its throttle helper.
@@ -335,8 +349,17 @@ def confirm_track(artist: str | None, title: str | None,
                     best_score = score
                     out["artist"] = hit.get("artist") or out["artist"]
                     out["title"] = hit.get("title") or out["title"]
-                out["album"] = out["album"] or hit.get("album")
-                out["year"] = out["year"] or hit.get("year")
+                    # The best match owns album/year as well: filling them in
+                    # provider order let a weaker hit's album win over the
+                    # winning match's.
+                    out["album"] = hit.get("album") or out["album"]
+                    out["year"] = hit.get("year") or out["year"]
+                else:
+                    # Nothing scored better: keep the old fill-what-is-empty
+                    # behaviour so a zero-confidence hit can still donate an
+                    # album/year that the winner did not have.
+                    out["album"] = out["album"] or hit.get("album")
+                    out["year"] = out["year"] or hit.get("year")
                 genre = canonical_genre(hit.get("genre"))
                 if not genre:
                     for tag in hit.get("tags") or []:
@@ -364,7 +387,12 @@ def confirm_track(artist: str | None, title: str | None,
 
     out["confidence"] = round(best_score, 3)
     out["confirmed"] = best_score >= 0.55
-    store_lookup(key, out)
+    if transport_ok:
+        # Never cache a lookup that never ran. `cached_lookup` short-circuits
+        # every later call, so storing the empty result of a DNS/timeout failure
+        # would freeze "not confirmed, no genre" for that track forever --
+        # a single outage during a scan would poison the whole cache.
+        store_lookup(key, out)
     return out
 
 

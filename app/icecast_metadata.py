@@ -18,6 +18,7 @@ from __future__ import annotations
 import base64
 import logging
 import threading
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -84,10 +85,13 @@ def update_metadata(title: str | None) -> bool:
     })
     try:
         with urllib.request.urlopen(req, timeout=4.0) as resp:
-            ok = 200 <= resp.status < 300
-            if not ok:
-                log.warning("icecast metadata update returned HTTP %s", resp.status)
-            return ok
+            # urlopen raises for any status >= 400 and follows redirects, so a
+            # successful return here is a 2xx; real failures arrive as
+            # HTTPError and are reported with their code below.
+            return 200 <= resp.status < 300
+    except urllib.error.HTTPError as exc:
+        log.warning("icecast metadata update returned HTTP %s", exc.code)
+        return False
     except Exception as exc:  # noqa: BLE001 - best-effort; never break the stream
         log.debug("icecast metadata update failed: %s", exc)
         return False
