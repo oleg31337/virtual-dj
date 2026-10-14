@@ -471,3 +471,114 @@ def test_a_skipped_track_is_not_measured(music_dir, has_ffmpeg):
     stored = db.connect().execute("SELECT duration FROM tracks WHERE id = ?",
                                   (track_id,)).fetchone()["duration"]
     assert stored == 90.0, f"a skipped play overwrote the length with {stored}s"
+
+
+def test_a_skip_with_no_audio_yet_is_not_a_playback_failure(music_dir, monkeypatch):
+    """Skip must not be counted as a failed file.
+
+    Five quick skips (each landing before the encoder produced a chunk) used to
+    reach the failure breaker: the loop backed off and the UI showed "5 queued
+    files in a row could not be played — is the music library mounted?".
+    """
+    import io
+
+    track = {"path": str(music_dir / "a.mp3"), "title": "Alpha"}
+    b = Broadcaster()
+
+    class _MuteOutput(io.BytesIO):
+        """The encoder produces nothing: the user hits Skip while waiting."""
+
+        def read(self, size: int | None = -1):
+            b.skip()
+            return b""
+
+    class _SilentProcess:
+        returncode = 0
+
+        def __init__(self):
+            self.stdout = _MuteOutput()
+            self.stderr = io.BytesIO()
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            pass
+
+    monkeypatch.setattr(stream_mod.subprocess, "Popen",
+                        lambda *a, **k: _SilentProcess())
+    assert b._play_file(track["path"], "track", {"track": track}) is True
+    assert b._consecutive_failures == 0
+    assert b._playback_error is None
+
+
+def test_the_ffmpeg_stderr_sink_reads_and_closes():
+    """ffmpeg's stderr goes to a file, not a pipe: nothing reads a pipe until
+    the file is over, so a full one blocks the child mid-write and the whole
+    broadcast hangs."""
+    sink = stream_mod._stderr_sink()
+    sink.write(b"boom " * 200)
+    text = stream_mod._stderr_text(sink)
+    assert text.startswith("boom")
+    assert len(text) <= 300
+    assert sink.closed
+    assert stream_mod._stderr_text(None) == ""
+
+
+def test_a_skip_while_the_station_is_paused_never_spins(has_ffmpeg):
+    """A pause holds the line while nobody listens. A skip arriving in that
+    state must not turn the hold into a 100 % CPU loop that sends no audio —
+    that would idle the source out and Icecast would drop the mount."""
+    b = Broadcaster()
+    sent: list[bytes] = []
+    b._broadcast = lambda data: sent.append(data)  # type: ignore[method-assign]
+    b.pause()
+    b.skip()  # e.g. a skip that landed before the pause began
+    done = threading.Event()
+    threading.Thread(target=lambda: (b._pause_hold(), done.set()),
+                     daemon=True).start()
+    time.sleep(1.3)
+    assert not done.is_set(), "the hold lasts as long as the pause does"
+    b.resume()
+    assert done.wait(5.0), "the hold must end when the pause does"
+    assert sent, "a paused station still has to send audio"
+
+
+def test_a_skip_stops_the_idle_tone(has_ffmpeg):
+    """The idle tone is a 5 s item: skip() must cut it short and reap the
+    encoder instead of leaving it running (and unreaped) to the end."""
+    b = Broadcaster()
+    sent: list[int] = []
+    b._broadcast = lambda data: sent.append(len(data))  # type: ignore[method-assign]
+    done = threading.Event()
+    threading.Thread(target=lambda: (b._idle_tone(), done.set()),
+                     daemon=True).start()
+    time.sleep(0.4)
+    proc = b._proc
+    b.skip()
+    assert done.wait(6.0)
+    before = list(sent)
+    time.sleep(0.3)
+    assert sent == before, "silence must not keep playing after a skip"
+    assert proc is not None, "the encoder must be reachable from skip()"
+    assert proc.poll() is not None, "the encoder is killed and reaped"
+
+
+def test_the_frame_aligner_follows_the_mpeg_version():
+    """MPEG-2/2.5 frames use half-stepped bitrates, their own sample rates and
+    72 bytes per frame instead of 144: sizing an MPEG-2 stream with MPEG-1
+    numbers mis-slices every frame (the whole point of this class)."""
+    size = stream_mod.FrameAligner._frame_size
+    assert size(bytes([0xFF, 0xFB, 0x90, 0x00])) == 417      # MPEG-1 128k/44.1k
+    assert size(bytes([0xFF, 0xF2, 0x80, 0x00])) == 208      # MPEG-2 64k/22.05k
+    assert size(bytes([0xFF, 0xE6, 0x90, 0x00])) is None     # reserved version
+    assert size(bytes([0xFF, 0xFD, 0x90, 0x00])) is None     # Layer II, not III
+
+
+def test_the_aligner_slices_mpeg2_streams_whole():
+    frame = bytes([0xFF, 0xF2, 0x80, 0x00]) + b"\x00" * 204  # 208 bytes
+    out = stream_mod.FrameAligner().feed(frame * 3 + b"\x00\x00")
+    assert len(out) == 208 * 3          # three whole frames, no partial tail

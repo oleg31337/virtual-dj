@@ -16,6 +16,7 @@ import logging
 import queue
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from collections import deque
@@ -28,6 +29,11 @@ from . import icecast_metadata
 
 log = logging.getLogger(__name__)
 
+# Size of one broadcast chunk. Small enough that clients' buffers are topped up
+# continuously (no multi-second silence between clumps), large enough to avoid
+# per-byte syscall overhead: at 128 kbps this is ~0.125 s of audio, well within
+# any player's jitter buffer. This is what the whole delivery path hands out --
+# `_get_chunk` in server.py relays one item at a time.
 CHUNK = 2048
 # How much audio a slow client may fall behind before we drop it.
 CLIENT_BUFFER_CHUNKS = 512
@@ -56,25 +62,45 @@ class FrameAligner:
     is discarded (the next track's first frame is a clean resync point).
     """
 
-    _BITRATES = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320]
-    _SAMPLE_RATES = [44100, 48000, 32000]
+    # Layer III only (that is what the encoder is asked for). The tables differ
+    # per MPEG version: MPEG-2/2.5 uses half-stepped bitrates, its own sample
+    # rates, and 72 bytes per frame instead of 144. Guessing MPEG-1 numbers for
+    # an MPEG-2 stream (any stream.sample_rate below 32000) mis-sized every
+    # frame and cut the broadcast mid-frame — the one thing this class exists to
+    # prevent.  keys: 1 = MPEG-1, 2 = MPEG-2, 25 = MPEG-2.5
+    _BITRATES = {
+        1: [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
+        2: [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+    }
+    _SAMPLE_RATES = {
+        1: [44100, 48000, 32000],
+        2: [22050, 24000, 16000],
+        25: [11025, 12000, 8000],
+    }
+    _VERSIONS = {0: 25, 2: 2, 3: 1}   # bit pattern -> MPEG version (1 is reserved)
 
     def __init__(self) -> None:
         self._buf = bytearray()
 
     @staticmethod
     def _frame_size(header: bytes) -> int | None:
-        b0, b1, b2, b3 = header
+        b0, b1, b2, _ = header
         if b0 != 0xFF or (b1 & 0xE0) != 0xE0:
             return None
+        if (b1 >> 1) & 0x03 != 1:
+            return None  # Layer I/II — not what this app encodes
+        version = FrameAligner._VERSIONS.get((b1 >> 3) & 0x03)
+        if version is None:
+            return None  # reserved version bits: a false sync, not a header
         bitrate_idx = (b2 >> 4) & 0x0F
         sr_idx = (b2 >> 2) & 0x03
         if bitrate_idx in (0, 15) or sr_idx == 3:
             return None  # free-format / reserved
-        bitrate = FrameAligner._BITRATES[bitrate_idx] * 1000
-        sample_rate = FrameAligner._SAMPLE_RATES[sr_idx]
+        table = 1 if version == 1 else 2
+        bitrate = FrameAligner._BITRATES[table][bitrate_idx] * 1000
+        sample_rate = FrameAligner._SAMPLE_RATES[version][sr_idx]
         pad = (b2 >> 1) & 0x01
-        return 144 * bitrate // sample_rate + pad
+        return (144 if version == 1 else 72) * bitrate // sample_rate + pad
 
     def feed(self, data: bytes) -> bytes:
         """Append ``data``; return all complete frames contained in it."""
@@ -98,6 +124,36 @@ class FrameAligner:
         self._buf.clear()
 
 
+def _stderr_sink() -> Any:
+    """A child's stderr sink that can never block the child.
+
+    A pipe is the obvious choice and it is a trap: nothing reads it until the
+    file is over, so once ffmpeg fills the ~64 KB pipe buffer it blocks inside
+    write() — stdout stops and the broadcast hangs for every listener until
+    somebody skips the track.
+    """
+    try:
+        return tempfile.TemporaryFile()
+    except OSError:
+        return None
+
+
+def _stderr_text(sink: Any, limit: int = 300) -> str:
+    """The head of what a child wrote to `_stderr_sink`, then close it."""
+    if sink is None:
+        return ""
+    try:
+        sink.seek(0)
+        return sink.read(64 * 1024).decode("utf-8", "replace")[:limit].strip()
+    except (AttributeError, OSError, ValueError):
+        return ""
+    finally:
+        try:
+            sink.close()
+        except (AttributeError, OSError):
+            pass
+
+
 class Listener:
     """One connected client.
 
@@ -107,13 +163,12 @@ class Listener:
     zero and the station would never pause itself.
     """
 
-    __slots__ = ("queue", "id", "connected_at", "dropped", "audience")
+    __slots__ = ("queue", "id", "dropped", "audience")
 
     def __init__(self, listener_id: int, audience: bool = True) -> None:
         self.id = listener_id
         self.audience = audience
         self.queue: queue.Queue[bytes | None] = queue.Queue(maxsize=CLIENT_BUFFER_CHUNKS)
-        self.connected_at = time.time()
         self.dropped = False
 
     def put(self, data: bytes) -> None:
@@ -122,6 +177,9 @@ class Listener:
         except queue.Full:
             # Client cannot keep up: drain half the buffer and continue rather
             # than blocking the transmitter for everyone else.
+            if not self.dropped:
+                log.warning("listener %s cannot keep up: dropping buffered audio",
+                            self.id)
             self.dropped = True
             for _ in range(CLIENT_BUFFER_CHUNKS // 2):
                 try:
@@ -166,7 +224,7 @@ class Broadcaster:
         # Rolling history of recent broadcast bytes (Icecast-style burst
         # buffer): replayed to new listeners so players start with a full
         # jitter buffer instead of starving for the first few seconds.
-        # 256 chunks x 4KB = 1MB (~64s at 128kbps); we only replay the last
+        # 256 chunks x 2KB = 512KB (~32s at 128kbps); we only replay the last
         # BURST_SECONDS worth.
         self._history: deque[bytes] = deque(maxlen=256)
         self._now_playing: dict[str, Any] = {
@@ -301,12 +359,11 @@ class Broadcaster:
         return (f"loudnorm=I={cfg['target_lufs']}:"
                 f"TP={cfg['true_peak_ceiling']}:LRA=11")
 
-    def _encode_args(self, path: str, extra_filters: list[str] | None = None,
-                     gain_db: float | None = None) -> list[str]:
+    def _encode_args(self, path: str, gain_db: float | None = None) -> list[str]:
         bitrate = int(config.get("stream.bitrate_kbps", 128))
         rate = int(config.get("stream.sample_rate", 44100))
         channels = int(config.get("stream.channels", 2))
-        filters = [self._gain_filter(gain_db)] + (extra_filters or [])
+        filters = [self._gain_filter(gain_db)]
         return [
             "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
             "-i", path,
@@ -364,13 +421,24 @@ class Broadcaster:
         no stream and can never trigger the resume.
         """
         frames = self._silence_frames()
+        if not frames:
+            log.warning("paused with no silence frames to send: the Icecast "
+                        "source may time out and drop the mount")
         next_at = time.monotonic()
-        while (self._paused.is_set() and not self._stop.is_set()
-               and not self._skip.is_set()):
+        # A pending skip is deliberately NOT a way out of here: nothing is
+        # playing, so leaving the hold would send _run straight back into it
+        # (a skip is only cleared by the next _play_file) and spin at 100 % CPU.
+        while self._paused.is_set() and not self._stop.is_set():
             now = time.monotonic()
             if frames and now >= next_at:
                 self._broadcast(frames)
-                next_at = max(now, next_at) + 1.0
+                # Advance the cadence rather than the wall clock: `max(now,
+                # next_at)` threw away every overshoot, so a long pause sent
+                # slightly less than 1 s of audio per second and slowly drained
+                # the listeners' cushion.
+                next_at += 1.0
+                if next_at < now - 5.0:  # a long stall: resync, never burst
+                    next_at = now
             time.sleep(0.05)
 
     def _note_true_duration(self, kind: str, meta: dict[str, Any], played: float,
@@ -400,7 +468,7 @@ class Broadcaster:
         except Exception:
             log.debug("could not store the measured duration", exc_info=True)
 
-    def _note_unplayable(self, path: str, kind: str, meta: dict[str, Any]) -> None:
+    def _note_unplayable(self, kind: str, meta: dict[str, Any]) -> None:
         """Take a track whose file is gone out of the playable pool.
 
         A missing file makes ``_play_file`` return instantly, so without this the
@@ -449,7 +517,7 @@ class Broadcaster:
         """Stream one file to all listeners, paced in real time."""
         if not Path(path).exists():
             log.warning("missing media file: %s", path)
-            self._note_unplayable(path, kind, meta)
+            self._note_unplayable(kind, meta)
             return False
 
         self._skip.clear()
@@ -460,24 +528,28 @@ class Broadcaster:
         if kind == "track":
             gain_db = (meta.get("track") or {}).get("gain_db")
         args = self._encode_args(path, gain_db=gain_db)
+        err_sink = _stderr_sink()
         try:
             proc = subprocess.Popen(
-                args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                args, stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL if err_sink is None else err_sink,
                 bufsize=0,
             )
         except OSError as exc:
             log.error("failed to launch ffmpeg: %s", exc)
+            _stderr_text(err_sink, 0)  # closes the sink
             return False
 
         self._proc = proc
-        self._played_seconds = 0.0
-        self._now_playing = {
-            "kind": kind,
-            "track": meta.get("track"),
-            "dj_text": meta.get("dj_text"),
-            "program": meta.get("program"),
-            "duration": meta.get("duration"),
-        }
+        with self._lock:  # one atomic switch-over for state()'s readers
+            self._played_seconds = 0.0
+            self._now_playing = {
+                "kind": kind,
+                "track": meta.get("track"),
+                "dj_text": meta.get("dj_text"),
+                "program": meta.get("program"),
+                "duration": meta.get("duration"),
+            }
         # A DJ break carries the spoken phrase and the id of the track it
         # introduces; remember both so the UI can show the phrase for exactly
         # the duration of that track. The binding is overwritten by the next
@@ -525,7 +597,8 @@ class Broadcaster:
 
                 self._broadcast(data)
                 sent += len(data)
-                self._played_seconds = sent / bps
+                with self._lock:
+                    self._played_seconds = sent / bps
         except Exception:
             reason = "error"
             log.exception("error while streaming %s", path)
@@ -537,17 +610,24 @@ class Broadcaster:
                 except OSError:
                     pass
             try:
-                stderr = proc.stderr.read() or b""
-                if proc.wait(timeout=5) not in (0, -9) and stderr:
-                    log.warning("ffmpeg: %s", stderr.decode("utf-8", "replace")[:300])
-            except Exception:
-                pass
+                code = proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                code = None
+            text = _stderr_text(err_sink)  # also closes it
+            if code is not None and code not in (0, -9) and text:
+                log.warning("ffmpeg: %s", text)
             self._proc = None
         # A skipped or stopped item only got part way through, so its byte count
         # is not the file's length — only a natural end measures the whole file.
         if self._skip.is_set() or self._stop.is_set():
             reason = "cut"
         self._note_true_duration(kind, meta, sent / bps, proc.returncode, reason)
+        # A deliberate skip is not a playback failure. Counting it as one means
+        # five quick skips (each landing before the first chunk) look like an
+        # unmounted library: the loop backs off and the UI shows "could not be
+        # played — is the music library mounted?".
+        if self._skip.is_set():
+            return True
         return sent > 0
 
     # --- main loop --------------------------------------------------------
@@ -564,11 +644,13 @@ class Broadcaster:
             "-t", "5", "-c:a", "libmp3lame", "-b:a", f"{bitrate}k",
             "-f", "mp3", "-write_xing", "0", "pipe:1",
         ]
-        self._played_seconds = 0.0
-        self._now_playing = {
-            "kind": "idle", "track": None, "dj_text": None,
-            "duration": 5.0,
-        }
+        self._skip.clear()  # a skip aimed at the previous item, not at silence
+        with self._lock:  # one atomic switch-over for state()'s readers
+            self._played_seconds = 0.0
+            self._now_playing = {
+                "kind": "idle", "track": None, "dj_text": None,
+                "duration": 5.0,
+            }
         self._notify_change()
         # Clear Icecast "now playing" while idle so players don't keep showing
         # the last song over silence. Off-thread so it can't stall the loop.
@@ -579,10 +661,13 @@ class Broadcaster:
         except OSError:
             time.sleep(5)
             return
+        # Published like any other item, so skip()/stop() can kill the encoder
+        # instead of waiting out the full 5 s of silence.
+        self._proc = proc
         bps = self._bytes_per_second()
         sent, start = 0, time.monotonic()
         aligner = FrameAligner()
-        while not self._stop.is_set():
+        while not self._stop.is_set() and not self._skip.is_set():
             raw = proc.stdout.read(CHUNK)
             if not raw:
                 break
@@ -591,14 +676,23 @@ class Broadcaster:
                 continue
             while (sent / bps) - (time.monotonic() - start) > MAX_AHEAD_SECONDS:
                 time.sleep(0.1)
-                if self._stop.is_set():
+                if self._stop.is_set() or self._skip.is_set():
                     break
             self._broadcast(data)
             sent += len(data)
-            self._played_seconds = sent / bps
+            with self._lock:
+                self._played_seconds = sent / bps
         aligner.discard_leftover()
         if proc.poll() is None:
-            proc.kill()
+            try:
+                proc.kill()
+            except OSError:
+                pass
+        try:
+            proc.wait(timeout=5)  # reap the child instead of leaving a zombie
+        except subprocess.TimeoutExpired:
+            pass
+        self._proc = None
 
     def _run(self) -> None:
         log.info("broadcaster started")
@@ -680,21 +774,28 @@ class Broadcaster:
     # --- introspection ----------------------------------------------------
 
     def state(self) -> dict[str, Any]:
-        now = self._now_playing
+        # One lock for the whole snapshot: these fields are written by the
+        # broadcast thread, and read separately they could disagree with each
+        # other (the previous track paired with this one's elapsed time). The
+        # lock is released before anything that calls out — the presence watcher
+        # and the scheduler take their own locks.
+        with self._lock:
+            now = self._now_playing
+            elapsed = round(self._played_seconds, 1)
+            now_track = now.get("track") or {}
+            spoken, spoken_for = self._last_dj_text, self._dj_for_track_id
         # Progress = audio actually broadcast for the current item, so it stands
         # still while the audio does (a pause, or a stalled decoder). It used to
         # be `time.time() - started_at`, which kept the UI's progress bar
         # crawling through a paused, silent song — the bar's clock and the audio
         # were never the same thing.
-        elapsed = round(self._played_seconds, 1)
-        # Show the remembered DJ phrase only for the track it introduced. Once
-        # the next track starts (the announced song has ended) it clears.
-        now_track = now.get("track") or {}
-        show_dj = (self._last_dj_text is not None
-                   and self._dj_for_track_id is not None
-                   and now_track.get("id") == self._dj_for_track_id
+        # The DJ phrase shows only for the track it introduced. Once the next
+        # track starts (the announced song has ended) it clears.
+        show_dj = (spoken is not None
+                   and spoken_for is not None
+                   and now_track.get("id") == spoken_for
                    and now.get("kind") in ("dj", "track"))
-        dj_text = self._last_dj_text if show_dj else None
+        dj_text = spoken if show_dj else None
         return {
             "kind": now.get("kind"),
             "track": now.get("track"),
