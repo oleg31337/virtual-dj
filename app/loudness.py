@@ -5,9 +5,14 @@ the quietest and loudest file). Playing that as a continuous stream makes loud
 tracks stand out and quiet ones disappear. The fix is the classic
 ReplayGain approach — measure each track ONCE, then play it with a fixed gain:
 
-    gain_db = target_lufs - integrated_lufs         (e.g. -16 - (-20.1) = +4.1)
+    gain_db = clamp(target_lufs - integrated_lufs, min_gain_db, max_boost_db)
     gain_db = min(gain_db, true_peak_ceiling - true_peak_dbfs)   # never clip
-    gain_db = clamp(gain_db, min_gain_db, max_boost_db)          # never shout
+
+The true-peak cap is applied LAST, so the cut floor cannot push a track back over
+the ceiling it was just capped against; a source so hot that holding the ceiling
+would cut it below the floor is left on the dynamic chain instead (no static
+gain), because a >20 dB static cut would make it inaudible next to everything
+else.
 
 That is transparent (no per-second riding of the level inside a song, no
 start-of-track ramp) and deterministic (a track sounds the same every play).
@@ -46,33 +51,24 @@ TIMEOUT_BASE_S = 30.0
 TIMEOUT_PER_MINUTE_S = 20.0
 TIMEOUT_MAX_S = 1800.0
 
-# EBU R128 gates silence at -70 LUFS; below that a "measurement" is really
-# "this file is silent" and must not be turned into a maximum boost.
+# EBU R128 gates silence at -70 LUFS; at or below that a "measurement" is really
+# "this file is silent" and must not be turned into a maximum boost. Inclusive on
+# purpose: some ffmpeg builds report exactly -70.0 LUFS for digital silence, and
+# letting that through means the quietest possible file gets the biggest boost.
 _SILENCE_FLOOR_LUFS = -70.0
-
-
-def _clamped(key: str, default: float, lo: float, hi: float) -> float:
-    """Read a numeric knob, tolerating junk values in a hand-edited config."""
-    try:
-        value = float(config.get(key, default))
-    except (TypeError, ValueError):
-        return default
-    if not math.isfinite(value):
-        return default
-    return max(lo, min(value, hi))
 
 
 def settings() -> dict[str, Any]:
     """Resolved + clamped loudness settings (a mis-set config can never raise)."""
     return {
         "enabled": bool(config.get("loudness.enabled", True)),
-        "target_lufs": _clamped("loudness.target_lufs", -16.0, -30.0, -6.0),
-        "true_peak_ceiling": _clamped("loudness.true_peak_ceiling", -1.5, -6.0, 0.0),
-        "max_boost_db": _clamped("loudness.max_boost_db", 6.0, 0.0, 18.0),
-        "min_gain_db": _clamped("loudness.min_gain_db", -12.0, -30.0, 0.0),
-        "window_seconds": int(_clamped("loudness.window_seconds", 120, 0, 900)),
+        "target_lufs": config.number("loudness.target_lufs", -16.0, -30.0, -6.0),
+        "true_peak_ceiling": config.number("loudness.true_peak_ceiling", -1.5, -6.0, 0.0),
+        "max_boost_db": config.number("loudness.max_boost_db", 6.0, 0.0, 18.0),
+        "min_gain_db": config.number("loudness.min_gain_db", -12.0, -30.0, 0.0),
+        "window_seconds": int(config.number("loudness.window_seconds", 120, 0, 900)),
         # Fallback default mirrors config.DEFAULTS (VDJ_LOUDNESS_WORKERS=2).
-        "workers": int(_clamped("loudness.workers", 2, 1, 16)),
+        "workers": int(config.number("loudness.workers", 2, 1, 16)),
         "autostart": bool(config.get("loudness.autostart", True)),
     }
 
@@ -102,7 +98,7 @@ def gain_for(
         loudness = float(lufs_i)
     except (TypeError, ValueError):
         return None
-    if not math.isfinite(loudness) or loudness < _SILENCE_FLOOR_LUFS:
+    if not math.isfinite(loudness) or loudness <= _SILENCE_FLOOR_LUFS:
         return None
 
     cfg = settings()
@@ -112,17 +108,34 @@ def gain_for(
     max_boost = cfg["max_boost_db"] if max_boost_db is None else float(max_boost_db)
     min_gain = cfg["min_gain_db"] if min_gain_db is None else float(min_gain_db)
 
-    gain = target - loudness
+    gain = max(min_gain, min(target - loudness, max_boost))
     # A track that already peaks near/over 0 dBFS cannot take the full cut of
     # headroom: cap the gain so the post-gain true peak stays under the ceiling.
+    # This runs AFTER the clamp — capping first let the cut floor push the gain
+    # back over the ceiling, i.e. it clipped the very files the ceiling is for.
     if true_peak_dbfs is not None:
         try:
             peak = float(true_peak_dbfs)
         except (TypeError, ValueError):
             peak = None
         if peak is not None and math.isfinite(peak):
-            gain = min(gain, ceiling - peak)
-    return round(max(min_gain, min(gain, max_boost)), 2)
+            cap = ceiling - peak
+            if cap < min_gain:
+                # Honouring the ceiling would cut past the floor: leave this one
+                # on the dynamic chain (which has its own true-peak limiting).
+                return None
+            gain = min(gain, cap)
+    return round(gain, 2)
+
+
+class AnalysisUnavailable(RuntimeError):
+    """ffmpeg itself could not run (missing, killed, timed out).
+
+    Distinct from ``None``, which means "decoded, but there is no usable number"
+    (silence, or a damaged file). Only ``None`` may be stamped into the database:
+    stamping an environmental failure marks the whole library as measured in one
+    pass, the queue drains to zero, and nothing ever measures it again.
+    """
 
 
 def measure(path: str | Path, window_seconds: int | None = None,
@@ -154,8 +167,10 @@ def measure(path: str | Path, window_seconds: int | None = None,
             text=True, errors="replace",
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        log.debug("loudness measure failed for %s: %s", path, exc)
-        return None
+        # ffmpeg could not run at all (not installed, killed, timed out). This is
+        # NOT "the file is unmeasurable" and the caller must not record it as a
+        # measurement — see AnalysisUnavailable.
+        raise AnalysisUnavailable(str(exc)) from exc
 
     lufs: float | None = None
     peak: float | None = None
@@ -174,7 +189,7 @@ def measure(path: str | Path, window_seconds: int | None = None,
             except (IndexError, ValueError):
                 continue
 
-    if lufs is None or not math.isfinite(lufs) or lufs < _SILENCE_FLOOR_LUFS:
+    if lufs is None or not math.isfinite(lufs) or lufs <= _SILENCE_FLOOR_LUFS:
         return None
     if peak is not None and not math.isfinite(peak):
         peak = None
@@ -195,6 +210,13 @@ class Analyzer:
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
         self._claimed: set[int] = set()
+        # Bumped by reset(): a worker that was inside ffmpeg when the operator
+        # reset the library must drop its result instead of writing a pre-reset
+        # measurement back into a row the reset just cleared.
+        self._epoch = 0
+        # Set when start() is called while a pass is still winding down (a scan
+        # that finished mid-pass); honoured by the last worker to exit.
+        self._pending = False
 
         self.running = False
         self.workers = 0
@@ -223,8 +245,9 @@ class Analyzer:
         so progress must be derived from the database, not from this object).
 
         ``library_measured`` counts stamped rows; ``library_graded`` counts the
-        ones that actually produced a usable gain (the difference is files that
-        are unreadable or gone from disk, which keep the dynamic fallback).
+        ones that actually produced a usable gain. The difference is files that
+        keep the dynamic fallback: unreadable, gone from disk, silent, or too
+        hot to normalize statically without clipping.
         """
         row = db.connect().execute(
             "SELECT COUNT(*) AS total, "
@@ -240,7 +263,12 @@ class Analyzer:
         }
 
     def _claim(self) -> dict[str, Any] | None:
-        """Atomically reserve the next unmeasured track for this worker."""
+        """Atomically reserve the next unmeasured track for this worker.
+
+        A claim is always released again unless the row was actually stamped
+        (see ``_worker``), so the head of the queue cannot be walled off by rows
+        that someone claimed and then failed to write.
+        """
         algo = algo_for(settings()["window_seconds"])
         with self._lock:
             rows = db.connect().execute(
@@ -284,7 +312,7 @@ class Analyzer:
 
     # --- workers ----------------------------------------------------------
 
-    def _worker(self) -> None:
+    def _worker(self, stop: threading.Event, epoch: int) -> None:
         try:
             # Linux keeps nice per-thread, and the ffmpeg child inherits it, so
             # the broadcast never competes with the analyzer.
@@ -292,64 +320,107 @@ class Analyzer:
         except (AttributeError, OSError):
             pass
 
-        empty = 0
-        while not self._stop.is_set():
+        while not stop.is_set() and epoch == self._epoch:
             claimed = self._claim()
             if claimed is None:
-                # Nothing claimable right now. Either the other workers hold
-                # every pending row, or the queue is genuinely empty — one
-                # short re-check absorbs a scan that adds rows while we wind
-                # down, then the worker exits.
-                empty += 1
-                if empty >= 2 or self.queue_size() == 0:
+                # Nothing claimable right now: the queue is either genuinely
+                # empty or every pending row is claimed by a live worker. The
+                # database decides, not a counter — a scan that adds rows while
+                # we wind down must still be picked up.
+                if self.queue_size() == 0:
                     break
                 time.sleep(1.0)
                 continue
-            empty = 0
 
-            path = Path(claimed["path"])
-            result = None
-            vanished = False
+            track_id = claimed["id"]
+            stamped = False
             try:
-                if path.exists():
-                    result = measure(path)
-                else:
-                    # A row whose file is gone (a stale index — the next scan
-                    # deletes those rows). Stamped anyway so the queue can
-                    # drain and the pass does not re-stat the whole NFS mount on
-                    # every run; counted apart from real analysis failures.
-                    vanished = True
-                    log.debug("loudness: file is gone: %s", path)
-            except Exception as exc:  # noqa: BLE001 - one file must not kill the pool
-                log.warning("loudness analysis failed for %s: %s", path, exc)
+                try:
+                    path = Path(claimed["path"])
+                except Exception as exc:  # noqa: BLE001 - a hand-edited row
+                    log.warning("loudness: unusable path in row %s: %s",
+                                track_id, exc)
+                    with self._lock:
+                        self.failed += 1
+                    continue  # the finally below releases the claim
 
-            try:
-                self._store(claimed["id"], result)
-            except Exception as exc:  # noqa: BLE001 - a DB hiccup must not kill the pool
-                log.warning("loudness store failed for %s: %s", path, exc)
+                # Name the file that is being measured, not the last one that
+                # finished: a measurement can run for many minutes.
+                with self._lock:
+                    self.current = path.name
 
-            with self._lock:
-                self.current = path.name
-                if vanished:
-                    self.missing += 1
-                elif result is None:
-                    self.failed += 1
-                else:
-                    self.analyzed += 1
+                result = None
+                vanished = False
+                try:
+                    if path.exists():
+                        result = measure(path)
+                    else:
+                        # A row whose file is gone (a stale index — the next
+                        # scan deletes those rows). Stamped anyway so the queue
+                        # can drain and the pass does not re-stat the whole NFS
+                        # mount on every run; counted apart from real failures.
+                        vanished = True
+                        log.debug("loudness: file is gone: %s", path)
+                except AnalysisUnavailable as exc:
+                    with self._lock:
+                        self.error = f"loudness analysis unavailable: {exc}"
+                    log.warning("loudness: ffmpeg is unusable, stopping this "
+                                "pass with %d tracks still queued (%s)",
+                                self.queue_size(), exc)
+                    break  # nothing is stamped: the next pass retries them all
+                except Exception as exc:  # noqa: BLE001 - one file must not kill the pool
+                    log.warning("loudness analysis failed for %s: %s", path, exc)
 
-    def _run_worker(self) -> None:
+                store_error: Exception | None = None
+                with self._lock:
+                    if self._epoch != epoch:
+                        log.debug("loudness: dropping a result from a reset pass")
+                        return
+                    try:
+                        self._store(track_id, result)
+                        stamped = True
+                    except Exception as exc:  # noqa: BLE001 - a DB hiccup
+                        store_error = exc
+                        self.error = f"loudness could not store a measurement: {exc}"
+                    if vanished:
+                        self.missing += 1
+                    elif result is None or not stamped:
+                        self.failed += 1
+                    else:
+                        self.analyzed += 1
+                if store_error is not None:
+                    # Stop instead of re-claiming the same row: re-measuring it
+                    # in a loop would burn the pool on a database that is not
+                    # accepting writes. The rows stay unstamped, so the next
+                    # pass picks them up.
+                    log.warning("loudness store failed for %s: %s", path, store_error)
+                    break
+            finally:
+                if not stamped:
+                    with self._lock:
+                        self._claimed.discard(track_id)
+
+    def _run_worker(self, stop: threading.Event, epoch: int) -> None:
         try:
-            self._worker()
+            self._worker(stop, epoch)
         except Exception as exc:  # noqa: BLE001 - surface it in status, keep others alive
             self.error = str(exc)
             log.exception("loudness worker crashed")
         finally:
             me = threading.current_thread()
+            restart = False
             with self._lock:
                 self._threads = [t for t in self._threads if t is not me]
                 if not self._threads:
                     self.running = False
                     self.finished_at = time.time()
+                    # A start() that landed while this pass was still running
+                    # (a scan finishing, an operator pressing Analyze) was
+                    # remembered instead of being swallowed by `if running`.
+                    restart = self._pending
+                    self._pending = False
+            if restart:
+                self.start()
 
     # --- control ----------------------------------------------------------
 
@@ -357,13 +428,22 @@ class Analyzer:
         """Start (or resume) the background pass. Idempotent."""
         with self._lock:
             if self.running:
+                # A scan that finishes while the pool is winding down lands
+                # here: remember the request so the rows it just added are not
+                # left unmeasured until some later scan happens to run.
+                self._pending = True
                 return self.status()
             cfg = settings()
             if not cfg["enabled"]:
                 self.error = "loudness normalization is disabled in the config"
                 return self.status()
             count = max(1, min(int(workers or cfg["workers"]), 16))
-            self._stop.clear()
+            # A fresh event per run: stop() must never clear an event that a
+            # still-running thread from an earlier run is watching (that is how
+            # a disowned worker got resurrected), and those threads exit as soon
+            # as their own event is set.
+            self._stop = threading.Event()
+            self._pending = False
             self._claimed.clear()
             self.workers = count
             self.analyzed = self.failed = self.missing = 0
@@ -377,8 +457,10 @@ class Analyzer:
                 self.finished_at = self.started_at
                 return self.status()
             self.running = True
+            epoch = self._epoch
             for index in range(count):
-                thread = threading.Thread(target=self._run_worker, daemon=True,
+                thread = threading.Thread(target=self._run_worker,
+                                          args=(self._stop, epoch), daemon=True,
                                           name=f"loudness-{index}")
                 self._threads.append(thread)
                 thread.start()
@@ -393,7 +475,8 @@ class Analyzer:
         bounded: an app stop must not wait N x timeout. Workers are daemon
         threads, so a long ffmpeg analysis can never hold up process exit.
         """
-        self._stop.set()
+        stop = self._stop
+        stop.set()
         deadline = time.time() + timeout_s
         for thread in list(self._threads):
             remaining = deadline - time.time()
@@ -408,15 +491,21 @@ class Analyzer:
 
     def reset(self) -> int:
         """Forget every measurement (forces a full re-analysis). Returns rows."""
-        conn = db.connect()
-        cur = conn.execute(
-            "UPDATE tracks SET lufs_i = NULL, true_peak_dbfs = NULL, "
-            "gain_db = NULL, loudness_analyzed_at = NULL, loudness_algo = NULL"
-        )
-        conn.commit()
-        self.total = self.analyzed = self.failed = self.missing = 0
-        self.finished_at = self.started_at = None
-        return cur.rowcount or 0
+        with self._lock:
+            # A worker can be a whole ffmpeg analysis behind stop()'s budget;
+            # the new epoch makes it drop that result rather than write it back
+            # into a row this is clearing.
+            self._epoch += 1
+            self._claimed.clear()
+            conn = db.connect()
+            cur = conn.execute(
+                "UPDATE tracks SET lufs_i = NULL, true_peak_dbfs = NULL, "
+                "gain_db = NULL, loudness_analyzed_at = NULL, loudness_algo = NULL"
+            )
+            conn.commit()
+            self.total = self.analyzed = self.failed = self.missing = 0
+            self.finished_at = self.started_at = None
+            return cur.rowcount or 0
 
     def status(self) -> dict[str, Any]:
         cfg = settings()

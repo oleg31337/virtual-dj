@@ -7,6 +7,7 @@ REAL ffmpeg-generated files, and the API surface is driven through TestClient.
 
 from __future__ import annotations
 
+import threading
 import time
 
 import pytest
@@ -217,9 +218,9 @@ def test_play_file_uses_the_track_gain_only_for_music(music_dir, has_ffmpeg,
     seen: dict[str, object] = {}
     original = b._encode_args
 
-    def spy(path, extra_filters=None, gain_db=None):
+    def spy(path, gain_db=None):
         seen["gain_db"] = gain_db
-        return original(path, extra_filters=extra_filters, gain_db=gain_db)
+        return original(path, gain_db=gain_db)
 
     monkeypatch.setattr(b, "_encode_args", spy)
     b.add_listener()
@@ -312,3 +313,134 @@ def test_analyze_stop_reset_endpoints(loudness_client, has_ffmpeg):
     reset = loudness_client.post("/api/loudness/reset").json()
     assert reset["reset"] == 3
     assert reset["status"]["queue"] == 3
+
+
+# --- the analyzer versus a broken environment -------------------------------
+
+
+@pytest.fixture
+def pending_library(music_dir, has_ffmpeg):
+    """A scanned library whose loudness queue has not been drained yet."""
+    config.save_config({"music_dir": str(music_dir)})
+    library.scan_library(str(music_dir))
+    loudness.ANALYZER.stop()
+    assert loudness.ANALYZER.queue_size() == 3
+    yield music_dir
+    loudness.ANALYZER.stop()
+
+
+def _drain(analyzer, timeout_s=60.0) -> None:
+    deadline = time.time() + timeout_s
+    while time.time() < deadline and analyzer.running:
+        time.sleep(0.1)
+
+
+def test_a_true_peak_that_cannot_be_capped_uses_the_dynamic_chain():
+    """The true-peak cap is a promise: for a source so hot that holding the
+    ceiling would cut past the allowed floor, there is no static gain at all
+    (the dynamic chain limits the peak itself) — never a boost over the cap."""
+    assert loudness.gain_for(-10.0, 20.0) is None
+    # The cap is applied after the clamp, so nothing can exceed the ceiling.
+    for lufs in (-24.0, -18.0, -12.0, -8.0):
+        for peak in (-12.0, -6.0, -1.0, 3.0, 8.0):
+            gain = loudness.gain_for(lufs, peak)
+            assert gain is not None
+            assert peak + gain <= loudness.settings()["true_peak_ceiling"] + 1e-9
+
+
+def test_digital_silence_at_the_gate_is_not_a_maximum_boost():
+    assert loudness.gain_for(-70.0) is None      # the gate is inclusive
+    assert loudness.gain_for(-70.01) is None
+    assert loudness.gain_for(-69.9) is not None
+
+
+def test_an_unavailable_ffmpeg_leaves_the_library_queued(pending_library, monkeypatch):
+    """If ffmpeg cannot run at all nothing may be stamped: recording "measured,
+    no gain" would drain the queue and nothing would ever retry it."""
+    analyzer = loudness.ANALYZER
+
+    def boom(path, *args, **kwargs):
+        raise loudness.AnalysisUnavailable("ffmpeg: No such file or directory")
+
+    monkeypatch.setattr(loudness, "measure", boom)
+    analyzer.start(workers=1)
+    _drain(analyzer, 30.0)
+
+    assert analyzer.analyzed == 0
+    assert analyzer.queue_size() == 3                 # nothing was stamped
+    assert analyzer._claimed == set()                 # and no claim was left
+    assert analyzer.error and "unavailable" in analyzer.error
+
+
+def test_a_failed_store_is_not_counted_as_analyzed(pending_library, monkeypatch):
+    """A database that refuses the write must leave the row pending (and its
+    claim released) instead of reporting the pass as done."""
+    analyzer = loudness.ANALYZER
+
+    def boom(track_id, result):
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(analyzer, "_store", boom)
+    analyzer.start(workers=1)
+    _drain(analyzer)
+
+    assert analyzer.analyzed == 0
+    assert analyzer.failed == 1
+    assert analyzer.queue_size() == 3
+    assert analyzer._claimed == set()
+    assert analyzer.error and "store" in analyzer.error
+
+
+def test_a_reset_mid_analysis_is_not_overwritten(pending_library, monkeypatch):
+    """Reset lands while a worker is inside ffmpeg (it can be minutes): that
+    worker's result must be dropped, not written back over the cleared library."""
+    analyzer = loudness.ANALYZER
+    real_measure = loudness.measure
+
+    def measure_then_reset(path, *args, **kwargs):
+        result = real_measure(path, *args, **kwargs)
+        analyzer.reset()          # the operator's Reset, mid-analysis
+        return result
+
+    monkeypatch.setattr(loudness, "measure", measure_then_reset)
+    analyzer.start(workers=1)
+    _drain(analyzer)
+
+    assert analyzer.analyzed == 0
+    assert analyzer.queue_size() == 3
+    row = db.connect().execute(
+        "SELECT COUNT(*) AS n FROM tracks WHERE loudness_analyzed_at IS NOT NULL"
+    ).fetchone()
+    assert row["n"] == 0          # the stale measurement never landed
+
+
+def test_a_start_that_arrives_mid_pass_is_honoured(pending_library, monkeypatch):
+    """A scan that finishes while the pool is winding down calls start(): that
+    must not be swallowed by `if running` — the new rows have to be measured."""
+    analyzer = loudness.ANALYZER
+    gate = threading.Event()
+    real_measure = loudness.measure
+
+    def slow_measure(path, *args, **kwargs):
+        gate.wait(10.0)
+        return real_measure(path, *args, **kwargs)
+
+    monkeypatch.setattr(loudness, "measure", slow_measure)
+
+    calls: list[float] = []
+    real_start = analyzer.start
+
+    def counting_start(workers=None):
+        calls.append(time.monotonic())
+        return real_start(workers)
+
+    monkeypatch.setattr(analyzer, "start", counting_start)
+    analyzer.start(workers=1)          # first pass, parked inside measure()
+    assert analyzer.running
+    analyzer.start(workers=1)          # the scan's autostart, mid-pass
+    assert analyzer._pending is True   # remembered, not dropped
+    gate.set()
+    deadline = time.time() + 60
+    while time.time() < deadline and analyzer._pending:
+        time.sleep(0.1)
+    assert len(calls) >= 3, "the request must have started a second pass"
