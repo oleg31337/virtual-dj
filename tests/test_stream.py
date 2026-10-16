@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import queue
 import subprocess
 import threading
 import time
+
+import pytest
 
 from app import config
 from app import stream as stream_mod
@@ -282,29 +285,140 @@ def test_failure_breaker_backs_off_and_reports_the_error():
     assert b.state()["error"] is None
 
 
-# --- pausing must not silence the socket --------------------------------------
+# --- the station must never go quiet -------------------------------------------
 #
-# Icecast disconnects a source that sends nothing for <source-timeout> (30 s in
-# the bundled icecast.xml). The first pause implementation simply stopped
-# emitting bytes while it held the track, so a pause longer than that removed
-# the mount: listeners were dropped, and a new one could not even connect — so
-# nothing could ever trigger the resume. A pause now broadcasts silence.
+# Icecast drops a source that sends nothing for <source-timeout> (30 s in the
+# icecast.xml the app renders for the bundled server, 10 s in a standalone
+# deploy/icecast.xml) and a dropped source takes the mount with it: an external
+# player that tunes in while the mount is gone gets nothing at all and has to be
+# stopped and started by hand. Every stall in the broadcast loop used to do this
+# — the pause, the backoff after a run of unplayable files (measured against the
+# real server: the pusher's socket was broken off ~30 s after the library was
+# unmounted), the LLM writing a DJ break and piper speaking it, which is exactly
+# what a resuming listener waits for. Broadcaster._keepalive sends silence
+# whenever nothing else is playing, so there is always a stream on the mount.
 
-def test_a_pause_keeps_sending_audio(has_ffmpeg):
+def test_a_paused_station_keeps_sending_audio(has_ffmpeg):
     b = Broadcaster()
     listener = b.add_listener()
     b.pause()
     worker = threading.Thread(target=b._pause_hold, daemon=True)
+    air = threading.Thread(target=b._keepalive, daemon=True)
     worker.start()
+    air.start()
     try:
         data = listener.queue.get(timeout=15)
         assert data, "a paused station must still send bytes"
         assert data[0] == 0xFF and (data[1] & 0xE0) == 0xE0, (
             "the stream must stay whole MPEG frames")
     finally:
+        b._stop.set()
         b.resume()
         worker.join(timeout=5)
+        air.join(timeout=5)
     assert b.paused is False
+
+
+def test_a_stalled_station_never_goes_quiet(has_ffmpeg):
+    """Nothing playable at all — the state that dropped the mount for real.
+
+    Before the keep-alive, this stream carried no bytes whatsoever while the
+    loop backed off, so the mount vanished and a player connecting to it got
+    nothing until it was restarted by hand.
+    """
+    b = Broadcaster()
+    listener = b.add_listener()
+    b._silence_frames()  # warm the cache: no ffmpeg spawn in the middle here
+    b._last_audio_at = time.monotonic()
+    b._next_silence_at = b._last_audio_at + stream_mod.KEEPALIVE_GAP_S
+    air = threading.Thread(target=b._keepalive, daemon=True)
+    air.start()
+    arrivals: list[float] = []
+    try:
+        deadline = time.monotonic() + 4.0
+        while time.monotonic() < deadline:
+            try:
+                listener.queue.get(timeout=2.0)
+            except queue.Empty:
+                pytest.fail("a stalled station went quiet for 2 s")
+            arrivals.append(time.monotonic())
+    finally:
+        b._stop.set()
+        air.join(timeout=5)
+    gaps = [later - earlier for earlier, later in zip(arrivals, arrivals[1:])]
+    assert len(arrivals) >= 3, f"only {len(arrivals)} chunks of air in 4 s"
+    assert max(gaps) < 2.0, f"a listener heard {max(gaps):.1f}s of nothing"
+
+
+def test_the_pause_hold_itself_sends_nothing(has_ffmpeg):
+    """One owner of the air: the hold waits, the keep-alive sends.
+
+    Two senders would put two seconds of audio on the wire per second — a
+    latency cushion on every listener that never comes back down.
+    """
+    b = Broadcaster()
+    sent: list[bytes] = []
+    b._broadcast = lambda data: sent.append(data)  # type: ignore[method-assign]
+    b.pause()
+    done = threading.Event()
+    threading.Thread(target=lambda: (b._pause_hold(), done.set()),
+                     daemon=True).start()
+    time.sleep(0.5)
+    assert not sent, "the hold must leave the air to the keep-alive"
+    b.resume()
+    assert done.wait(5.0)
+
+
+def test_the_keepalive_adds_nothing_while_audio_is_flowing():
+    """A track in flight must not have silence injected on top of it."""
+    b = Broadcaster()
+    listener = b.add_listener()
+    b._silence_frames = lambda: b"\xff\xfb\x90\x00"  # type: ignore[method-assign]
+    b._broadcast(b"\xff\xfb\x90\x00" * 20)  # audio just went out
+    assert listener.queue.get(timeout=5)
+    assert b._keepalive_tick(time.monotonic()) is False
+    assert listener.queue.empty(), "silence on top of live audio"
+
+
+def test_the_keepalive_fills_a_stall_in_real_time():
+    """One second of silence per second: no drift, no doubling.
+
+    A station stalled for hours must send exactly as much audio as time passes;
+    anything less slowly drains every listener's cushion.
+    """
+    b = Broadcaster()
+    b._silence_frames = lambda: b"\xff\xfb\x90\x00" * 8  # type: ignore[method-assign]
+    b._last_audio_at = b._next_silence_at = 0.0
+    times: list[float] = []
+    start = time.monotonic()
+    while time.monotonic() - start < 5.0:
+        now = time.monotonic()
+        if b._keepalive_tick(now):
+            times.append(now)
+        time.sleep(0.05)
+    assert 4 <= len(times) <= 6, f"expected ~1 chunk/s, got {len(times)} in 5 s"
+    gaps = [later - earlier for earlier, later in zip(times, times[1:])]
+    assert max(gaps) < 2.0, f"a gap of {max(gaps):.1f}s is air the source lost"
+
+
+def test_the_keepalive_says_so_when_it_cannot_fill_the_air(caplog):
+    b = Broadcaster()
+    b._silence_frames = lambda: b""  # type: ignore[method-assign]
+    b._last_audio_at = b._next_silence_at = 0.0
+    assert b._keepalive_tick(time.monotonic()) is False
+    assert b._keepalive_warned is True
+    assert any("on air" in record.message for record in caplog.records)
+
+
+def test_starting_the_station_starts_the_keepalive(has_ffmpeg):
+    b = Broadcaster()
+    b.start()
+    try:
+        assert b._keepalive_thread is not None and b._keepalive_thread.is_alive()
+        assert b._keepalive_thread.name == "vdj-keepalive"
+    finally:
+        b.stop()
+    assert b._keepalive_thread is None, "stop() must own the thread's lifetime"
 
 
 def test_the_pause_silence_is_really_silent(has_ffmpeg):
@@ -533,18 +647,21 @@ def test_a_skip_while_the_station_is_paused_never_spins(has_ffmpeg):
     state must not turn the hold into a 100 % CPU loop that sends no audio —
     that would idle the source out and Icecast would drop the mount."""
     b = Broadcaster()
-    sent: list[bytes] = []
-    b._broadcast = lambda data: sent.append(data)  # type: ignore[method-assign]
     b.pause()
     b.skip()  # e.g. a skip that landed before the pause began
     done = threading.Event()
     threading.Thread(target=lambda: (b._pause_hold(), done.set()),
                      daemon=True).start()
+    air = threading.Thread(target=b._keepalive, daemon=True)
+    listener = b.add_listener()
+    air.start()
     time.sleep(1.3)
     assert not done.is_set(), "the hold lasts as long as the pause does"
     b.resume()
     assert done.wait(5.0), "the hold must end when the pause does"
-    assert sent, "a paused station still has to send audio"
+    b._stop.set()
+    air.join(timeout=5)
+    assert not listener.queue.empty(), "a paused station still has to send audio"
 
 
 def test_a_skip_stops_the_idle_tone(has_ffmpeg):

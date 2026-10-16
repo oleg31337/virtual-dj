@@ -15,11 +15,13 @@ Two rules make that safe, and both were measured against the real server:
 * **Unknown is not zero.** If Icecast is enabled but its status cannot be read,
   presence is unknown and the station keeps playing. A stats outage must never
   take the station off air.
-* **Pausing must keep sending.** ``Broadcaster.pause()`` emits silence instead
-  of stalling the socket. Icecast drops a source that goes quiet for
-  ``source-timeout`` (30 s in the bundled ``icecast.xml``), which would remove
-  the mount exactly when a new listener wants to connect — and with no mount
-  nobody can ever trigger the resume.
+* **Pausing must keep sending.** The broadcaster's keep-alive thread sends
+  silence whenever nothing else is playing, instead of letting the socket go
+  quiet. Icecast drops a source that sends nothing for ``source-timeout``
+  (30 s in the ``icecast.xml`` the app renders for the bundled server), which
+  would remove the mount exactly when a new listener wants to connect — and
+  with no mount nobody can ever trigger the resume. The same guarantee covers
+  the failures and the DJ breaks, which stall the audio for just as long.
 """
 
 from __future__ import annotations

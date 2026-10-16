@@ -49,6 +49,21 @@ FAILURE_BREAKER = 5
 # On connect we replay this much of the recent broadcast to the new listener
 # (Icecast's "burst"), so its player can fill its buffer instantly.
 BURST_SECONDS = 3.0
+# The station must never go quiet for longer than this. Icecast drops a source
+# that sends nothing for <source-timeout> (30 s in the icecast.xml that
+# app.icecast_server renders for the bundled server; a standalone
+# deploy/icecast.xml uses 10 s) and a dropped source takes the mount with it:
+# an external player that tunes in then gets nothing at all -- it plays for a
+# moment, gives up, and has to be stopped and started again -- while a player
+# that was already connected is cut off. Everything that interrupts the audio
+# (a pause, the failure backoff when the library is not mounted, an LLM writing
+# the next DJ break, piper speaking it, an encoder starting up) is covered by
+# _keepalive, which sends silence whenever nothing else has gone out for this
+# long.
+KEEPALIVE_GAP_S = 1.0
+# How often the keep-alive looks. A clock read per tick, and short enough that
+# silence resumes within a fraction of a second of any stall.
+KEEPALIVE_TICK_S = 0.25
 
 
 class FrameAligner:
@@ -211,10 +226,16 @@ class Broadcaster:
         # Presence watcher (app/listeners.py), attached at startup so state()
         # can report who is listening and who paused the station.
         self._watcher: Any = None
-        # Cached silence, encoded once per stream format: what we broadcast
-        # while paused, so the Icecast source is never idle (see _pause_hold).
+        # Cached silence, encoded once per stream format: what the keep-alive
+        # broadcasts whenever nothing else is playing (see _keepalive).
         self._silence: bytes | None = None
         self._silence_key: tuple[int, int, int] | None = None
+        # When the last chunk went out, when the next silence frame is due, and
+        # the thread that keeps the air filled (see _keepalive).
+        self._last_audio_at = 0.0
+        self._next_silence_at = 0.0
+        self._keepalive_thread: threading.Thread | None = None
+        self._keepalive_warned = False
         # How much audio of the current item has actually gone out, in seconds.
         # This — never a wall clock — is the progress the UI shows: it stops
         # when the audio stops (a pause holds it, a stalled decoder too), where
@@ -296,6 +317,11 @@ class Broadcaster:
 
     def _broadcast(self, data: bytes) -> None:
         with self._lock:
+            # Stamped here, not by the callers: every path that puts audio on
+            # the wire (a track, a DJ break, the idle tone, the keep-alive's
+            # silence) goes through this method, so the keep-alive can never
+            # send a second of silence on top of audio that just left.
+            self._last_audio_at = time.monotonic()
             listeners = list(self._listeners.values())
             self._history.append(data)
         for listener in listeners:
@@ -412,34 +438,80 @@ class Broadcaster:
         return frames
 
     def _pause_hold(self) -> None:
-        """Wait out a pause while broadcasting silence in real time.
+        """Wait out a pause; ``_keepalive`` keeps the station on air.
 
-        Emitting NOTHING is what the first implementation did, and it is wrong:
-        the app's own relay feeds Icecast, and Icecast disconnects a source that
-        sends nothing for ``source-timeout`` (30 s in the bundled icecast.xml).
-        The mount then disappears — so a listener arriving during the pause gets
-        no stream and can never trigger the resume.
+        This deliberately sends nothing itself. The audio a paused station
+        broadcasts *is* silence, but it must not have two owners: a pause, an
+        LLM writing the next DJ break, piper speaking it and the failure
+        backoff all need the same guarantee, and two senders would put two
+        seconds of audio on the wire per second — growing a latency cushion on
+        every listener that never comes back down.
         """
+        while self._paused.is_set() and not self._stop.is_set():
+            time.sleep(0.05)
+
+    # --- keep-alive -------------------------------------------------------
+
+    def _keepalive_tick(self, now: float) -> bool:
+        """Broadcast a second of silence if nothing has gone out recently.
+
+        Split out of the thread loop so the guarantee is testable without
+        sleeping. Returns True when frames were sent.
+        """
+        if now - self._last_audio_at < KEEPALIVE_GAP_S:
+            # Something is playing: nothing is owed, so silence must never go
+            # out on top of it. Anchor the next silence to that audio — with
+            # max(), so that ticking inside the gap cannot walk the deadline
+            # forward and halve the audio a stalled station sends.
+            self._next_silence_at = max(
+                self._next_silence_at, self._last_audio_at + KEEPALIVE_GAP_S)
+            return False
+        if now < self._next_silence_at:
+            return False
         frames = self._silence_frames()
         if not frames:
-            log.warning("paused with no silence frames to send: the Icecast "
-                        "source may time out and drop the mount")
-        next_at = time.monotonic()
-        # A pending skip is deliberately NOT a way out of here: nothing is
-        # playing, so leaving the hold would send _run straight back into it
-        # (a skip is only cleared by the next _play_file) and spin at 100 % CPU.
-        while self._paused.is_set() and not self._stop.is_set():
-            now = time.monotonic()
-            if frames and now >= next_at:
-                self._broadcast(frames)
-                # Advance the cadence rather than the wall clock: `max(now,
-                # next_at)` threw away every overshoot, so a long pause sent
-                # slightly less than 1 s of audio per second and slowly drained
-                # the listeners' cushion.
-                next_at += 1.0
-                if next_at < now - 5.0:  # a long stall: resync, never burst
-                    next_at = now
-            time.sleep(0.05)
+            self._next_silence_at = now + KEEPALIVE_GAP_S
+            if not self._keepalive_warned:
+                self._keepalive_warned = True
+                log.error("cannot keep the station on air: no silence frames to "
+                          "send, so Icecast will time the source out and drop "
+                          "the mount (external players then get no stream)")
+            return False
+        self._broadcast(frames)
+        # Advance the deadline by exactly one gap, not from `now`: the audio a
+        # stalled station sends has to be real time. Sending 1 s every 1.1 s
+        # (a tick's jitter, each time) would slowly drain every listener's
+        # cushion — the pause that ran for 32 h before the library was
+        # unmounted would have leaked minutes of it.
+        self._next_silence_at += KEEPALIVE_GAP_S
+        if self._next_silence_at < now:  # fell behind: re-anchor, never burst
+            self._next_silence_at = now + KEEPALIVE_GAP_S
+        return True
+
+    def _keepalive(self) -> None:
+        """Never let the station go silent for longer than KEEPALIVE_GAP_S.
+
+        The stream Icecast relays is what keeps the mount alive, and every
+        stall in the broadcast loop used to leave it idle for long enough to
+        trip ``source-timeout``: the backoff after a run of unplayable files (up
+        to 30 s, measured against the real server — the pusher's socket was
+        broken off exactly that long after the library went missing), the LLM
+        writing a DJ break and piper speaking it (which is precisely the path a
+        resuming listener waits on), an encoder starting up, a pause. When the
+        source is dropped the mount disappears with it, so an external player
+        connecting at that moment gets nothing and has to be restarted by hand
+        once the source is back.
+
+        Sending silence whenever nothing else is playing makes "there is always
+        a stream on the mount" true for all of those at once.
+        """
+        while not self._stop.is_set():
+            if self._stop.wait(KEEPALIVE_TICK_S):
+                break
+            try:
+                self._keepalive_tick(time.monotonic())
+            except Exception:  # never let the guarantee die with the thread
+                log.debug("keep-alive failed", exc_info=True)
 
     def _note_true_duration(self, kind: str, meta: dict[str, Any], played: float,
                             returncode: int | None, reason: str) -> None:
@@ -589,7 +661,7 @@ class Broadcaster:
 
                 if self._paused.is_set():
                     # Hold the decoder where it is (so resuming continues the
-                    # same track) and keep the line alive with silence. The
+                    # same track). The air time is the keep-alive's job. The
                     # progress counter is deliberately NOT advanced here: the
                     # audio is not moving, so neither is the UI's bar.
                     self._pause_hold()
@@ -752,6 +824,17 @@ class Broadcaster:
             raise RuntimeError("ffmpeg not found on PATH")
         self._stop.clear()
         self._started_stream_at = time.time()
+        self._last_audio_at = time.monotonic()
+        self._next_silence_at = time.monotonic() + KEEPALIVE_GAP_S
+        # The keep-alive starts first: from the very first moment the station is
+        # up, silence stands in for whatever is not playing, so the Icecast
+        # source never sees an idle socket and the mount is never missing.
+        self._keepalive_warned = False
+        self._keepalive_thread = threading.Thread(
+            target=self._keepalive, name="vdj-keepalive", daemon=True)
+        self._keepalive_thread.start()
+        log.info("keep-alive started: silence whenever nothing plays, so the "
+                 "Icecast source never idles out")
         self._thread = threading.Thread(target=self._run, name="vdj-broadcast",
                                         daemon=True)
         self._thread.start()
@@ -770,6 +853,9 @@ class Broadcaster:
             listener.close()
         if self._thread:
             self._thread.join(timeout=5)
+        if self._keepalive_thread:
+            self._keepalive_thread.join(timeout=5)
+            self._keepalive_thread = None
 
     # --- introspection ----------------------------------------------------
 

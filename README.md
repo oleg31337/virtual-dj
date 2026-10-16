@@ -298,14 +298,19 @@ environment variables):
 | `listener_grace_s` | `30` | How long to keep playing after the last listener leaves, so a player that reconnects is not a stop. `0` = stop immediately. |
 | `listener_poll_s` | `5` | How often Icecast is asked how many listeners the mount has. |
 
-**Paused still means on air.** A pause broadcasts silence instead of going quiet,
-and that is deliberate: the app relays `/stream.mp3` into Icecast, and Icecast
-disconnects a source that sends nothing for `<source-timeout>` (30 s in the
-bundled `icecast.xml`). A silent pause would therefore remove the mount — every
-connected player dropped, and a new one unable to connect at all, so nothing
-could ever trigger the resume. The silence keeps the mount, and any player that
-dials in hears music again within a poll. The queue is not touched while paused:
-the next track starts where it left off.
+**There is always a stream on the mount.** The app relays `/stream.mp3` into
+Icecast, and Icecast disconnects a source that sends nothing for
+`<source-timeout>` (30 s in the bundled `icecast.xml`). A dropped source takes
+the mount with it: every connected player is cut off, and one that dials in
+while the mount is gone gets nothing at all — players do not recover from that
+on their own, you have to stop and start them. A keep-alive thread therefore
+broadcasts silence whenever nothing else is playing, so the source never goes
+idle. That covers the pause, and the stalls that are not pauses: the backoff
+after a run of unplayable files (measured on a real system: the mount was being
+dropped about 30 s after the library went missing, over and over), and the gap
+while an encoder starts up. A paused station therefore stays on air, and a
+player that dials in hears music again within a poll. The queue is not touched
+while paused: the next track starts where it left off.
 
 **An Icecast that cannot be asked is not an empty room.** If Icecast is enabled
 but its status page does not answer, presence is *unknown*, the music keeps
