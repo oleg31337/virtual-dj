@@ -121,6 +121,23 @@ def test_fallback_script_handles_missing_metadata():
     assert text.strip()
 
 
+def test_the_fallback_intro_never_announces_a_program():
+    """The templated intro introduces a SONG, not the station's scheduling.
+
+    It used to open with the themed program the track belonged to ("Next up, a
+    run of Rock", "Звучит подборка в стиле Rock") — the user directive is that
+    the program is never spoken in either language.
+    """
+    track = {"id": 1, "title": "T", "artist": "A", "year": "1999"}
+    for language in (None, "english", "russian"):
+        text = dj.fallback_script(track, language=language)
+        assert "T" in text and "A" in text, text
+        low = text.lower()
+        for word in ("program", "run of", "spotlight", "подборка", "шоу",
+                     "блок", "программ"):
+            assert word not in low, f"{language}: {word!r} in {text!r}"
+
+
 def test_clean_script_strips_reasoning_and_markdown():
     raw = "<think>hmm let me think</think>**Hello** there. Second one. Third. Fourth."
     out = dj._clean_script(raw, max_sentences=2)

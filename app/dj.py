@@ -215,7 +215,9 @@ SYSTEM_PROMPT = (
     "Write ONLY the words to be spoken aloud: no stage directions, no track "
     "listings, no markdown, no emoji, no quotation marks around the whole "
     "reply, and never mention that you are an AI. Keep it natural, spoken "
-    "English. "
+    "English. Every intro stands on its own: talk about the song you are "
+    "introducing (you may briefly nod to the one that just played), never about "
+    "the station's schedule or how the music is organised. "
     "STRICT FACT RULE: state ONLY facts that appear verbatim in the "
     "information block you are given. Never guess or embellish a song's "
     "history, chart position, recording story, meaning, or origin. If the "
@@ -323,8 +325,15 @@ def prepare_script(text: str, voice: str | None = None,
 
 
 def fallback_script(track: dict[str, Any],
-                    program: dict[str, Any] | None = None,
                     language: str | None = None) -> str:
+    """Template intro, used when the LLM is off or unreachable.
+
+    The themed *program* a track belongs to is deliberately absent here — and
+    from the prompt (see :func:`generate_script`). The DJ introduces songs, not
+    the station's scheduling: no "we are switching to a new program", no
+    "next up, a run of Rock". The program still drives the playlist; it is just
+    never spoken.
+    """
     artist = (track.get("artist") or "").strip()
     title = (track.get("title") or "").strip() or "this next one"
     year = (track.get("year") or "").strip()
@@ -336,15 +345,6 @@ def fallback_script(track: dict[str, Any],
             base = f"А сейчас — {title}, {artist}."
         else:
             base = f"Далее — {title}."
-        if program:
-            label = program.get("label") or "следующий блок"
-            kind = program.get("kind")
-            if kind == "genre":
-                base = f"Звучит подборка в стиле {label}. {base}"
-            elif kind == "artist":
-                base = f"Шоу, посвящённое {label}. {base}"
-            elif kind == "decade":
-                base = f"Отправляемся в {label}. {base}"
         # Leave years/dates as digits (the Russian voice reads them natively).
         return base
     # English (default) fallback path.
@@ -354,15 +354,6 @@ def fallback_script(track: dict[str, Any],
         base = f"Here's {title}, by {artist}."
     else:
         base = f"Up next, {title}."
-    if program:
-        label = program.get("label") or "the next set"
-        kind = program.get("kind")
-        if kind == "genre":
-            return _spell_dates(f"Next up, a run of {label}. {base}")
-        if kind == "artist":
-            return _spell_dates(f"A spotlight on {label} now. {base}")
-        if kind == "decade":
-            return _spell_dates(f"Traveling back to the {label}. {base}")
     return _spell_dates(base)
 
 
@@ -395,13 +386,18 @@ def _facts_block(track: dict[str, Any], facts: dict[str, Any]) -> str:
 
 
 def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = None,
-                    program: dict[str, Any] | None = None,
                     voice: str | None = None) -> str:
     """Ask the local LLM for an on-air intro; fall back to a template.
 
     The DJ's language follows the voice that will speak the line: pass
     ``voice`` (or leave None for the configured ``dj.voice``) and the script is
     generated in that voice's language (Russian voices -> Russian script).
+
+    The *program* a track belongs to is never part of the prompt. It used to be:
+    a track that opened a themed block told the model to welcome listeners into
+    that vibe, and the model duly said things like "we are switching to a new
+    program". The program is a playlist device — it decides what plays — not
+    something the DJ talks about.
     """
     max_sentences = config.randint_range(
         "dj.sent_min", "dj.sent_max",
@@ -416,7 +412,7 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
     is_russian = language == "russian"
 
     if not config.get("llm.enabled", True):
-        return fallback_script(track, program=program, language=language)
+        return fallback_script(track, language=language)
 
     style = config.get("dj.style", "warm, witty late-night radio host")
     prev_line = ""
@@ -426,28 +422,6 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
             f"{previous.get('title') or 'unknown'} by "
             f"{previous.get('artist') or 'unknown'}. You may briefly reference it."
         )
-
-    # When this track opens a new themed program, tell the DJ to announce the
-    # vibe switch — this is how a real DJ frames the transition.
-    program_line = ""
-    if program:
-        label = program.get("label") or "the next set"
-        kind = program.get("kind")
-        if kind == "genre":
-            program_line = (
-                f"\nThis song opens a new program of {label} music. Welcome the "
-                f"listeners into that vibe before introducing the track."
-            )
-        elif kind == "artist":
-            program_line = (
-                f"\nThis song opens a spotlight on {label}. Frame the transition "
-                f"into this artist's music before the intro."
-            )
-        elif kind == "decade":
-            program_line = (
-                f"\nThis song opens a trip back to the {label}. Set the era before "
-                f"the intro."
-            )
 
     # How the text must be written so the voice reads it correctly. This is the
     # difference between a catalogue entry and something a host can say: years
@@ -503,7 +477,7 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
         f"Mention one genuinely interesting fact ONLY if the information block "
         f"below directly supports it. Do NOT state any release date or year "
         f"that is not listed below."
-        f"{speech_line}{prev_line}{program_line}{lang_line}\n\n"
+        f"{speech_line}{prev_line}{lang_line}\n\n"
         f"Information about the next song:\n"
         f"{_facts_block(track, facts)}\n"
     )
@@ -555,7 +529,7 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
         log.warning("LLM returned an empty script; using fallback")
     else:
         log.warning("LLM script generation failed (%s); using fallback", last_exc)
-    return fallback_script(track, program=program, language=language)
+    return fallback_script(track, language=language)
 
 
 def _cache_path(text: str, voice: str, speed: float, noise_scale: float,
@@ -686,13 +660,8 @@ def audio_duration(path: Path) -> float:
 
 
 def prepare_break(track: dict[str, Any],
-                  previous: dict[str, Any] | None = None,
-                  program: dict[str, Any] | None = None) -> dict[str, Any] | None:
-    """Generate script + audio for one DJ break. Returns None if unavailable.
-
-    ``program`` (optional) describes the themed program this track opens, so the
-    DJ announces the vibe switch ("Next up, a run of Rock...") like a real host.
-    """
+                  previous: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    """Generate script + audio for one DJ break. Returns None if unavailable."""
     # Check the voice BEFORE the LLM call: without a model Piper cannot speak,
     # so generating a script only burns the (GPU-backed) LLM and then drops the
     # break silently. One clear warning, then stay quiet until it is fixed.
@@ -709,7 +678,7 @@ def prepare_break(track: dict[str, Any],
                 problem, config.get("dj.voice", "en_GB-alan-medium"))
         return None
     _tts_warned = False
-    script = generate_script(track, previous, program=program)
+    script = generate_script(track, previous)
     if not script:
         return None
     audio = synthesize(script)

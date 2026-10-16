@@ -13,6 +13,8 @@ new synthesis settings actually reach the command line:
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from app import config, dj
@@ -144,6 +146,43 @@ def test_the_llm_answering_produces_a_prepared_script(monkeypatch):
     assert script, "the LLM's answer must come back as a script"
     assert "1999" not in script, f"years must be spoken, got {script!r}"
     assert "nineteen ninety-nine" in script
+
+
+def test_the_prompt_never_mentions_the_program(monkeypatch):
+    """The DJ is not told about the themed program the track belongs to.
+
+    It used to be: a track that opened a themed block got "This song opens a new
+    program of <label> music. Welcome the listeners into that vibe...", and the
+    DJ duly said things like "we are switching to a new program". The program
+    stays a playlist device — it decides what plays — and is never spoken.
+    """
+    prompts: list[str] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict:
+            return {"message": {"content": "A short intro about a song."}}
+
+    def fake_post(url, **kw):
+        prompts.append(json.dumps(kw.get("json", {})))
+        return FakeResponse()
+
+    monkeypatch.setattr(dj.httpx, "post", fake_post)
+    monkeypatch.setattr(config, "_CACHE", {
+        "llm": {"enabled": True, "base_url": "http://x", "model": "m",
+                "retries": 0}})
+
+    script = dj.generate_script(
+        {"id": 1, "title": "Time", "artist": "Pink Floyd", "genre": "Electronic"},
+        previous={"title": "Yesterday", "artist": "The Beatles"})
+    assert script == "A short intro about a song."
+    assert prompts, "the LLM must actually be called"
+    prompt = prompts[0]
+    for word in ("Trip-Hop", "program", "vibe", "spotlight", "run of", "set"):
+        assert word.lower() not in prompt.lower(), (
+            f"{word!r} leaked into the DJ prompt: {prompt}")
 
 
 def test_a_missing_voice_is_named_and_stops_the_llm_call(monkeypatch, tmp_path, caplog):

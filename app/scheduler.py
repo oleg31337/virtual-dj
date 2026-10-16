@@ -180,9 +180,10 @@ class Scheduler:
     def _queued_music(self) -> bool:
         """True when the queue already holds something to switch away from.
 
-        The first program ever queued has nothing to announce; every later
-        program — including the first one of a refill, which the old
-        ``items``-only test missed — does.
+        The very first program of a station has no transition to mark, so it
+        gets no break; every later program — including the first one of a
+        refill, which the old ``items``-only test missed — does. The break marks
+        the boundary, it does not announce the theme (see dj.generate_script).
         """
         with self._lock:
             return bool(self._queue)
@@ -356,12 +357,13 @@ class Scheduler:
                     # Record the placement so the next program in this same batch
                     # (and the refill after it, via the queue) respects the gap.
                     positions[library.artist_key(track)] = offset + index
-                    # The first track of every program after the first carries
-                    # the announce. The queue counts too: a refill starts a new
-                    # program whose theme may differ from the tail of the
-                    # existing queue, and checking the batch alone left that
-                    # boundary — the FIRST program of every batch — silently
-                    # unannounced (found by the playlist matrix: 4-7 per 120).
+                    # The first track of every program after the first carries a
+                    # break (a natural place for the DJ to speak; the theme
+                    # itself is never mentioned). The queue counts too: a refill
+                    # starts a new program whose theme may differ from the tail
+                    # of the existing queue, and checking the batch alone left
+                    # that boundary — the FIRST program of every batch — with no
+                    # break at all (found by the playlist matrix: 4-7 per 120).
                     first = index == 0
                     items.append(self._wrap(
                         track,
@@ -748,8 +750,11 @@ class Scheduler:
                 continue
             prior = upcoming[index - 1]["track"] if index else previous
             started = time.monotonic()
-            prepared = dj.prepare_break(
-                item["track"], prior, program=item.get("program"))
+            # The program the track belongs to is deliberately NOT passed on:
+            # the DJ introduces songs, never the station's scheduling (see
+            # dj.generate_script). The boundary still gets a break, it just
+            # does not announce a vibe switch.
+            prepared = dj.prepare_break(item["track"], prior)
             if prepared:
                 with self._lock:
                     self._prepared[uid] = prepared
