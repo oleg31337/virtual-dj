@@ -226,6 +226,70 @@ SYSTEM_PROMPT = (
     "intro is always better than a longer invented one."
 )
 
+# How the line has to be WRITTEN so the voice reads it correctly: years as words,
+# stylised names in their spoken form, punctuation the engine actually pauses on.
+# These are style rules, so they ride in the system message with the others.
+#
+# The examples are called illustrations TWICE on purpose. A small model reads a
+# bare example list as content when it sits next to the song facts: the examples
+# used to live in the user prompt and nemotron-3-nano:4b opened with "Mindfields
+# by Pink, the Prodigy" — an artist that appears in no field of that track
+# (measured: 1/3 of lines, from the "P!nk is Pink" example alone), and it also
+# recited the rules' own "two songs" phrasing. The Russian rule block used to
+# carry "Агата Кристи" as its stress example, which invites the same mistake for
+# Russian lines, so its example names are gone too.
+SPEECH_RULES = (
+    "\nHOW TO WRITE THE LINE (style rules - apply them, do not recite them):\n"
+    "- Write every year and every number as words, never as digits: "
+    "\"nineteen ninety-nine\", not \"1999\"; \"two songs\", not \"2 songs\".\n"
+    "- Write artist and song names the way they are spoken: normalise stylised "
+    "spellings and drop symbols that are not pronounced. The three examples "
+    "below ILLUSTRATE the rule only; they are NOT this song and must never be "
+    "said unless the information block lists them: P!nk is \"Pink\", "
+    "Ke$ha is \"Kesha\", deadmau5 is \"dead mouse\". Keep every name "
+    "recognisable and never invent a different one.\n"
+    "- Say only the artists, titles and albums listed in the information "
+    "block. Never add an artist name of your own.\n"
+    "- Never announce the genre and never read the style tags out: they are "
+    "context for the tone of the line, not something to state.\n"
+    "- Keep the sentences short, and punctuate for breath: a comma is a small "
+    "pause, an em dash a longer one."
+)
+
+# The Russian rule set has to carry the whole style contract, not just the
+# pronunciation aids: the English block used to ride along and its first sentence
+# was "write it the way it will be SPOKEN, not as a catalogue listing". Splitting
+# the two by language silently dropped that, and half the Russian lines came back
+# as bare lists ("Fly Away, Lenny Kravitz, rock" / "Наш дом, Mashina Vremeni,
+# 1993, Rock") — measured, 3 of 6. The speech-framing rules are therefore
+# repeated here in Russian.
+RUSSIAN_RULES = (
+    "\nОБЯЗАТЕЛЬНО пиши свой ответ ПО-РУССКИ (на русском языке). "
+    "Названия песен и имена исполнителей — на русском, сохраняй их "
+    "смысл и форму, не переводи и не транслитерируй.\n"
+    "Чтобы голосовой движок правильно выговаривал слова, выполни три "
+    "обязательных правила:\n"
+    "1) Ставь знак ударения ´ СРАЗУ ПОСЛЕ ударной гласной каждого "
+    "слова, например: приве´т, музыка´льный, золото´й. "
+    "Используй ТОЛЬКО ´ — никакие другие знаки (ʼ, ʹ, `, ‘, ’) не "
+    "ставь: движок их либо не видит, либо читает вслух как название "
+    "знака.\n"
+    "2) Всегда пиши букву Ё (ё) там, где она действительно есть в "
+    "слове, никогда не заменяй её на Е (е).\n"
+    "3) Годы и числа оставляй цифрами (например: \"1984\") — русский "
+    "голос читает их правильно сам. Словами их писать НЕ нужно.\n"
+    "Убирай из названий символы и стилизации, которые не читаются вслух, "
+    "но не заменяй имя исполнителя другим. Говори только о песне, которую "
+    "представляешь: называй лишь те имена и названия, что перечислены ниже, "
+    "и не добавляй других исполнителей.\n"
+    "Пиши так, как это звучит вслух, а не как список из каталога: живая фраза "
+    "ведущего, а не перечисление «название, исполнитель, жанр».\n"
+    "Пиши короткими фразами и расставляй знаки для дыхания: запятая — "
+    "короткая пауза, тире — длинная.\n"
+    "Не называй жанр и не перечисляй стилевые теги: они нужны только для "
+    "настроения фразы."
+)
+
 
 def piper_binary() -> str | None:
     """Locate the piper executable (venv bin first, then PATH)."""
@@ -357,12 +421,44 @@ def fallback_script(track: dict[str, Any],
     return _spell_dates(base)
 
 
+# Metadata that is a placeholder rather than a value: a ripper (or a failed
+# tagger) wrote it when it had nothing to write. Saying it on air is worse than
+# saying nothing — the DJ announced "Genre: Default" and "...their Best Hits
+# 200% album" for tracks whose tags are simply empty. Measured in the live
+# library: 150 tracks tagged genre "None", 95 "Default", 47 "Genre", 22
+# "Unknown"; 11 tracks on an album called "Je Veux (2010) mp3", plus
+# "Ripped by Buko's MP3 Lair". Both lists are meant to be extended.
+_JUNK_META = {
+    "none", "null", "nil", "default", "unknown", "untitled", "n/a", "na",
+    "genre", "album", "track", "audio", "music", "mp3", "flac", "cd", "cd1",
+    "cd2", "disc 1", "disc 2", "disc1", "disc2", "various", "various artists",
+    "va", "no album", "no genre", "not set", "-",
+}
+_JUNK_META_RE = re.compile(
+    # A format/rip marker as a word of its own ...
+    r"(?:^|[\s(\[])(?:mp3|flac|wav|cbr|vbr|320kbps|ripped|rip|download)"
+    r"(?:$|[\s)\].])"
+    # ... or a URL / domain, which is where those markers usually come from.
+    r"|www\.|https?://|\b[a-z0-9-]+\.(?:com|net|org|ru|info|biz|me)\b",
+    re.I)
+
+
+def _is_junk_meta(value: str) -> bool:
+    """True when a tag holds a placeholder instead of a real value."""
+    text = (value or "").strip()
+    return text.lower() in _JUNK_META or bool(_JUNK_META_RE.search(text))
+
+
 def _facts_block(track: dict[str, Any], facts: dict[str, Any]) -> str:
     lines = []
     unknown = []
     for label, key in (("Title", "title"), ("Artist", "artist"),
                        ("Album", "album"), ("Genre", "genre"), ("Year", "year")):
         value = (track.get(key) or "").strip() if track.get(key) else ""
+        if value and label != "Title" and _is_junk_meta(value):
+            # Treated as missing, so it also lands in the UNKNOWN list below and
+            # the model knows not to guess it.
+            value = ""
         if value:
             lines.append(f"{label}: {value}")
         elif label != "Title":
@@ -372,8 +468,13 @@ def _facts_block(track: dict[str, Any], facts: dict[str, Any]) -> str:
     # row (often a later compilation or live cut), not the song's origin, and
     # small models confidently restate them as "originally released in ...".
     # The ID3 year above is far more trustworthy for a personal collection.
-    if facts.get("tags"):
-        lines.append("Style tags: " + ", ".join(facts["tags"]))
+    # Three tags, not all eight MusicBrainz returns: the model reads a long tag
+    # list as something to recite ("...mixing rock electronic pop alternative
+    # rock industrial drum and bass dubstep hardcore").
+    tags = [str(t).strip() for t in (facts.get("tags") or [])]
+    tags = [t for t in tags if t and not _is_junk_meta(t)][:3]
+    if tags:
+        lines.append("Style tags: " + ", ".join(tags))
     if facts.get("credited_artists"):
         lines.append("Credited artists: " + ", ".join(facts["credited_artists"]))
     if facts.get("artist_summary"):
@@ -383,6 +484,100 @@ def _facts_block(track: dict[str, Any], facts: dict[str, Any]) -> str:
             "UNKNOWN (do not mention, do not guess): " + ", ".join(unknown)
         )
     return "\n".join(lines)
+
+
+# Names the prompt offers ONLY as illustrations of the spelling rule. A small
+# model copies them into the line it writes: for "Mindfields" by Prodigy — which
+# carries none of these names — nemotron-3-nano:4b opened with "Mindfields by
+# Pink, the Prodigy", then "Mindfields by Pink and Keesha", and once recited
+# "two songs" out of the number rule. Moving the examples into the system message
+# helped nothing; only a guard on the output catches it. Russian spellings are
+# listed too: a Russian line said the same names in Cyrillic.
+_EXAMPLE_NAME_RES = (
+    re.compile(r"\bP(?:ink|!nk)\b"),                      # the "P!nk is Pink" example
+    # "Kesha" / "Keesha": the model misspells it, so the extra e is allowed.
+    re.compile(r"\bK(?:e\$ha|e+sha)\b", re.I),
+    re.compile(r"\bdeadmau5\b|\bdead mouse\b", re.I),
+    re.compile(r"\bPanic!? at the Disco\b", re.I),
+    re.compile(r"\bBlink-182\b", re.I),
+    re.compile(r"\bone eighty-two\b", re.I),
+    re.compile(r"\bПинк\b|\bКеша\b|\bДэдмаус\b"),
+)
+
+# The other thing a 4B model does to a DJ line: loop. One measured line was
+# "да-да-да-да-…" eighty times over; others repeated a word or a phrase.
+_LOOP_RES = (
+    re.compile(r"(.{2,5})\1{5,}"),                          # да-да-да-да-да-да
+    re.compile(r"\b(\w{2,})(?:\s+\1\b){4,}", re.I),         # yes yes yes yes yes
+    re.compile(r"\b(\w+\s+\w+\s+\w+)(?:\s+\1){2,}", re.I),  # phrase x3
+)
+
+
+def _usable_script(script: str, track: dict[str, Any]) -> bool:
+    """False when a generated line is unusable on air.
+
+    Two failure modes the prompt cannot prevent, both measured: naming an artist
+    that exists only in the prompt's examples, and degenerate repetition. A
+    rejected line is asked for again once, then replaced by the template.
+    """
+    fields = " ".join(
+        str(track.get(key) or "") for key in ("title", "artist", "album")
+    ).lower()
+    for pattern in _EXAMPLE_NAME_RES:
+        # Capitalised on purpose: "a pink neon glow" is imagery, "Pink" is the
+        # artist from the example list. A name the track really carries (Pink
+        # Floyd introducing Pink Floyd) is not a leak.
+        match = pattern.search(script)
+        if match and match.group(0).lower() not in fields:
+            log.info("rejecting a DJ line that named a prompt example (%s)",
+                     match.group(0))
+            return False
+    for pattern in _LOOP_RES:
+        if pattern.search(script):
+            log.info("rejecting a looping DJ line (%s)", pattern.pattern)
+            return False
+    return True
+
+
+def _ask_llm(system_prompt: str, user_prompt: str) -> str:
+    """One chat completion from the configured LLM, retrying transport failures.
+
+    A transient Ollama blip (restart, first load of a model) must not drop the
+    line to the templated fallback, so the call is retried with a short backoff.
+    Returns "" when every attempt failed.
+    """
+    base_url = str(config.get("llm.base_url", "")).rstrip("/")
+    model = config.get("llm.model", "qwen3.5:9b")
+    timeout = float(config.get("llm.timeout_s", 120))
+    retries = int(config.get("llm.retries", 2))
+    for attempt in range(retries + 1):
+        try:
+            resp = httpx.post(
+                f"{base_url}/api/chat",
+                timeout=timeout,
+                json={
+                    "model": model,
+                    "stream": False,
+                    "think": False,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    "options": {
+                        "temperature": float(config.get("llm.temperature", 0.7)),
+                        "num_predict": 220,
+                    },
+                },
+            )
+            resp.raise_for_status()
+            return (resp.json().get("message") or {}).get("content", "")
+        except Exception as exc:  # connection refused, timeout, 5xx, empty body
+            if attempt < retries:
+                log.warning("LLM attempt %d failed (%s); retrying", attempt + 1, exc)
+                time.sleep(1.0 * (attempt + 1))
+            else:
+                log.warning("LLM call failed (%s)", exc)
+    return ""
 
 
 def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = None,
@@ -423,53 +618,14 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
             f"{previous.get('artist') or 'unknown'}. You may briefly reference it."
         )
 
-    # How the text must be written so the voice reads it correctly. This is the
-    # difference between a catalogue entry and something a host can say: years
-    # and numbers as words, stylised names in their spoken form, and punctuation
-    # the engine actually pauses on. (Measured: the voice moves its pitch over
-    # ~19 semitones when the line is written for speech; it also cannot read
-    # "P!nk" or "1999" without mangling them.)
-    speech_line = (
-        "\nWrite it the way it will be SPOKEN, not as a catalogue listing:\n"
-        "- Write every year and every number as words, never as digits: "
-        "\"nineteen ninety-nine\", not \"1999\"; \"two songs\", not \"2 songs\"; "
-        "\"Blink one eighty-two\" for the band Blink-182.\n"
-        "- Write artist and song names in their spoken form. Normalise stylised "
-        "spellings and drop symbols that are not pronounced: P!nk is \"Pink\", "
-        "Ke$ha is \"Kesha\", Panic! at the Disco is \"Panic at the Disco\", "
-        "deadmau5 is \"dead mouse\". The names in the information block may be "
-        "stylised - say them plainly, but keep them recognisable and never "
-        "invent a different name.\n"
-        "- Keep the sentences short, and punctuate for breath: a comma is a "
-        "small pause, an em dash a longer one."
-    )
-
-    lang_line = ""
-    if is_russian:
-        # The Russian voice speaks Russian natively; the intro must be written
-        # in Russian so the DJ actually talks in Russian. Two pronunciation
-        # aids for the TTS engine, which otherwise guesses stress and silently
-        # swallows Ё:
-        #   * place an acute stress mark (´) on the stressed vowel of EVERY
-        #     word (e.g. приве́т, музыка́льный, золото́й) so it is pronounced right;
-        #   * always write Ё (ё) wherever the word actually contains it — never
-        #     substitute Е (е).
-        lang_line = (
-            "\nОБЯЗАТЕЛЬНО пиши свой ответ ПО-РУССКИ (на русском языке). "
-            "Названия песен и имена исполнителей — на русском, сохраняй их "
-            "смысл и форму, не переводи и не транслитерируй.\n"
-            "Чтобы голосовой движок правильно выговаривал слова, выполни три "
-            "обязательных правила:\n"
-            "1) Ставь знак ударения ´ СРАЗУ ПОСЛЕ ударной гласной каждого "
-            "слова, например: приве´т, музыка´льный, золото´й, Ага´та Кри´сти. "
-            "Используй ТОЛЬКО ´ — никакие другие знаки (ʼ, ʹ, `, ‘, ’) не "
-            "ставь: движок их либо не видит, либо читает вслух как название "
-            "знака.\n"
-            "2) Всегда пиши букву Ё (ё) там, где она действительно есть в "
-            "слове, никогда не заменяй её на Е (е).\n"
-            "3) Годы и числа оставляй цифрами (например: \"1984\") — русский "
-            "голос читает их правильно сам. Словами их писать НЕ нужно."
-        )
+    # The model is a small one (see llm.model) and reads the rule examples as
+    # song data when they sit next to the facts, so the rules ride in the SYSTEM
+    # message and the user message carries only this song. One rule set, never
+    # both: the English rules want years as words, the Russian ones want them as
+    # digits (that is what the Russian engine needs), and handing over both left
+    # the model to pick.
+    rules = RUSSIAN_RULES if is_russian else SPEECH_RULES
+    system_prompt = SYSTEM_PROMPT + rules
 
     user_prompt = (
         f"Persona: {style}.\n"
@@ -477,58 +633,30 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
         f"Mention one genuinely interesting fact ONLY if the information block "
         f"below directly supports it. Do NOT state any release date or year "
         f"that is not listed below."
-        f"{speech_line}{prev_line}{lang_line}\n\n"
+        f"{prev_line}\n\n"
         f"Information about the next song:\n"
         f"{_facts_block(track, facts)}\n"
+        f"Say only the names listed above.\n"
     )
 
-    base_url = str(config.get("llm.base_url", "")).rstrip("/")
-    model = config.get("llm.model", "qwen3.5:9b")
-    timeout = float(config.get("llm.timeout_s", 120))
+    def ask() -> str:
+        content = _ask_llm(system_prompt, user_prompt)
+        if not content:
+            return ""
+        return prepare_script(content, voice=voice,
+                              max_sentences=max_sentences,
+                              language=language)
 
-    # A transient Ollama blip (restart, first-load of a model) should not
-    # immediately drop the DJ line to the templated fallback. Retry a few times
-    # with a short backoff; the connection is re-attempted each time it is
-    # needed, so a briefly-down Ollama recovers on its own.
-    content = ""
-    last_exc: Exception | None = None
-    for attempt in range(int(config.get("llm.retries", 2)) + 1):
-        try:
-            resp = httpx.post(
-                f"{base_url}/api/chat",
-                timeout=timeout,
-                json={
-                    "model": model,
-                    "stream": False,
-                    "think": False,
-                    "messages": [
-                        {"role": "system", "content": SYSTEM_PROMPT},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    "options": {
-                        "temperature": float(config.get("llm.temperature", 0.7)),
-                        "num_predict": 220,
-                    },
-                },
-            )
-            resp.raise_for_status()
-            content = (resp.json().get("message") or {}).get("content", "")
-            break
-        except Exception as exc:  # connection refused, timeout, 5xx, empty body
-            last_exc = exc
-            if attempt < int(config.get("llm.retries", 2)):
-                log.warning("LLM attempt %d failed (%s); retrying", attempt + 1, exc)
-                time.sleep(1.0 * (attempt + 1))
-            continue
-    if content:
-        script = prepare_script(content, voice=voice,
-                                max_sentences=max_sentences,
-                                language=language)
-        if script:
-            return script
-        log.warning("LLM returned an empty script; using fallback")
-    else:
-        log.warning("LLM script generation failed (%s); using fallback", last_exc)
+    script = ask()
+    if script and not _usable_script(script, track):
+        # Ask again before giving up on the model: the guards fire on maybe one
+        # line in six, and the second pass is usually clean. A second bad line
+        # falls back to the template, which is plain but always correct.
+        script = ask()
+    if script and _usable_script(script, track):
+        return script
+    if not script:
+        log.warning("no usable DJ line from the LLM; using the template")
     return fallback_script(track, language=language)
 
 

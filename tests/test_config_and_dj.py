@@ -172,6 +172,46 @@ def test_facts_block_omits_unknown_line_when_complete():
     assert "UNKNOWN" not in block
 
 
+def test_facts_block_hides_placeholder_tags_and_declares_them_unknown():
+    """A placeholder tag is not metadata: never say it, never invent one either.
+
+    Measured in the live library: genre "None" on 150 tracks, "Default" on 95,
+    "Genre" on 47, "Unknown" on 22, albums like "Je Veux (2010) mp3" and
+    "Ripped by Buko's MP3 Lair" — the DJ read them all out as if they were real.
+    """
+    for genre in ("None", "Default", "Genre", "Unknown", "n/a", "-", "unknown"):
+        block = dj._facts_block({"title": "T", "artist": "A", "genre": genre}, {})
+        assert f"Genre: {genre}" not in block, genre
+        assert "genre" in block.split("UNKNOWN")[-1], genre
+    for album in ("Je Veux (2010) mp3", "Ripped by Buko's MP3 Lair",
+                  "www.mp3lair.ru", "DOWNLOAD", ""):
+        block = dj._facts_block({"title": "T", "artist": "A", "album": album}, {})
+        assert album == "" or album not in block, album
+
+
+def test_facts_block_keeps_real_tags_that_look_odd():
+    """Only placeholders are hidden — the filter must not eat real metadata."""
+    block = dj._facts_block(
+        {"title": "Mindfields", "artist": "The Prodigy", "album": "The Fat Of The Land",
+         "genre": "Electronic", "year": "1997"}, {})
+    assert "Album: The Fat Of The Land" in block
+    assert "Genre: Electronic" in block
+    assert "Year: 1997" in block
+    # Real album names that merely contain digits or punctuation survive.
+    for album in ("Dance Hits Vol 4", "Greatest Hits CD1", "1984", "Best Hits 200%"):
+        kept = dj._facts_block({"title": "T", "artist": "A", "album": album}, {})
+        assert f"Album: {album}" in kept, album
+
+
+def test_facts_block_caps_style_tags():
+    """Eight MusicBrainz tags got recited verbatim as a list."""
+    facts = {"tags": ["rock", "electronic", "pop", "alternative rock",
+                      "industrial", "drum and bass", "dubstep", "hardcore"]}
+    line = [l for l in dj._facts_block({"title": "T", "artist": "A"}, facts).splitlines()
+            if l.startswith("Style tags:")][0]
+    assert line == "Style tags: rock, electronic, pop"
+
+
 def test_facts_block_excludes_misleading_musicbrainz_release_fields():
     """release_title / first_release_date caused confident false claims."""
     block = dj._facts_block(

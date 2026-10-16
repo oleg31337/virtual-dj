@@ -148,6 +148,165 @@ def test_the_llm_answering_produces_a_prepared_script(monkeypatch):
     assert "nineteen ninety-nine" in script
 
 
+def _fake_llm(monkeypatch, replies="A short intro about a song."):
+    """Install a stubbed Ollama chat endpoint; return the list of requests sent.
+
+    ``replies`` is one string (always the same answer) or a list consumed in
+    order, the last one repeating — enough to drive the retry paths.
+    """
+    sent: list[dict] = []
+    answers = [replies] if isinstance(replies, str) else list(replies)
+
+    class FakeResponse:
+        def __init__(self, content: str) -> None:
+            self._content = content
+
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict:
+            return {"message": {"content": self._content}}
+
+    def fake_post(url, **kw):
+        sent.append(kw.get("json", {}))
+        return FakeResponse(answers[min(len(sent) - 1, len(answers) - 1)])
+
+    monkeypatch.setattr(dj.httpx, "post", fake_post)
+    monkeypatch.setattr(config, "_CACHE", {
+        "llm": {"enabled": True, "base_url": "http://x", "model": "m",
+                "retries": 0}})
+    return sent
+
+
+def _capture_llm_messages(monkeypatch, track, **kwargs):
+    """Run generate_script against a stubbed LLM and return (script, system, user).
+
+    Lets a test assert on the exact prompt without a live model.
+    """
+    sent = _fake_llm(monkeypatch)
+    script = dj.generate_script(track, **kwargs)
+    assert sent, "the LLM must actually be called"
+    by_role = {m["role"]: m["content"] for m in sent[0].get("messages", [])}
+    return script, by_role.get("system", ""), by_role.get("user", "")
+
+
+def test_a_line_naming_a_prompt_example_is_thrown_away(monkeypatch, caplog):
+    """The model copies the rule examples into the line (the reported bug).
+
+    Measured on nemotron-3-nano:4b for "Mindfields" by Prodigy: "Mindfields by
+    Pink, the Prodigy", "Mindfields by Pink and Keesha" — the track carries no
+    such name. The prompt cannot stop it, so the output is guarded.
+    """
+    track = {"id": 1, "title": "Mindfields", "artist": "Prodigy", "album": "The Fat Of The Land"}
+    sent = _fake_llm(monkeypatch, [
+        "Mindfields by Pink and Keesha, from The Fat Of The Land",
+        "Mindfields is a track from The Fat Of The Land",
+    ])
+    with caplog.at_level("INFO"):
+        script = dj.generate_script(track)
+    assert "Pink" not in script and "Keesha" not in script
+    assert "The Fat Of The Land" in script
+    assert len(sent) == 2, "the contaminated line must be asked for again"
+    assert "prompt example" in caplog.text
+
+
+def test_a_line_naming_the_tracks_own_artist_is_fine(monkeypatch):
+    """The guard must not reject a line for naming the artist it introduces."""
+    sent = _fake_llm(monkeypatch, "Right now: Pink Floyd with Time")
+    script = dj.generate_script(
+        {"id": 1, "title": "Time", "artist": "Pink Floyd"})
+    assert "Pink Floyd" in script
+    assert len(sent) == 1, "a good line must not be asked for twice"
+
+
+def test_imagery_is_not_mistaken_for_the_example_artist():
+    """The guard is case-sensitive on purpose: only the NAME is a leak."""
+    prodigy = {"id": 1, "title": "Mindfields", "artist": "Prodigy"}
+    assert dj._usable_script("A pink neon glow over the city", prodigy)
+    assert not dj._usable_script("Pink and the Prodigy, live", prodigy)
+    assert not dj._usable_script("Keesha is back", prodigy)
+    assert not dj._usable_script("dead mouse on the decks", prodigy)
+    # A name the track itself carries is not a leak.
+    floyd = {"id": 2, "title": "Time", "artist": "Pink Floyd"}
+    assert dj._usable_script("Pink Floyd, live in nineteen seventy-two", floyd)
+
+
+def test_a_looping_line_is_rejected(monkeypatch, caplog):
+    """Measured: a Russian line came back as "да-да-да-…" eighty times over."""
+    sent = _fake_llm(monkeypatch, ["да-" * 40, "Сейчас играет Земфира."])
+    with caplog.at_level("INFO"):
+        script = dj.generate_script({"id": 1, "title": "T", "artist": "Zemfira"},
+                                    voice="ru_RU-irina-medium")
+    assert "Земфира" in script and "да-да" not in script
+    assert len(sent) == 2
+    assert "looping" in caplog.text
+
+
+def test_two_bad_lines_fall_back_to_the_template(monkeypatch):
+    sent = _fake_llm(monkeypatch, "Mindfields by Pink and Keesha")
+    script = dj.generate_script(
+        {"id": 1, "title": "Mindfields", "artist": "Prodigy", "year": "1997"})
+    assert script == dj.fallback_script(
+        {"id": 1, "title": "Mindfields", "artist": "Prodigy", "year": "1997"})
+    assert len(sent) == 2, "one retry, not an endless loop"
+
+
+def test_rule_examples_do_not_sit_next_to_the_song_facts(monkeypatch):
+    """The pronunciation examples are illustrations, so they travel in the system message.
+
+    In the user prompt they were read as song data: for "Mindfields" by Prodigy,
+    a track with no such field, nemotron-3-nano:4b opened with "Mindfields by
+    Pink, the Prodigy" (straight out of the "P!nk is Pink" example), then
+    "Mindfields by Pink and the Prodigy", and recited the rules' own
+    "two songs ... not 2 songs" phrasing as content.
+    """
+    script, system, user = _capture_llm_messages(
+        monkeypatch, {"id": 1, "title": "Mindfields", "artist": "Prodigy"})
+    assert script == "A short intro about a song."
+    for example in ("P!nk", "Ke$ha", "deadmau5", "Blink-182", "Агата", "Ага\u00b4та"):
+        assert example not in user, f"{example!r} is an illustration, not song data"
+    assert "P!nk" in system, "the rule example belongs in the system message"
+    assert "ILLUSTRATE" in system and "never be said" in system
+    assert "Say only the names listed above." in user
+
+
+def test_one_rule_set_per_language_not_two(monkeypatch):
+    """Russian needs years as digits; the English rules demand words for them.
+
+    Both used to be handed over at once, leaving a small model to pick.
+    """
+    _, system, user = _capture_llm_messages(
+        monkeypatch, {"id": 1, "title": "МЫ РАЗБИВАЕМСЯ", "artist": "Zemfira"},
+        voice="ru_RU-irina-medium")
+    assert "ПО-РУССКИ" in system
+    for english_only in ("nineteen ninety-nine", "P!nk", "deadmau5"):
+        assert english_only not in system, english_only
+        assert english_only not in user, english_only
+
+
+def test_russian_rules_still_demand_a_spoken_sentence(monkeypatch):
+    """Splitting the rule sets by language cost Russian its anti-list rule.
+
+    The English block used to ride along with the Russian one and opened with
+    "write it the way it will be SPOKEN, not as a catalogue listing". Measured
+    after the split: half the Russian lines came back as bare catalogue lists —
+    "Fly Away, Lenny Kravitz, rock", "Наш дом, Mashina Vremeni, 1993, Rock".
+    """
+    _, system, _ = _capture_llm_messages(
+        monkeypatch, {"id": 1, "title": "T", "artist": "A"},
+        voice="ru_RU-irina-medium")
+    assert "как список из каталога" in system
+    assert "короткими фразами" in system
+    assert "Не называй жанр" in system
+
+
+def test_the_rules_forbid_announcing_the_genre(monkeypatch):
+    """Even three style tags got recited: "...make rock electronic pop"."""
+    _, system, _ = _capture_llm_messages(
+        monkeypatch, {"id": 1, "title": "T", "artist": "A"})
+    assert "Never announce the genre" in system
+
+
 def test_the_prompt_never_mentions_the_program(monkeypatch):
     """The DJ is not told about the themed program the track belongs to.
 
@@ -156,33 +315,14 @@ def test_the_prompt_never_mentions_the_program(monkeypatch):
     DJ duly said things like "we are switching to a new program". The program
     stays a playlist device — it decides what plays — and is never spoken.
     """
-    prompts: list[str] = []
-
-    class FakeResponse:
-        def raise_for_status(self) -> None:
-            pass
-
-        def json(self) -> dict:
-            return {"message": {"content": "A short intro about a song."}}
-
-    def fake_post(url, **kw):
-        prompts.append(json.dumps(kw.get("json", {})))
-        return FakeResponse()
-
-    monkeypatch.setattr(dj.httpx, "post", fake_post)
-    monkeypatch.setattr(config, "_CACHE", {
-        "llm": {"enabled": True, "base_url": "http://x", "model": "m",
-                "retries": 0}})
-
-    script = dj.generate_script(
+    script, system, user = _capture_llm_messages(
+        monkeypatch,
         {"id": 1, "title": "Time", "artist": "Pink Floyd", "genre": "Electronic"},
         previous={"title": "Yesterday", "artist": "The Beatles"})
     assert script == "A short intro about a song."
-    assert prompts, "the LLM must actually be called"
-    prompt = prompts[0]
     for word in ("Trip-Hop", "program", "vibe", "spotlight", "run of", "set"):
-        assert word.lower() not in prompt.lower(), (
-            f"{word!r} leaked into the DJ prompt: {prompt}")
+        assert word.lower() not in (system + user).lower(), (
+            f"{word!r} leaked into the DJ prompt")
 
 
 def test_a_missing_voice_is_named_and_stops_the_llm_call(monkeypatch, tmp_path, caplog):
