@@ -64,9 +64,10 @@ def test_programs_group_by_genre(tiny_library, monkeypatch):
     # 2 programs x 3 tracks = 6 items.
     assert len(items) == 6
     # The first track of the SECOND program always carries a DJ-requested flag
-    # (the vibe-switch announce). Programs are shuffled, so find the boundary
-    # dynamically rather than assuming a fixed index. Periodic cadence talks
-    # may also land mid-program; we assert the boundary announce specifically.
+    # (the boundary break, which marks the transition without naming the theme).
+    # Programs are shuffled, so find the boundary dynamically rather than
+    # assuming a fixed index. Periodic cadence talks may also land mid-program;
+    # we assert the boundary break specifically.
     genres = [it["track"]["genre"] for it in items]
     switch_index = next(i for i in range(1, len(genres)) if genres[i] != genres[i - 1])
     assert items[switch_index]["dj_requested"] is True
@@ -442,13 +443,17 @@ def test_artist_programs_are_capped_by_the_rule(tiny_library, monkeypatch):
         assert len(songs) <= 2
 
 
-def test_a_refill_announces_its_theme_switch(tiny_library, monkeypatch):
-    """Every theme switch must be announced, including one a REFILL introduces.
+def test_a_refill_marks_its_theme_switch_with_a_break(tiny_library, monkeypatch):
+    """Every theme switch gets a break, including one a REFILL introduces.
 
-    Regression: the program builder only forced the program-start talk while the
+    The break marks the boundary; it does NOT announce the theme — the program is
+    never spoken (see dj.generate_script and
+    test_the_prompt_never_mentions_the_program).
+
+    Regression: the program builder only forced the boundary break while the
     list it was building was non-empty, so the first program of every refill
-    could change the theme silently — the playlist matrix measured 4-7
-    unannounced switches per 120 songs.
+    could change the theme with no break at all — the playlist matrix measured
+    4-7 such switches per 120 songs.
     """
     _set_program(monkeypatch, size=2, strategy="genre")
     sched = scheduler.Scheduler()
@@ -465,10 +470,10 @@ def test_a_refill_announces_its_theme_switch(tiny_library, monkeypatch):
     labels = [((prog or {}).get("kind"), (prog or {}).get("label")) for _, prog, _ in played]
     switches = [i for i in range(1, len(labels)) if labels[i] != labels[i - 1]]
     assert switches, "the fixture should switch themes at least once"
-    unannounced = [i for i in switches if not played[i][2]]
-    assert not unannounced, (
-        f"theme switches without a DJ announcement: "
-        f"{[(i, labels[i]) for i in unannounced]}")
+    unmarked = [i for i in switches if not played[i][2]]
+    assert not unmarked, (
+        f"theme switches with no DJ break at the boundary: "
+        f"{[(i, labels[i]) for i in unmarked]}")
     # The very first program of all has nothing to switch away from.
     assert played[0][2] is False
 
