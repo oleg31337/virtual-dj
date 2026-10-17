@@ -179,7 +179,8 @@ def test_facts_block_hides_placeholder_tags_and_declares_them_unknown():
     "Genre" on 47, "Unknown" on 22, albums like "Je Veux (2010) mp3" and
     "Ripped by Buko's MP3 Lair" — the DJ read them all out as if they were real.
     """
-    for genre in ("None", "Default", "Genre", "Unknown", "n/a", "-", "unknown"):
+    for genre in ("None", "Default", "Genre", "Unknown", "n/a", "-", "unknown",
+                  "Other", "misc"):
         block = dj._facts_block({"title": "T", "artist": "A", "genre": genre}, {})
         assert f"Genre: {genre}" not in block, genre
         assert "genre" in block.split("UNKNOWN")[-1], genre

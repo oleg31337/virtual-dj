@@ -433,6 +433,9 @@ _JUNK_META = {
     "genre", "album", "track", "audio", "music", "mp3", "flac", "cd", "cd1",
     "cd2", "disc 1", "disc 2", "disc1", "disc2", "various", "various artists",
     "va", "no album", "no genre", "not set", "-",
+    # "Other"/"Misc" are buckets, not genres: the Russian voice said «этот трек
+    # из жанра Other», which is noise on air. 371 + 74 tracks in the live library.
+    "other", "misc",
 }
 _JUNK_META_RE = re.compile(
     # A format/rip marker as a word of its own ...
