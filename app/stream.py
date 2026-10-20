@@ -267,6 +267,12 @@ class Broadcaster:
         # the UI. Without it the loop spins at ~1000 pops/s.
         self._consecutive_failures = 0
         self._playback_error: str | None = None
+        # True while the library looks unmounted (see _note_unplayable). Only
+        # here so the "not there to be judged" error is logged once per outage.
+        self._library_gone = False
+        # When the missing-flag heal last ran, so the empty-queue path cannot
+        # run it on every five seconds of idle tone.
+        self._healed_at = 0.0
 
     # --- listener registry ------------------------------------------------
 
@@ -540,7 +546,7 @@ class Broadcaster:
         except Exception:
             log.debug("could not store the measured duration", exc_info=True)
 
-    def _note_unplayable(self, kind: str, meta: dict[str, Any]) -> None:
+    def _note_unplayable(self, kind: str, meta: dict[str, Any], path: str) -> None:
         """Take a track whose file is gone out of the playable pool.
 
         A missing file makes ``_play_file`` return instantly, so without this the
@@ -549,9 +555,27 @@ class Broadcaster:
         so the LLM gets hammered while the station plays nothing. Flagging the
         row (``missing = 1``) removes it from ``query_tracks`` so each dead file
         costs exactly one attempt; a rescan then deletes the row properly.
+
+        A stale share (NFS mount gone, disk unmounted) makes *every* file look
+        missing, and the flag is permanent until a rescan — so one unmounted
+        night drains the playable pool a few tracks at a time, and the station
+        slowly goes silent even after the share is back (142 rows were lost that
+        way). The file's own folder is the discriminator: present means this
+        file really is gone, absent means the library is not there to be judged.
         """
         if kind != "track":
             return  # a missing DJ clip is a cache artifact, not a library row
+        try:
+            share_present = Path(path).parent.is_dir()
+        except OSError:
+            share_present = False
+        if not share_present:
+            if not self._library_gone:
+                self._library_gone = True
+                log.error("music library looks unmounted (%s is not there) — not "
+                          "marking tracks missing while it is away",
+                          Path(path).parent)
+            return
         track_id = (meta.get("track") or {}).get("id")
         if not track_id:
             return
@@ -579,17 +603,57 @@ class Broadcaster:
         return min(2.0 ** (self._consecutive_failures - FAILURE_BREAKER), 30.0)
 
     def _register_success(self) -> None:
-        if self._consecutive_failures or self._playback_error:
+        recovered = bool(self._consecutive_failures or self._playback_error)
+        if recovered:
             log.info("playback recovered after %d failed file(s)",
                      self._consecutive_failures)
         self._consecutive_failures = 0
         self._playback_error = None
+        self._library_gone = False
+        if recovered:
+            self._heal_missing_flags()
+
+    def _heal_missing_flags(self) -> None:
+        """Put tracks that are back on disk into the playable pool again.
+
+        ``missing = 1`` excludes a row until a rescan, so an outage that flagged
+        rows would outlive the outage: the share comes back, the catalogue still
+        refuses those tracks. Every flagged row whose file exists again rejoins
+        the pool. Off-thread: the broadcast loop must never wait on the share it
+        just recovered from.
+        """
+        def work() -> None:
+            try:
+                rows = db.missing_rows()
+                back = [track_id for track_id, path in rows if Path(path).exists()]
+                if back:
+                    db.clear_missing(back)
+                    log.info("library is back: %d of %d flagged track(s) returned "
+                             "to the playable pool", len(back), len(rows))
+            except Exception:  # a heal must never kill its thread's purpose
+                log.debug("could not heal missing-track flags", exc_info=True)
+
+        self._healed_at = time.monotonic()
+        threading.Thread(target=work, name="vdj-heal-missing", daemon=True).start()
+
+    def _heal_missing_flags_if_flagged(self) -> None:
+        """Retry the heal from the empty-queue path, at most once a minute.
+
+        The recovery heal fires on the first file that plays — which a fully
+        drained pool can never produce (no playable track → idle tone → no
+        success → no heal). So the idle path retries it, and a pool emptied by
+        an old outage refills itself as soon as the library is there again
+        instead of waiting for a manual rescan.
+        """
+        if time.monotonic() - self._healed_at < 60.0:
+            return
+        self._heal_missing_flags()
 
     def _play_file(self, path: str, kind: str, meta: dict[str, Any]) -> bool:
         """Stream one file to all listeners, paced in real time."""
         if not Path(path).exists():
             log.warning("missing media file: %s", path)
-            self._note_unplayable(kind, meta)
+            self._note_unplayable(kind, meta, path)
             return False
 
         self._skip.clear()
@@ -778,6 +842,9 @@ class Broadcaster:
                     continue
                 nxt = SCHEDULER.pop_next()
                 if nxt is None:
+                    # Nothing playable: an outage may have drained the pool, so
+                    # retry the heal before standing idle.
+                    self._heal_missing_flags_if_flagged()
                     self._idle_tone()
                     continue
                 track, dj_break, program = nxt
@@ -838,6 +905,9 @@ class Broadcaster:
         self._thread = threading.Thread(target=self._run, name="vdj-broadcast",
                                         daemon=True)
         self._thread.start()
+        # Flags left behind by an outage that ended while the app was down would
+        # otherwise keep those tracks out until somebody rescans by hand.
+        self._heal_missing_flags_if_flagged()
 
     def stop(self) -> None:
         self._stop.set()

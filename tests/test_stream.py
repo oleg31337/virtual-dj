@@ -249,12 +249,69 @@ def test_missing_track_is_flagged_and_leaves_the_pool(music_dir, has_ffmpeg):
     library.scan_library(str(music_dir))
     track = library.query_tracks(limit=1)[0]
     b = Broadcaster()
-    assert b._play_file("/gone/" + track["path"].split("/")[-1], "track",
-                        {"track": track}) is False
+    # The folder is there, this one file is not: the track really is gone.
+    gone = str(music_dir / "deleted-since-the-last-scan.mp3")
+    assert b._play_file(gone, "track", {"track": track}) is False
     # The row is flagged, so query_tracks (which filters missing = 0) never
     # hands it out again — one attempt per dead file, not thousands.
     assert db.unplayable_count() >= 1
     assert track["id"] not in {t["id"] for t in library.query_tracks(limit=50)}
+
+
+def test_an_unmounted_library_never_flags_tracks_missing(music_dir, has_ffmpeg):
+    """A share that is away must not drain the pool it flagged on the way out.
+
+    Live: one unmounted night flagged 142 rows. ``missing = 1`` excludes a row
+    until a rescan, so a few such nights take the playable pool to zero and the
+    station goes silent even once the share is back — playback "stops on its
+    own" days later. The file's own folder tells the two apart: /gone is not
+    there at all, so nothing there can be judged missing.
+    """
+    from app import db, library
+    library.scan_library(str(music_dir))
+    track = library.query_tracks(limit=1)[0]
+    before = db.unplayable_count()
+    b = Broadcaster()
+    assert b._play_file("/gone/" + track["path"].split("/")[-1], "track",
+                        {"track": track}) is False
+    assert db.unplayable_count() == before
+    assert track["id"] in {t["id"] for t in library.query_tracks(limit=200)}
+
+
+def test_a_library_that_comes_back_returns_its_flagged_tracks(music_dir, has_ffmpeg):
+    """The first file that plays after a stall heals what the stall flagged."""
+    from app import db, library
+    library.scan_library(str(music_dir))
+    track = library.query_tracks(limit=1)[0]
+    db.mark_missing(track["id"])
+    assert db.unplayable_count() >= 1
+    b = Broadcaster()
+    b._consecutive_failures = 5          # the run of failures this recovery ends
+    b._register_success()
+    flagged = lambda: {track_id for track_id, _ in db.missing_rows()}
+    deadline = time.monotonic() + 15     # the heal runs off-thread
+    while track["id"] in flagged() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert track["id"] not in flagged()
+    assert track["id"] in {t["id"] for t in library.query_tracks(limit=200)}
+
+
+def test_the_empty_queue_heal_runs_at_most_once_a_minute(monkeypatch):
+    """A drained pool must heal, but the 5 s idle loop must not hammer the DB."""
+    b = Broadcaster()
+    calls: list[int] = []
+
+    def fake_heal() -> None:
+        calls.append(1)
+        b._healed_at = time.monotonic()   # the real heal stamps the clock
+
+    monkeypatch.setattr(b, "_heal_missing_flags", fake_heal)
+    b._heal_missing_flags_if_flagged()
+    b._heal_missing_flags_if_flagged()
+    assert calls == [1]                 # throttled
+    b._healed_at -= 61
+    b._heal_missing_flags_if_flagged()
+    assert calls == [1, 1]
 
 
 def test_dj_clip_failure_does_not_touch_the_library(music_dir, has_ffmpeg):

@@ -519,12 +519,17 @@ def api_skip():
 @app.post("/api/transport/pause")
 def api_pause():
     BROADCASTER.pause()
+    # A manual pause is the user's, never ours to undo (see note_manual_transport).
+    if listeners.WATCHER is not None:
+        listeners.WATCHER.note_manual_transport()
     return {"ok": True, "paused": True}
 
 
 @app.post("/api/transport/resume")
 def api_resume():
     BROADCASTER.resume()
+    if listeners.WATCHER is not None:
+        listeners.WATCHER.note_manual_transport()
     return {"ok": True, "paused": False}
 
 

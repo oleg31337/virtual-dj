@@ -51,6 +51,30 @@ def _as_int(value: Any, fallback: int) -> int:
         return fallback
 
 
+def _pick_mount(source: Any, mount: str) -> dict[str, Any] | None:
+    """Our stream out of Icecast's ``icestats.source``, or None if it is absent.
+
+    Icecast 2.4.4 ignores the ``?mount=`` parameter, so a server with a second
+    stream (a relay, a fallback, an old mount still draining) answers with a
+    list — and reading the first entry, as this used to, means reading somebody
+    else's listener count. That count is what pauses the station, so the station
+    would go silent with a listener connected. ``listenurl`` is the only field
+    that says which mount an entry is, so the match is made there.
+    """
+    entries = source if isinstance(source, list) else [source]
+    candidates = [entry for entry in entries if isinstance(entry, dict)]
+    if not candidates:
+        return None
+    if len(candidates) == 1 and not candidates[0].get("listenurl"):
+        return candidates[0]  # one stream, no url to match: it is ours
+    wanted = mount.rstrip("/")
+    for entry in candidates:
+        url = str(entry.get("listenurl") or "").split("?")[0].rstrip("/")
+        if url.endswith(wanted):
+            return entry
+    return None
+
+
 def icecast_status() -> dict[str, Any]:
     """Live Icecast mount info for the web UI and for presence.
 
@@ -71,9 +95,16 @@ def icecast_status() -> dict[str, Any]:
             return {"enabled": True, "connected": False, "known": False,
                     "mount": mount, "listeners": 0,
                     "error": f"icecast returned {r.status_code}"}
-        src = r.json().get("icestats", {}).get("source", {})
-        if isinstance(src, list):
-            src = src[0] if src else {}
+        src = _pick_mount(r.json().get("icestats", {}).get("source"), mount)
+        if src is None:
+            # Our mount is not among Icecast's sources. That is NOT "zero
+            # listeners": the mount may be between sources, or Icecast may be
+            # listing a different stream. Pausing on it would take the station
+            # off air — and, with no source on the mount, nobody could ever
+            # connect to trigger the resume. Unknown presence keeps it playing.
+            return {"enabled": True, "connected": True, "known": False,
+                    "mount": mount, "listeners": 0,
+                    "error": f"mount {mount} is not on air"}
         return {
             "enabled": True,
             "connected": True,
@@ -153,6 +184,13 @@ class ListenerWatcher:
         Keeps the grace timer, which is the only mutable part: presence going to
         zero starts it, any listener (or an unknown Icecast) clears it.
         """
+        # Our own pause can be undone by something else (the UI's Play button).
+        # A flag that outlives that pause is worse than useless: while it is set
+        # the rule below answers "hold" for an empty house, so pause-without-
+        # listeners silently stops working until the process restarts.
+        live = getattr(self._broadcaster, "paused", None)
+        if self._auto_paused and (live() if callable(live) else live) is False:
+            self._auto_paused = False
         if not enabled:
             self._empty_since = None
             return "resume" if self._auto_paused else "hold"
@@ -217,6 +255,22 @@ class ListenerWatcher:
     def notify(self) -> None:
         """Check immediately (called when an HTTP listener connects/leaves)."""
         self._wake.set()
+
+    def note_manual_transport(self) -> None:
+        """The user pressed Play or Pause in the UI.
+
+        Either way our own pause is no longer the reason the station is stopped,
+        so the flag has to go. Otherwise both directions break: a Pause taken
+        while we had auto-paused is undone the moment a listener connects (the
+        watcher believes the pause is still its own to end), and a Play leaves
+        the flag set, which stops the next empty house from ever pausing.
+
+        The grace timer restarts with it: if the user turns the music on over an
+        empty house, ``grace`` is measured from their press, not from the moment
+        the last listener left (which would pause it again on the next tick).
+        """
+        self._auto_paused = False
+        self._empty_since = None
 
     # --- introspection ----------------------------------------------------
 

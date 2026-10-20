@@ -247,6 +247,24 @@ def unplayable_count() -> int:
     return int(row["n"] or 0)
 
 
+def missing_rows() -> list[tuple[int, str]]:
+    """``(id, path)`` of every flagged row, for the post-outage heal."""
+    conn = connect()
+    return [(int(row["id"]), str(row["path"])) for row in conn.execute(
+        "SELECT id, path FROM tracks WHERE missing = 1 ORDER BY id")]
+
+
+def clear_missing(track_ids: list[int]) -> int:
+    """Return flagged tracks to the playable pool (their files are back)."""
+    if not track_ids:
+        return 0
+    conn = connect()
+    conn.executemany("UPDATE tracks SET missing = 0 WHERE id = ?",
+                     [(int(track_id),) for track_id in track_ids])
+    conn.commit()
+    return len(track_ids)
+
+
 # --- history ---------------------------------------------------------------
 
 def set_duration(track_id: int, seconds: float) -> None:

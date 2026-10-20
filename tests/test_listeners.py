@@ -153,6 +153,54 @@ def test_a_manual_pause_is_never_undone_by_the_watcher():
     assert b.calls == ["pause"]
 
 
+def test_a_pause_taken_while_auto_paused_stays_the_users():
+    """A listener arriving must not switch the station back on over the user.
+
+    We had stopped the station because nobody was listening; the user then
+    pressed Pause. Our flag said the stop was still ours, so the next listener
+    connection used to undo a deliberate pause.
+    """
+    b = FakeBroadcaster()
+    w = listeners.ListenerWatcher(b)
+    tick(w, presence(), 0.0)
+    assert tick(w, presence(), 31.0) == "pause"
+    w.note_manual_transport()                          # the UI's Pause button
+    assert tick(w, presence(web=1), 32.0) == "hold"
+    assert b.calls == ["pause"]
+
+
+def test_a_manual_play_does_not_disable_the_rule():
+    """After the user presses Play, the next empty house must still pause.
+
+    The reverse of the test above, and the same root cause: the stale flag made
+    the watcher answer "hold" forever, so pause-without-listeners was silently
+    off until the process restarted.
+    """
+    b = FakeBroadcaster()
+    w = listeners.ListenerWatcher(b)
+    tick(w, presence(), 0.0)
+    assert tick(w, presence(), 31.0) == "pause"
+    w.note_manual_transport()                          # the UI's Play button
+    assert tick(w, presence(), 40.0) == "hold"         # a new grace starts
+    assert tick(w, presence(), 71.0) == "pause"        # and it expires
+    assert b.calls == ["pause", "pause"]
+
+
+def test_a_leftover_auto_pause_flag_is_dropped_on_its_own():
+    """Self-heal: believe the broadcaster, not our memory of a pause."""
+
+    class RunningBroadcaster(FakeBroadcaster):
+        paused = False          # the station is audible, whatever we remember
+
+    b = RunningBroadcaster()
+    w = listeners.ListenerWatcher(b)
+    w._auto_paused = True
+    assert tick(w, presence(), 0.0) == "hold"      # nothing to resume
+    assert w.status()["auto_paused"] is False
+    assert tick(w, presence(), 31.0) == "pause"    # the rule works again
+    assert b.calls == ["pause"]
+
+
 # --- presence sources ---------------------------------------------------------
 
 class _Response:
@@ -179,11 +227,47 @@ def test_icecast_status_is_parsed(monkeypatch):
     assert st["mount"] == "/virtualdj" and st["server_name"] == "Virtual DJ"
 
 
-def test_icecast_source_list_uses_the_first_mount(monkeypatch):
+def test_icecast_source_list_picks_our_mount(monkeypatch):
+    """Icecast ignores ?mount=: with two streams, only ours may be counted.
+
+    Reading the first entry meant reading somebody else's listener count — and
+    that count is what pauses the station, so it would have gone silent with a
+    listener connected.
+    """
+    _icecast_on()
+    monkeypatch.setattr("httpx.get", lambda *a, **k: _Response(200, {"icestats": {"source": [
+        {"listeners": 9, "listenurl": "http://ice:8008/relay"},
+        {"listeners": 2, "listenurl": "http://ice:8008/virtualdj"},
+    ]}}))
+    st = listeners.icecast_status()
+    assert st["known"] is True and st["listeners"] == 2
+
+
+def test_an_icecast_without_our_mount_is_unknown_not_empty(monkeypatch):
+    """No source on our mount is not "nobody is listening".
+
+    The mount can be between sources, and with no mount nobody could connect to
+    trigger a resume — so the station must keep playing rather than pause itself
+    into a corner.
+    """
+    _icecast_on()
+    monkeypatch.setattr("httpx.get", lambda *a, **k: _Response(200, {"icestats": {"source": [
+        {"listeners": 4, "listenurl": "http://ice:8008/relay"},
+    ]}}))
+    st = listeners.icecast_status()
+    assert st["known"] is False and st["listeners"] == 0
+    assert "/virtualdj" in st["error"]
+    monkeypatch.setattr("httpx.get", lambda *a, **k: _Response(
+        200, {"icestats": {"icestats_source_missing": 1}}))
+    assert listeners.icecast_status()["known"] is False
+
+
+def test_a_single_source_without_a_listenurl_is_ours(monkeypatch):
+    """Icecast can answer without listenurl; one stream can only be ours."""
     _icecast_on()
     monkeypatch.setattr("httpx.get", lambda *a, **k: _Response(
-        200, {"icestats": {"source": [{"listeners": 2}, {"listeners": 9}]}}))
-    assert listeners.icecast_status()["listeners"] == 2
+        200, {"icestats": {"source": [{"listeners": 5}]}}))
+    assert listeners.icecast_status()["listeners"] == 5
 
 
 def test_an_unreachable_icecast_is_unknown_not_zero(monkeypatch):
