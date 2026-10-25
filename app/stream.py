@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import re
 import shutil
 import subprocess
 import tempfile
@@ -64,6 +65,30 @@ KEEPALIVE_GAP_S = 1.0
 # How often the keep-alive looks. A clock read per tick, and short enough that
 # silence resumes within a fraction of a second of any stall.
 KEEPALIVE_TICK_S = 0.25
+# silencedetect ignores silences shorter than its `d`, and must not be asked for
+# 0: with d=0 it reports every single frame (measured: 600 KB of log for a 21 s
+# file). This floor is well under any skip threshold, so the playhead below
+# decides when a silence is long enough — which keeps the decision independent
+# of how far the encoder has decoded ahead of the air.
+SILENCE_PROBE_MIN_S = 2.0
+# How often the silence monitor looks at the encoder's stderr.
+SILENCE_POLL_S = 0.2
+_SILENCE_START_RE = re.compile(r"silence_start:\s*(-?[\d.]+)")
+_SILENCE_END_RE = re.compile(r"silence_end:\s*(-?[\d.]+)")
+# ffmpeg's INFO banner and silencedetect's own lines: noise in a post-mortem
+# (see _stderr_text). Matched against the raw line, indentation included.
+_FFMPEG_NOISE_RE = re.compile(
+    r"^(?:Input #|Output #|Stream mapping|  Stream |    Metadata|      encoder"
+    r"|  Duration|  Metadata|Press \[q\]|size=|video:|  configuration"
+    r"|\[silencedetect @)")
+
+
+def _as_number(value: Any, fallback: float) -> float:
+    """A config number that never raises: empty/junk -> ``fallback``."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
 
 
 class FrameAligner:
@@ -154,12 +179,19 @@ def _stderr_sink() -> Any:
 
 
 def _stderr_text(sink: Any, limit: int = 300) -> str:
-    """The head of what a child wrote to `_stderr_sink`, then close it."""
+    """What a child wrote to `_stderr_sink` worth reading, then close it.
+
+    Filtered: when the encoder runs at INFO (it must, for silencedetect to be
+    heard at all) the head of its stderr is the banner — input/output/stream
+    mapping, encoder names, the closing size line — which would otherwise push
+    the actual error out of the ``limit`` and turn every ffmpeg complaint into
+    "Input #0, mp3, from ...".
+    """
     if sink is None:
         return ""
     try:
         sink.seek(0)
-        return sink.read(64 * 1024).decode("utf-8", "replace")[:limit].strip()
+        text = sink.read(64 * 1024).decode("utf-8", "replace")
     except (AttributeError, OSError, ValueError):
         return ""
     finally:
@@ -167,6 +199,9 @@ def _stderr_text(sink: Any, limit: int = 300) -> str:
             sink.close()
         except (AttributeError, OSError):
             pass
+    lines = [line for line in text.splitlines()
+             if line.strip() and not _FFMPEG_NOISE_RE.match(line)]
+    return "\n".join(lines)[:limit].strip()
 
 
 class Listener:
@@ -273,6 +308,10 @@ class Broadcaster:
         # When the missing-flag heal last ran, so the empty-queue path cannot
         # run it on every five seconds of idle tone.
         self._healed_at = 0.0
+        # Where the current track's silence began, in file time (None = the
+        # track is audible). Written by the per-file silence monitor and read by
+        # the broadcast loop, which owns the skip decision (see _silence_due).
+        self._silence_start: float | None = None
 
     # --- listener registry ------------------------------------------------
 
@@ -391,13 +430,37 @@ class Broadcaster:
         return (f"loudnorm=I={cfg['target_lufs']}:"
                 f"TP={cfg['true_peak_ceiling']}:LRA=11")
 
+    def _silence_settings(self) -> tuple[float, int]:
+        """(skip seconds, silence threshold dBFS) — 0 seconds means off."""
+        limit = _as_number(config.get("playback.silence_skip_s", 10), 10.0)
+        threshold = _as_number(config.get("playback.silence_db", -50), -50.0)
+        return max(0.0, limit), int(max(-100.0, min(-1.0, threshold)))
+
+    def _silence_filter(self) -> str | None:
+        """The ffmpeg analysis filter, or None when dead-air skipping is off."""
+        limit, threshold = self._silence_settings()
+        if limit <= 0:
+            return None
+        probe = min(SILENCE_PROBE_MIN_S, limit)
+        return f"silencedetect=noise={threshold}dB:d={probe:g}"
+
     def _encode_args(self, path: str, gain_db: float | None = None) -> list[str]:
         bitrate = int(config.get("stream.bitrate_kbps", 128))
         rate = int(config.get("stream.sample_rate", 44100))
         channels = int(config.get("stream.channels", 2))
         filters = [self._gain_filter(gain_db)]
+        silence = self._silence_filter()
+        if silence:
+            # Measure the SOURCE, ahead of the gain/loudnorm stage, so a track
+            # mastered quietly cannot look silent to us. silencedetect passes
+            # the audio through untouched.
+            filters.insert(0, silence)
+        # silencedetect reports at INFO; with -loglevel error it would say
+        # nothing at all. -nostats keeps the progress line (and the file it
+        # writes to) out of it.
+        level = "info" if silence else "error"
         return [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+            "ffmpeg", "-hide_banner", "-loglevel", level, "-nostats", "-nostdin",
             "-i", path,
             "-vn", "-map", "0:a:0",
             "-af", ",".join(filters),
@@ -649,6 +712,46 @@ class Broadcaster:
             return
         self._heal_missing_flags()
 
+    def _watch_silence(self, sink: Any, done: threading.Event) -> None:
+        """Follow ffmpeg's silencedetect output for the file being played.
+
+        The encoder's stderr lands in a temporary file (a pipe would block it
+        once full), so this reads that file forward and keeps the start time of
+        the current silence. It decides nothing: the broadcast loop does, against
+        the audio it has actually sent — see ``_silence_due``.
+        """
+        leftover = ""
+        position = 0
+        while not done.wait(SILENCE_POLL_S):
+            try:
+                sink.seek(position)
+                chunk = sink.read()
+                position = sink.tell()
+            except (AttributeError, OSError, ValueError):
+                return  # the sink was closed: the file is over
+            if not chunk:
+                continue
+            text = leftover + chunk.decode("utf-8", "replace")
+            leftover = text[text.rfind("\n") + 1:]  # an unfinished line
+            for line in text.splitlines():
+                start = _SILENCE_START_RE.search(line)
+                if start:
+                    self._silence_start = float(start.group(1))
+                elif _SILENCE_END_RE.search(line):
+                    self._silence_start = None
+
+    def _silence_due(self, played: float) -> bool:
+        """True once the air has carried ``silence_skip_s`` of this track's silence.
+
+        "On the air", not "in the decoder": the encoder runs up to
+        ``MAX_AHEAD_SECONDS`` (plus a pipe buffer) ahead of the listener, so
+        measuring the silence in decode time would cut the gap short — the
+        listener would hear less than the configured seconds of it.
+        """
+        limit, _ = self._silence_settings()
+        start = self._silence_start
+        return bool(limit and start is not None and played - start >= limit)
+
     def _play_file(self, path: str, kind: str, meta: dict[str, Any]) -> bool:
         """Stream one file to all listeners, paced in real time."""
         if not Path(path).exists():
@@ -657,6 +760,7 @@ class Broadcaster:
             return False
 
         self._skip.clear()
+        self._silence_start = None
         # Music plays at its measured static gain; the DJ voice keeps the
         # dynamic chain (every clip comes from the same Piper model, so its
         # level is already consistent and dj.gain_db remains the trim).
@@ -677,6 +781,16 @@ class Broadcaster:
             return False
 
         self._proc = proc
+        # Follow the encoder's silence report while the file plays. Music only: a
+        # DJ talk is speech, and the idle tone is silence by construction.
+        silence_done: threading.Event | None = None
+        silence_thread: threading.Thread | None = None
+        if kind == "track" and err_sink is not None and self._silence_filter():
+            silence_done = threading.Event()
+            silence_thread = threading.Thread(
+                target=self._watch_silence, args=(err_sink, silence_done),
+                name="vdj-silence", daemon=True)
+            silence_thread.start()
         with self._lock:  # one atomic switch-over for state()'s readers
             self._played_seconds = 0.0
             self._now_playing = {
@@ -735,10 +849,24 @@ class Broadcaster:
                 sent += len(data)
                 with self._lock:
                     self._played_seconds = sent / bps
+                if self._silence_due(sent / bps):
+                    # Dead air: an album's hidden gap, a silent tail, or a file
+                    # that decodes to nothing. Skipping is deliberate, so it goes
+                    # through the same path as the Skip button (the caller treats
+                    # a skipped item as played, not as a failure).
+                    limit, _ = self._silence_settings()
+                    log.info("skipping %s: %.0fs of silence from %.1fs",
+                             Path(path).name, limit, self._silence_start or 0.0)
+                    self._skip.set()
+                    break
         except Exception:
             reason = "error"
             log.exception("error while streaming %s", path)
         finally:
+            if silence_done is not None:
+                silence_done.set()      # the monitor must not read a closed sink
+                if silence_thread is not None:
+                    silence_thread.join(timeout=2.0)
             aligner.discard_leftover()  # never broadcast a partial frame
             if proc.poll() is None:
                 try:

@@ -527,6 +527,8 @@ async function loadConfig() {
   $('program-size-val').textContent = $('program-size').value;
   $('pause-without-listeners').checked = cfg.playback?.pause_without_listeners ?? true;
   $('listener-grace').value = cfg.playback?.listener_grace_s ?? 30;
+  $('silence-skip').value = cfg.playback?.silence_skip_s ?? 10;
+  $('silence-db').value = cfg.playback?.silence_db ?? -50;
   $('listener-poll').value = cfg.playback?.listener_poll_s ?? 5;
   $('program-strategy-sel').value = cfg.playback?.program?.strategy ?? 'genre';
   // Voice + prosody controls.
@@ -1297,6 +1299,13 @@ function wire() {
             Math.min(3600, Math.max(0, Number($('listener-grace').value) || 0)),
           listener_poll_s:
             Math.min(300, Math.max(1, Number($('listener-poll').value) || 5)),
+          // Dead air: a track that goes silent (an album's hidden gap, a silent
+          // tail, a file that decodes to nothing) is skipped rather than left on
+          // the air. 0 keeps it playing.
+          silence_skip_s:
+            Math.min(600, Math.max(0, Number($('silence-skip').value) || 0)),
+          silence_db:
+            Math.min(-1, Math.max(-100, Number($('silence-db').value) || -50)),
         },
       }),
     }));

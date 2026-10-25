@@ -314,6 +314,85 @@ def test_the_empty_queue_heal_runs_at_most_once_a_minute(monkeypatch):
     assert calls == [1, 1]
 
 
+# --- dead air: a track that goes silent must not hold the station ----------------
+
+
+def test_the_silence_rule_counts_seconds_actually_on_the_air():
+    config.save_config({"playback": {"silence_skip_s": 10, "silence_db": -50}})
+    b = Broadcaster()
+    assert b._silence_due(0.0) is False        # nothing reported as silent yet
+    b._silence_start = 30.0
+    assert b._silence_due(35.0) is False       # 5 s of it
+    assert b._silence_due(40.0) is True        # 10 s on the air
+    b._silence_start = None                    # the music came back
+    assert b._silence_due(400.0) is False
+    config.save_config({"playback": {"silence_skip_s": 0}})
+    b._silence_start = 0.0
+    assert b._silence_due(999.0) is False      # switched off
+
+
+def test_the_encoder_reports_silence_only_when_the_feature_is_on():
+    config.save_config({"playback": {"silence_skip_s": 10, "silence_db": -45}})
+    args = Broadcaster()._encode_args("/tmp/x.mp3")
+    chain = args[args.index("-af") + 1]
+    assert chain.startswith("silencedetect=noise=-45dB:")
+    # silencedetect reports at INFO; with the old error level it would say
+    # nothing at all.
+    assert args[args.index("-loglevel") + 1] == "info"
+    config.save_config({"playback": {"silence_skip_s": 0}})
+    args = Broadcaster()._encode_args("/tmp/x.mp3")
+    assert "silencedetect" not in args[args.index("-af") + 1]
+    assert args[args.index("-loglevel") + 1] == "error"
+
+
+def _gap_file(path, tone_s: float, gap_s: float, tail_s: float) -> str:
+    """An mp3 that is music, then a stretch of absolute silence, then music."""
+    subprocess.run([
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", f"sine=frequency=440:duration={tone_s}",
+        "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo:d={gap_s}",
+        "-f", "lavfi", "-i", f"sine=frequency=660:duration={tail_s}",
+        "-filter_complex", "[0:a][1:a][2:a]concat=n=3:v=0:a=1[out]",
+        "-map", "[out]", "-c:a", "libmp3lame", "-b:a", "128k",
+        "-write_xing", "0", "-id3v2_version", "0", str(path),
+    ], check=True)
+    return str(path)
+
+
+def test_a_hidden_silence_is_skipped(tmp_path, has_ffmpeg):
+    """The Offspring case: a track with a long silent stretch inside it.
+
+    "Smash" ends "Come Out and Play" with a hidden gap, so the station sat in
+    silence for minutes with a listener connected. The skip has to be a
+    DELIBERATE one (the same path as the Skip button), not a playback failure —
+    otherwise the failure breaker would treat silence as an unmounted library.
+    """
+    config.save_config({"playback": {"silence_skip_s": 2, "silence_db": -50}})
+    path = _gap_file(tmp_path / "gap.mp3", tone_s=1, gap_s=8, tail_s=1)
+    b = Broadcaster()
+    assert b._play_file(path, "track", {"track": {"id": 1, "gain_db": 0.0}}) is True
+    assert b._skip.is_set() is True            # cut, not played to the end
+    assert b.state()["error"] is None          # and not counted as a failure
+
+
+def test_a_short_gap_is_not_dead_air(tmp_path, has_ffmpeg):
+    """A breath between two parts of a song is not silence worth skipping."""
+    config.save_config({"playback": {"silence_skip_s": 2, "silence_db": -50}})
+    path = _gap_file(tmp_path / "breath.mp3", tone_s=1, gap_s=0.4, tail_s=1)
+    b = Broadcaster()
+    assert b._play_file(path, "track", {"track": {"id": 2, "gain_db": 0.0}}) is True
+    assert b._skip.is_set() is False           # played through
+
+
+def test_a_silent_file_does_not_hold_the_station(tmp_path, has_ffmpeg):
+    """A file that decodes to nothing (a broken rip) must not park the air."""
+    config.save_config({"playback": {"silence_skip_s": 2, "silence_db": -50}})
+    path = _gap_file(tmp_path / "silent.mp3", tone_s=0.1, gap_s=8, tail_s=0.1)
+    b = Broadcaster()
+    assert b._play_file(path, "track", {"track": {"id": 3, "gain_db": 0.0}}) is True
+    assert b._skip.is_set() is True
+
+
 def test_dj_clip_failure_does_not_touch_the_library(music_dir, has_ffmpeg):
     from app import db, library
     library.scan_library(str(music_dir))
@@ -684,6 +763,25 @@ def test_a_skip_with_no_audio_yet_is_not_a_playback_failure(music_dir, monkeypat
     assert b._play_file(track["path"], "track", {"track": track}) is True
     assert b._consecutive_failures == 0
     assert b._playback_error is None
+
+
+def test_the_ffmpeg_stderr_sink_drops_the_banner_but_keeps_errors():
+    """At INFO level the head is the banner; the error must still be readable."""
+    sink = stream_mod._stderr_sink()
+    sink.write(b"Input #0, mp3, from 'x.mp3':\n"
+               b"  Duration: 00:03:21.00, start: 0.000000, bitrate: 128 kb/s\n"
+               b"  Stream #0:0: Audio: mp3, 44100 Hz, stereo, fltp, 128 kb/s\n"
+               b"Stream mapping:\n"
+               b"[silencedetect @ 0x55] silence_start: 12.0\n"
+               b"size=     329KiB time=00:00:21.02 bitrate= 128.2kbits/s\n"
+               b"[mp3 @ 0x55] Header missing\n"
+               b"Error while decoding stream #0:0: Invalid data found\n")
+    sink.seek(0)
+    text = stream_mod._stderr_text(sink)
+    assert "Header missing" in text
+    assert "Invalid data found" in text
+    assert "Stream mapping" not in text and "Duration:" not in text
+    assert "silencedetect" not in text and "size=" not in text
 
 
 def test_the_ffmpeg_stderr_sink_reads_and_closes():

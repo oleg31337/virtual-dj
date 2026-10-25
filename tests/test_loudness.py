@@ -186,9 +186,19 @@ def test_reset_forgets_every_measurement(analyzed_library):
 # --- broadcast encoding -----------------------------------------------------
 
 
+def _gain_chain(args: list[str]) -> str:
+    """The level stage of the encoder's filter chain.
+
+    The dead-air analyser (``silencedetect``) rides in front of it and passes the
+    audio through untouched, so these tests are about what comes after it.
+    """
+    chain = args[args.index("-af") + 1]
+    return chain.split(",", 1)[1] if chain.startswith("silencedetect=") else chain
+
+
 def test_encode_args_use_static_gain_when_measured():
     args = Broadcaster()._encode_args("/tmp/x.mp3", gain_db=-4.2)
-    filters = args[args.index("-af") + 1]
+    filters = _gain_chain(args)
     assert filters == "volume=-4.20dB"
     assert "loudnorm" not in filters
 
@@ -196,7 +206,7 @@ def test_encode_args_use_static_gain_when_measured():
 def test_encode_args_fall_back_to_dynamic_loudnorm():
     # No measurement yet -> the legacy dynamic chain (unchanged behaviour).
     args = Broadcaster()._encode_args("/tmp/x.mp3")
-    filters = args[args.index("-af") + 1]
+    filters = _gain_chain(args)
     assert filters.startswith("loudnorm=")
     assert "I=-16.0" in filters
 
@@ -204,7 +214,7 @@ def test_encode_args_fall_back_to_dynamic_loudnorm():
 def test_disabled_normalization_ignores_measured_gains():
     config.save_config({"loudness": {"enabled": False}})
     args = Broadcaster()._encode_args("/tmp/x.mp3", gain_db=-4.2)
-    assert "loudnorm" in args[args.index("-af") + 1]
+    assert "loudnorm" in _gain_chain(args)
 
 
 def test_encode_args_tolerate_a_junk_gain():

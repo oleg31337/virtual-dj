@@ -281,6 +281,16 @@ DEFAULTS: dict[str, Any] = {
         "listener_grace_s": env_int("VDJ_LISTENER_GRACE_S", 30),
         # How often Icecast is asked how many listeners the mount has.
         "listener_poll_s": env_int("VDJ_LISTENER_POLL_S", 5),
+        # Dead air: a track that goes silent for this many seconds is skipped.
+        # Albums hide silent gaps and silent tails (The Offspring's "Smash" ends
+        # "Come Out and Play" with one), and a broken file can decode to nothing
+        # at all — the station would sit in silence with a listener connected.
+        # 0 disables it.
+        "silence_skip_s": env_int("VDJ_SILENCE_SKIP_S", 10),
+        # What counts as silence, in dBFS (ffmpeg silencedetect). -50 is below
+        # anything audible in a normal master but above digital silence only:
+        # quiet passages and fades stay untouched.
+        "silence_db": env_int("VDJ_SILENCE_DB", -50),
     },
     # Icecast delivery. When enabled, the app runs a *managed* Icecast2 server
     # (bundled in the same container) and a background ffmpeg ("the pusher")
