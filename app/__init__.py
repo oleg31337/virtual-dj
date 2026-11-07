@@ -80,4 +80,25 @@ logging.basicConfig(level=_level, format=LOG_FORMAT)
 if _wanted and _wanted.upper() != _level:
     logging.getLogger(__name__).warning(
         "VDJ_LOG_LEVEL=%r is not a logging level; using %s", _wanted, _level)
+
+# HTTP client chatter is not station news: the DJ prefetch polls the TTS service
+# and /api/health on every request, so at INFO these loggers produced more lines
+# than the app itself (measured: ~9 of every 10 lines). DEBUG mode keeps them.
+_HTTP_LOGGERS = ("httpx", "httpcore", "urllib3", "multipart")
+
+
+def quiet_http_loggers(level: str) -> None:
+    """Silence third-party HTTP request lines unless we are debugging.
+
+    Idempotent in both directions: with DEBUG the loggers inherit the root level
+    again (so the requests show), otherwise they are pinned to WARNING.
+    """
+    quiet = normalize_level(level, default="INFO") != "DEBUG"
+    for name in _HTTP_LOGGERS:
+        logging.getLogger(name).setLevel(
+            logging.WARNING if quiet else logging.NOTSET)
+
+
+quiet_http_loggers(_level)
+
 _add_file_handler()

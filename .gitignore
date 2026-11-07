@@ -7,8 +7,8 @@ venv/
 *.egg-info/
 
 # Runtime state — per-install, never committed.
-# Holds your config (music dir, Ollama URL), the scanned library DB,
-# generated DJ audio, and the ~320MB of Piper voice models.
+# Holds your config (music dir, Ollama URL), the scanned library DB and generated
+# DJ audio. Speech models live in the TTS service's own volume (tts-models).
 data/
 
 # Real per-install config (LAN Ollama URL etc.) — keep out even if moved.

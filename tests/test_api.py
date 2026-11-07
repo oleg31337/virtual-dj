@@ -295,28 +295,75 @@ def test_programs_endpoint_reports_the_artist_gap(client, music_dir):
         client.put("/api/config", json={"playback": {"artist_gap": 10}})
 
 
-def test_preview_returns_the_text_the_voice_will_actually_say(client):
+def test_preview_returns_the_text_the_voice_will_actually_say(client, monkeypatch):
     """"Test this voice" must show the prepared line, not the raw input.
 
     Regression: the preview synthesised the prepared text but echoed the input,
-    so a Russian line showed a stress mark (U+00B4) that espeak-ng silently
+    so a Russian line showed a stress mark (U+00B4) that the engine silently
     ignores — the box looked right while the audio said the wrong stress.
     """
+    import fake_tts
+
+    fake = fake_tts.install(monkeypatch)  # engine without stress-mark support
     body = client.post("/api/dj/preview", json={
         "text": "Далее — замо\u00b4к, в исполнении Ага\u00b4ты Кри\u00b4сти.",
-        "voice": "ru_RU-irina-medium",
+        "voice": "V2",
+        "language": "ru",
     }).json()
     text = body["text"]
-    assert "\u0301" in text, f"the obeyed mark must be present: {text!r}"
+    assert "\u0301" in text, f"the display form keeps the stress mark: {text!r}"
     assert "\u00b4" not in text, f"the ignored mark must be gone: {text!r}"
+    # ... and an engine that declares no stress support never receives one.
+    assert "\u0301" not in fake.calls[-1]["text"]
+    assert body["language"] == "ru"
 
     # English input keeps its years spelled out, same as the DJ's own lines.
     body = client.post("/api/dj/preview", json={
         "text": "A track from 1999 by P\u00b4ink.",
-        "voice": "en_GB-alan-medium",
+        "voice": "V1",
+        "language": "en",
     }).json()
     assert "1999" not in body["text"] and "nineteen ninety-nine" in body["text"]
     assert "\u00b4" not in body["text"]
+
+
+def test_tts_card_payload_is_engine_declared(client, monkeypatch):
+    """The DJ card renders whatever the service declares — nothing is hardcoded."""
+    import fake_tts
+
+    fake_tts.install(monkeypatch)
+    # The fake's catalogue is V1/V2/V3; the card must reflect the *configured*
+    # voice, so point it at one the fake installs.
+    config.save_config({"dj": {"voice": "V1", "language": "ru"}})
+    body = client.get("/api/dj/tts").json()
+    assert body["ok"] is True
+    assert body["engine"]["id"] == "fake-engine"
+    assert [v["id"] for v in body["voices"]] == ["V1", "V2", "V3"]
+    assert [p["key"] for p in body["params"]] == ["speed", "sentence_pause"]
+    assert body["quality"]["steps"] == 5
+    assert body["current"]["voice"] == "V1"
+    # The configured language (dj.language), matching what the service says the
+    # voice can speak — not the voice's first language, which would silently
+    # undo the user's choice on every page load.
+    assert body["current"]["language"] == "ru"
+    assert "V3" not in body["installed"]
+    assert body["problem"] is None
+    # Every parameter carries what a control needs.
+    for param in body["params"]:
+        assert {"key", "label", "type", "default"} <= set(param)
+
+
+def test_voice_install_endpoint_delegates_to_the_service(client, monkeypatch):
+    import fake_tts
+
+    fake = fake_tts.install(monkeypatch)
+    body = client.post("/api/dj/voices/install", json={"voice": "V3"}).json()
+    assert fake.installs == ["V3"]
+    assert body["installed"] == ["V3"]
+    assert body["failed"] == []
+    # The old path keeps working (an open tab, a saved curl snippet).
+    body = client.post("/api/dj/voices/download", json={"voice": "V3"}).json()
+    assert body["installed"] == ["V3"]
 
 
 def test_decades_endpoint_feeds_the_card_and_the_config_round_trips(client):

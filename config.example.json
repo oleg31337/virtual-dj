@@ -4,7 +4,7 @@
 
   "music_dir": "/path/to/your/mp3s",
   "voices_dir": "",
-  "_voices_dir": "Where Piper voice models are kept. Blank = $VDJ_DATA_DIR/voices (the volume). Set it to park ~1 GB of voices on another disk.",
+  "_voices_dir": "Legacy. Voice models now belong to the TTS service (its own volume); this only matters if you run the old in-app Piper engine.",
 
   "llm": {
     "_comment": "Ollama, for the talking DJ. enabled=false keeps the music playing with no spoken breaks.",
@@ -35,23 +35,29 @@
   },
 
   "dj": {
-    "_comment": "The voice. voice also picks the DJ's language (an en_* voice speaks English, ru_* Russian) — there is no separate language setting and no per-song detection.",
+    "_comment": "The voice. The engine is not chosen here: voices, languages and knobs are whatever the TTS service advertises in /v1/capabilities, and the DJ card in the web UI renders itself from that answer.",
     "enabled": true,
     "talk_min": 2,
     "talk_max": 4,
     "sent_min": 1,
     "sent_max": 3,
     "style": "warm, witty late-night radio host",
-    "voice": "en_GB-alan-medium",
-    "_voice_note": "Measured on one sentence: alan-medium moves its pitch over ~19 semitones, ryan-medium ~15, the old default en_US-amy-medium only ~7 (the flattest of the 15 installed voices). -high models measured no wider than their -medium siblings for twice the CPU, so this is a voice choice, not a quality tier.",
-    "speed": 1.0,
-    "noise_w": 0.8,
-    "_noise_w": "Rhythm variation (phoneme-width jitter): lower is metronomic, higher is looser. Piper's own default for these voices is 0.8.",
-    "sentence_silence": 0.25,
-    "_sentence_silence": "Seconds of silence after each sentence. The engine's own punctuation pauses only reach 0.10-0.26 s (measured), so 0.25 gives the ~0.45 s gap of a real host; 0 is the old rushed delivery.",
+    "voice": "M2",
+    "_voice_note": "M2 is Supertonic 3's most natural Russian style (the station owner's pick after listening to all ten); every style speaks English too. Any id the service lists works — pick it in the DJ card.",
+    "language": "ru",
+    "_language_note": "en or ru — what the DJ speaks, both the script and the audio. Clamped to the languages the chosen voice declares.",
+    "tts_params": {
+      "_comment": "Engine-defined knobs, exactly as /v1/capabilities declares them. The DJ card shows one control per declared parameter with the service's own ranges; out-of-range values are clamped server-side and reported back.",
+      "speed": 1.0,
+      "sentence_pause": 0.3
+    },
     "gain_db": 0.0,
-    "noise_scale": 0.667,
     "prefetch_depth": 3
+  },
+
+  "tts": {
+    "_comment": "Where the speech service lives. That is the only engine setting the app has — everything else it learns from the service.",
+    "base_url": "http://127.0.0.1:9000"
   },
 
   "stream": {

@@ -2,7 +2,8 @@ fastapi>=0.115,<1
 uvicorn[standard]>=0.30,<1
 mutagen>=1.47,<2
 httpx>=0.28,<1
-piper-tts>=1.2,<2
+# Speech synthesis lives in the `tts` container now (see docs/tts-service.md):
+# the app only speaks HTTP to it, so no TTS engine dependency belongs here.
 
 # test
 pytest>=8,<9

@@ -12,7 +12,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import config, db, dj, library, websearch, ai_meta
+from . import config, db, dj, library, websearch, ai_meta, tts_client
 from . import icecast as icecast_mod
 from . import icecast_server as icecast_server_mod
 from . import listeners
@@ -614,27 +614,65 @@ def api_llm_test(req: LLMTestRequest):
 
 # --- DJ --------------------------------------------------------------------
 
-@app.get("/api/dj/voices")
-def api_dj_voices():
+@app.get("/api/dj/tts")
+def api_dj_tts():
+    """Everything the DJ card needs about speech, as the service declares it.
+
+    One call, one shape: engine identity, the voices the engine offers (with the
+    languages each speaks and whether it is installed), the parameter schema the
+    card renders controls from, and the values currently configured. The app
+    invents none of it — swapping ``TTS_ENGINE`` changes this payload only.
+    """
+    caps = tts_client.capabilities(force=True) or {}
+    current_voice = dj.effective_voice()
+    entry = tts_client.voice(current_voice) or {}
     return {
-        "voices": dj.available_voices(),
-        "profiles": dj.voice_profiles(),
-        "current": config.get("dj.voice"),
+        "ok": bool(caps),
+        "service": tts_client.health(),
+        "base_url": tts_client.base_url(),
+        "engine": caps.get("engine") or {},
+        "languages": caps.get("languages") or [],
+        "voices": caps.get("voices") or [],
+        "params": caps.get("params") or [],
+        "output": caps.get("output") or {},
+        "text": caps.get("text") or {},
+        "quality": caps.get("quality") or {},
+        "current": {
+            "voice": current_voice,
+            "language": dj.language_for(current_voice),
+            "params": tts_client.resolve_params(),
+        },
+        "installed": tts_client.installed_voice_ids(),
+        "configured_voice": config.get("dj.voice"),
+        "voice_languages": entry.get("languages") or [],
+        "problem": dj.tts_problem(),
     }
 
 
-class VoiceDownloadRequest(BaseModel):
+@app.get("/api/dj/voices")
+def api_dj_voices():
+    """The voice list alone (kept for compatibility with older clients)."""
+    voices = dj.voice_catalogue()
+    return {
+        "voices": [v["id"] for v in voices if v.get("installed")],
+        "profiles": voices,
+        "current": dj.effective_voice(),
+        "languages": tts_client.languages(),
+        "params": tts_client.params(),
+    }
+
+
+class VoiceInstallRequest(BaseModel):
     voice: str | None = None
-    # "default" (config voice), "all" (every curated voice), or a list of ids.
     voices: list[str] | None = None
 
 
-@app.post("/api/dj/voices/download")
-def api_dj_voices_download(req: VoiceDownloadRequest):
-    """Download Piper voice model(s) on demand.
+@app.post("/api/dj/voices/install")
+def api_dj_voices_install(req: VoiceInstallRequest):
+    """Make voice(s) usable on the TTS service (downloads on demand).
 
-    Without arguments, fetches the default voice the app needs. Returns the
-    ids that succeeded and any that failed (e.g. no network).
+    Without arguments, installs the configured voice. Returns what succeeded and
+    what failed (e.g. no network in the tts container).
     """
     from . import voices as voice_mgr
 
@@ -643,26 +681,34 @@ def api_dj_voices_download(req: VoiceDownloadRequest):
     elif req.voices:
         targets = list(req.voices)
     else:
-        targets = [config.get("dj.voice")]
+        targets = [dj.effective_voice() or str(config.get("dj.voice") or "")]
     targets = [t for t in targets if t]
-    done = voice_mgr.download_voices(targets)
+    done = voice_mgr.install_voices(targets)
+    tts_client.invalidate()
     return {
-        "downloaded": done,
+        "installed": done,
         "failed": [t for t in targets if t not in done],
-        "available": dj.available_voices(),
+        "available": tts_client.installed_voice_ids(),
+        "voices": dj.voice_catalogue(),
     }
+
+
+# The old path name, kept so an open browser tab (and a saved bookmark / curl
+# snippet) keeps working across the upgrade. Same handler, no extra logic.
+@app.post("/api/dj/voices/download")
+def api_dj_voices_download(req: VoiceInstallRequest):
+    return api_dj_voices_install(req)
 
 
 class PreviewRequest(BaseModel):
     text: str | None = None
     track_id: int | None = None
     voice: str | None = None
-    speed: float | None = None
-    noise_scale: float | None = None
-    # Piper's rhythm jitter and the pause after each sentence, so "test this
-    # voice" previews exactly what a saved setting will sound like.
-    noise_w: float | None = None
-    sentence_silence: float | None = None
+    language: str | None = None
+    # Engine-declared parameters (speed, sentence_pause, ...). Whatever the TTS
+    # service declares is accepted here; it ignores names it does not know, so
+    # the UI can post the whole form without the app knowing the keys.
+    params: dict[str, Any] | None = None
 
 
 @app.post("/api/dj/preview")
@@ -670,10 +716,10 @@ def api_dj_preview(req: PreviewRequest):
     """Generate (and optionally speak) a DJ line without touching the stream."""
     text = (req.text or "").strip()
     if text:
-        # Same preparation the DJ's own lines get: years spelled out, Russian
+        # Same preparation the DJ's own lines get: numbers written out, Russian
         # stress marks normalised into the form the engine obeys — otherwise the
-        # preview shows a mark that will be ignored on air.
-        text = dj.prepare_script(text, voice=req.voice)
+        # preview shows a line that will not sound like the preview.
+        text = dj.prepare_script(text, voice=req.voice, language=req.language)
     track = None
     if not text:
         if req.track_id:
@@ -683,18 +729,18 @@ def api_dj_preview(req: PreviewRequest):
             track = tracks[0] if tracks else None
         if track is None:
             raise HTTPException(400, "library is empty")
-        text = dj.generate_script(track, voice=req.voice)
+        text = dj.generate_script(track, voice=req.voice, language=req.language)
     audio = dj.synthesize(
         text,
         voice=req.voice,
-        speed=req.speed,
-        noise_scale=req.noise_scale,
-        noise_w=req.noise_w,
-        sentence_silence=req.sentence_silence,
+        language=req.language,
+        params=req.params,
     )
     return {
         "text": text,
         "track": track,
+        "voice": dj.effective_voice(req.voice),
+        "language": dj.language_for(req.voice, req.language),
         "audio_url": f"/api/dj/audio/{audio.name}" if audio else None,
         "duration": dj.audio_duration(audio) if audio else None,
     }

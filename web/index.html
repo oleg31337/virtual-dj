@@ -308,30 +308,27 @@
       </div>
     </label>
     <label class="field">
+      <span>Voice engine</span>
+      <div class="dim" id="tts-engine">—</div>
+      <div class="dim" id="tts-status"></div>
+    </label>
+    <label class="field">
       <span>Voice</span>
       <select id="dj-voice"></select>
-      <button id="test-voice" type="button" class="ghost">▶ Test this voice</button>
       <div class="dim" id="dj-voice-note"></div>
-      <div class="dim">English voices make the DJ speak English; Russian voices (Irina, Denis, Dmitri, Ruslan) make the DJ speak Russian.</div>
     </label>
     <label class="field">
-      <span>Speaking speed: <b id="speed-val">1.0</b>×</span>
-      <input type="range" id="dj-speed" min="70" max="140" value="100" />
+      <span>Language</span>
+      <select id="dj-language"></select>
+      <div class="dim">The DJ writes and speaks in this language. A voice offers
+        the languages it can actually speak.</div>
     </label>
+    <!-- Synthesis controls are rendered from the engine's own declaration
+         (/api/dj/tts → params): label, range, step, unit and help text all come
+         from the TTS service, so a different engine needs no app change. -->
+    <div id="tts-params"></div>
     <label class="field">
-      <span>Expression: <b id="expr-val">0.67</b>
-        <span class="dim">(lower = calm/monotone, higher = lively)</span></span>
-      <input type="range" id="dj-noise" min="100" max="1500" value="667" />
-    </label>
-    <label class="field">
-      <span>Rhythm variation: <b id="noisew-val">0.80</b>
-        <span class="dim">(timing jitter — lower is metronomic, higher is looser)</span></span>
-      <input type="range" id="dj-noise-w" min="0" max="1500" value="800" />
-    </label>
-    <label class="field">
-      <span>Pause after each sentence: <b id="pause-val">0.25</b>s
-        <span class="dim">(the model’s own punctuation pauses only reach ~0.2 s)</span></span>
-      <input type="range" id="dj-sentence-silence" min="0" max="100" value="25" />
+      <span><button id="test-voice" type="button" class="ghost">▶ Test this voice</button></span>
     </label>
     <label class="field">
       <span>Persona / style</span>

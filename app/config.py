@@ -62,13 +62,17 @@ VOICES_DIR = DATA_DIR / "voices"
 
 
 def voices_dir() -> Path:
-    """Where the Piper voice models live.
+    """Where the app-side Piper voice models would live (legacy).
+
+    Only the retired in-app Piper engine used this; models now belong to the TTS
+    service and its own volume. Kept because ``voices_dir`` is a documented config
+    key and the strict ``PUT /api/config`` rejects a key DEFAULTS does not
+    declare.
 
     ``voices_dir`` (config.json) wins when set; otherwise the default is
     ``$VDJ_DATA_DIR/voices``. Read at CALL time, so a test/profile that repoints
     ``VOICES_DIR`` or ``DATA_DIR`` is honoured instead of a value frozen at
-    import. (A key the code reads but DEFAULTS does not declare would also be
-    rejected by the strict PUT /api/config — found while auditing the docs.)
+    import.
     """
     configured = str(get("voices_dir", "") or "").strip()
     return Path(configured).expanduser() if configured else VOICES_DIR
@@ -80,9 +84,8 @@ DEFAULTS: dict[str, Any] = {
     # Where to look for music. Set it in the web UI (Library panel), or
     # override at first boot with VDJ_MUSIC_DIR.
     "music_dir": env_str("VDJ_MUSIC_DIR", str(Path.home() / "Music")),
-    # Where Piper voice models are kept. Empty = $VDJ_DATA_DIR/voices (the
-    # default and what the container volume holds). Set it to keep several GB of
-    # voices on another disk.
+    # Legacy: only the retired in-app Piper engine read this. Speech models now
+    # live in the TTS service's own volume (``tts.base_url`` below).
     "voices_dir": "",
     "stream": {
         "bitrate_kbps": 128,
@@ -93,29 +96,30 @@ DEFAULTS: dict[str, Any] = {
     "dj": {
         "enabled": True,
         "style": "warm, witty late-night radio host",
-        # The DJ voice. Any curated voice (English or Russian) can be chosen;
-        # the voice's language decides the DJ's language (a Russian voice makes
-        # the DJ speak Russian). All other dj.* settings (speed, noise_scale,
-        # gain, sentence counts, cadence) apply to the chosen voice.
-        # Measured on the reference host, same sentence: alan-medium moves its
-        # pitch over ~19 semitones, ryan-medium ~15, the old default
-        # (en_US-amy-medium) only ~7 — the flattest of all 15 installed voices.
-        # The -high models of the same voices measured NO wider than their
-        # -medium siblings for twice the CPU, so this is a voice choice, not a
-        # quality tier. Change it in the DJ card.
-        "voice": "en_GB-alan-medium",
+        # The DJ voice, chosen from what the TTS service offers (voices are
+        # engine-defined — the app never hardcodes a catalogue). M2 is the
+        # station owner's pick: the most natural Russian of Supertonic's ten
+        # styles, and it speaks English too.
+        "voice": "M2",
+        # The language the DJ speaks: the script language and the synthesis
+        # language. Must be one of the chosen voice's languages; an English
+        # voice makes English breaks, a Russian voice Russian ones.
+        "language": "ru",
+        # Engine-defined synthesis parameters (speed, expressiveness, ...),
+        # exactly as the TTS service declares them in /v1/capabilities. The DJ
+        # card renders one control per declared parameter, and whatever the user
+        # sets is stored here — so swapping engines never needs an app change.
+        "tts_params": {
+            "speed": 1.0,
+            "sentence_pause": 0.3,
+        },
+        # --- legacy Piper knobs -------------------------------------------
+        # Kept in DEFAULTS only so an old config.json (and an old saved preset)
+        # still validates; a one-time migration folds them into ``tts_params``
+        # and nothing in the app reads them any more.
         "speed": 1.0,
-        # Piper prosody: noise_scale controls expressive variation. Lower is
-        # more monotone/robotic; higher is more lively/wobbly. The real lever
-        # for "natural intonation" — no cloud service required.
         "noise_scale": 0.667,
-        # Piper's third synthesis knob: phoneme-WIDTH noise (timing jitter, the
-        # rhythm's naturalness). The model's own default is 0.8.
         "noise_w": 0.8,
-        # Silence Piper inserts after each sentence it detects (seconds). The
-        # model's punctuation pauses are only 0.10-0.26 s, which reads as
-        # rushed; 0.25 s gives the ~0.45 s sentence gap of a real host, and the
-        # pause is exact rather than approximate.
         "sentence_silence": 0.25,
         # Talk cadence: the DJ speaks after a random number of tracks between
         # talk_min and talk_max (inclusive). Equal values give a fixed cadence.
@@ -129,6 +133,12 @@ DEFAULTS: dict[str, Any] = {
         # Gain applied to the DJ voice segment, in dB.
         "gain_db": 0.0,
         "prefetch_depth": 3,
+    },
+    # The standalone speech service (container "tts"). Everything about voices,
+    # languages and synthesis parameters is discovered from its /v1/capabilities
+    # endpoint, so pointing this at a different engine needs no code change.
+    "tts": {
+        "base_url": env_str("VDJ_TTS_URL", "http://127.0.0.1:9000"),
     },
     "llm": {
         "enabled": True,
@@ -360,14 +370,22 @@ def flattened_paths() -> set[str]:
     return paths
 
 
+# Subtrees whose KEYS are not known to the app on purpose and therefore cannot
+# be validated against DEFAULTS. ``dj.tts_params`` holds whatever parameters the
+# TTS engine declares (speed today; expressiveness/rhythm with the Piper engine,
+# anything tomorrow), so its keys are free-form by design.
+FREE_FORM_PREFIXES: tuple[str, ...] = ("dj.tts_params",)
+
+
 def unknown_paths(patch: dict[str, Any], *, allow_prefixes: tuple[str, ...] = ()) -> list[str]:
     """Dotted paths in ``patch`` that no part of the app reads.
 
     Only dicts are recursed into (a list value is a leaf); ``allow_prefixes``
     whitelists whole subtrees (used for stored presets, which may legitimately
-    carry keys from an older schema).
+    carry keys from an older schema). ``FREE_FORM_PREFIXES`` is always allowed.
     """
     known = flattened_paths()
+    prefixes = tuple(allow_prefixes) + FREE_FORM_PREFIXES
     bad: list[str] = []
 
     def walk(node, prefix: str) -> None:
@@ -379,7 +397,7 @@ def unknown_paths(patch: dict[str, Any], *, allow_prefixes: tuple[str, ...] = ()
                 # data/config.json), so a stored comment must not turn a later
                 # write into a 422.
                 continue
-            if any(path == p or path.startswith(p + ".") for p in allow_prefixes):
+            if any(path == p or path.startswith(p + ".") for p in prefixes):
                 continue
             if path not in known:
                 bad.append(path)
@@ -394,6 +412,51 @@ def unknown_paths(patch: dict[str, Any], *, allow_prefixes: tuple[str, ...] = ()
 def ensure_dirs() -> None:
     for path in (DATA_DIR, CACHE_DIR, DJ_CACHE_DIR, VOICES_DIR):
         path.mkdir(parents=True, exist_ok=True)
+
+
+def _migrate_tts_settings(stored: dict[str, Any]) -> dict[str, Any]:
+    """Fold the old Piper-only DJ settings into ``dj.tts_params`` + ``dj.language``.
+
+    Before the TTS service existed the app owned four Piper knobs
+    (speed/noise_scale/noise_w/sentence_silence) and derived the DJ's language
+    from the voice id. Both assumptions died with the engine swap, so an
+    existing config.json is migrated once, here, on load — on the STORED config,
+    before the defaults are merged in, so "the user never had tts_params" is
+    still visible:
+
+    * ``dj.tts_params`` carries the four knobs under engine-agnostic names (the
+      TTS service ignores names it does not know and reports them back, so
+      nothing is lost when engines change again). A config that already has
+      ``dj.tts_params`` keeps it untouched;
+    * ``dj.language`` is NOT invented from an English legacy voice id. A Piper id
+      names a model the service does not offer any more
+      (``en_GB-alan-medium``), so the language it implies would pin the station
+      to a language its *new* default voice was not chosen for; the configured
+      default applies instead and the DJ card shows the switch;
+    * the legacy voice id is left alone — the DJ resolves it to a voice the
+      service actually offers (``tts_client.default_voice``) and the card shows
+      the resolved one, so saving once fixes the config for good.
+    """
+    dj = stored.get("dj")
+    if not isinstance(dj, dict):
+        return stored
+    legacy_keys = ("speed", "noise_scale", "noise_w", "sentence_silence")
+    has_legacy = any(key in dj for key in legacy_keys)
+    params = dj.get("tts_params")
+    if has_legacy and not (isinstance(params, dict) and params):
+        dj["tts_params"] = {
+            "speed": dj.get("speed", 1.0),
+            "expressiveness": dj.get("noise_scale", 0.667),
+            "rhythm": dj.get("noise_w", 0.8),
+            "sentence_pause": dj.get("sentence_silence", 0.25),
+        }
+    # A legacy Russian voice id is the one honest hint about the language; an
+    # English Piper id is not (see the docstring) — leave those to the default.
+    if not dj.get("language"):
+        voice = str(dj.get("voice") or "").lower()
+        if voice.startswith(("ru_", "ru-")):
+            dj["language"] = "ru"
+    return stored
 
 
 def load_config(force: bool = False) -> dict[str, Any]:
@@ -419,7 +482,7 @@ def load_config(force: bool = False) -> dict[str, Any]:
                 log.warning("%s does not hold a JSON object (%s); using defaults",
                             CONFIG_PATH, type(stored).__name__)
                 stored = {}
-        _CACHE = _deep_merge(DEFAULTS, stored)
+        _CACHE = _deep_merge(DEFAULTS, _migrate_tts_settings(stored))
         return deepcopy(_CACHE)
 
 

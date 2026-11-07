@@ -1,18 +1,18 @@
-# Virtual DJ - container image (bundles Icecast2)
+# Virtual DJ - container image (the station; bundles Icecast2)
 #
 # Design goals:
 #   * Small base (python:3.13-slim) + ffmpeg (decode/transcode) + icecast2
-#     (the streaming server Winamp/VLC/Sonos consume natively). libgomp1 is the
-#     onnxruntime (Piper) OpenMP backend.
+#     (the streaming server Winamp/VLC/Sonos consume natively). Speech
+#     synthesis is NOT here: it lives in the `tts` service (see
+#     docs/tts-service.md), so this image carries no TTS engine at all.
 #   * The app OWNS the Icecast lifecycle: it renders icecast.xml from its own
 #     data/config.json at startup and spawns `icecast2 -b`. Icecast must start
 #     as root to perform its <changeowner> privilege-drop (MP3 source mounts
 #     only serve when that drop happens), so this image runs as root.
 #   * The application code is read-only; all mutable state lives under /data
-#     (config, SQLite DB, downloaded voice models, cache) and /tmp (icecast
-#     logs / runtime). Mount a volume on /data. Music is mounted read-only
-#     from the host.
-#   * First-run voice models auto-download into /data/voices unless
+#     (config, SQLite DB, DJ cache) and /tmp (icecast logs / runtime). Mount a
+#     volume on /data. Music is mounted read-only from the host.
+#   * The configured voice is installed on the tts service on first run unless
 #     VDJ_NO_VOICE_DOWNLOAD=1 is set.
 
 FROM python:3.13-slim
@@ -29,19 +29,20 @@ ENV PYTHONUNBUFFERED=1 \
     # Listen on all interfaces by default inside the container.
     VDJ_HOST=0.0.0.0 \
     VDJ_PORT=8420 \
+    # The speech service this station talks to (compose: the tts container).
+    VDJ_TTS_URL=http://tts:9000 \
     # Parallel loudness analyses (background measurement pass). 2 keeps the
     # container responsive; raise it near the core count for a faster first
     # pass. Overridable at runtime from the web UI (data/config.json wins).
     VDJ_LOUDNESS_WORKERS=2
 
-# ffmpeg (decode/transcode + the icecast pusher) + libgomp1 (onnxruntime/Piper
-# OpenMP backend) + icecast2 (streaming server). Installed WITH recommends:
-# the MPEG/MP3 stream handler in this build relies on a recommended dependency,
-# and we ship a minimal /etc/mime.types so MP3 sources register correctly.
+# ffmpeg (decode/transcode + the icecast pusher) + icecast2 (streaming server).
+# Installed WITH recommends: the MPEG/MP3 stream handler in this build relies on
+# a recommended dependency, and we ship a minimal /etc/mime.types so MP3 sources
+# register correctly.
 RUN apt-get update \
     && apt-get install -y \
         ffmpeg \
-        libgomp1 \
         icecast2 \
         gettext-base \
     && rm -rf /var/lib/apt/lists/*

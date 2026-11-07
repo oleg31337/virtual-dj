@@ -46,6 +46,25 @@ def isolated_data(tmp_path, monkeypatch):
     db.close()
 
 
+@pytest.fixture(autouse=True)
+def no_live_tts(monkeypatch):
+    """Never let a test talk to a speech service running on this host.
+
+    The client's default endpoint is ``http://127.0.0.1:9000``; with the station
+    deployed, an unfaked test would silently assert against *that* engine — its
+    voices, its health, its latency — so results depended on whether the host
+    happened to be running it (and the suite took 6 minutes instead of 40 s).
+    Tests that want a service install ``fake_tts``, which points the client at
+    its in-process stand-in.
+    """
+    from app import tts_client
+
+    monkeypatch.setattr(tts_client, "base_url", lambda: "")
+    monkeypatch.setattr(tts_client, "_caps", None)
+    monkeypatch.setattr(tts_client, "_caps_at", 0.0)
+    monkeypatch.setattr(tts_client, "_caps_error", None)
+
+
 def make_mp3(path: Path, seconds: float = 1.0, freq: int = 440,
              tags: dict[str, str] | None = None) -> Path:
     """Render a real, tiny mp3 with ffmpeg so tests exercise real decoding."""

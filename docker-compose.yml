@@ -1,4 +1,5 @@
-# Virtual DJ - Docker Compose stack (single container, Icecast bundled)
+# Virtual DJ - Docker Compose stack (app + Icecast bundled, plus a separate
+# speech-synthesis service)
 #
 # Usage:
 #   1. Copy .env.example to .env and edit (at least set MUSIC_DIR on the host).
@@ -6,8 +7,16 @@
 #   3. Open http://localhost:8420  (web UI) and http://localhost:8008/virtualdj
 #      (the Icecast mount for Winamp / VLC / Sonos).
 #
-# What is persistent: everything the app writes lives in the `data` named
-# volume (config.json, vdj.sqlite3, downloaded voice models, DJ cache). The
+# Two containers:
+#   * virtual-dj  — the station: library, queue, LLM scripts, Icecast, web UI.
+#   * tts         — speech synthesis behind a universal HTTP API. The app never
+#                   embeds an engine; it asks the service what voices, languages
+#                   and parameters exist and renders its DJ card from that.
+#                   Switch engines with TTS_ENGINE (supertonic3 | piper) and the
+#                   app needs no change. See docs/tts-service.md.
+#
+# What is persistent: the app's state lives in the `virtual-dj-data` volume
+# (config.json, vdj.sqlite3, DJ cache); the models live in `tts-models`. The
 # music library is mounted READ-ONLY from the host (the DJ never writes to it).
 #
 # Icecast: the app runs a *managed* Icecast2 server in the same container
@@ -22,9 +31,12 @@ services:
     build: .
     image: virtual-dj:latest
     container_name: virtual-dj
-    # Auto-download the default Piper voice on first run. Set to "1" to skip
-    # (e.g. if you pre-populate /data/voices or have no outbound network).
+    # Auto-install the configured voice on first run. Set to "1" to skip (e.g.
+    # if you pre-populate the tts model volume or have no outbound network).
     environment:
+      # Where the speech service lives. Inside compose that is the tts service
+      # by name; point it at another host/port to use a different deployment.
+      VDJ_TTS_URL: "${VDJ_TTS_URL:-http://tts:9000}"
       VDJ_NO_VOICE_DOWNLOAD: "${VDJ_NO_VOICE_DOWNLOAD:-0}"
       VDJ_HOST: "0.0.0.0"
       VDJ_PORT: "8420"
@@ -81,10 +93,16 @@ services:
       # listen port AND the published port together.
       - "${ICECAST_PORT:-8008}:${ICECAST_PORT:-8008}"
     volumes:
-      # Persistent app state (config, DB, voices, cache).
+      # Persistent app state (config, DB, cache).
       - virtual-dj-data:/data
       # Your music library, read-only. Set MUSIC_DIR in .env to a real path.
       - "${MUSIC_DIR:-/mnt/mp3}:/music:ro"
+    # The station can start before the model has finished loading (the DJ simply
+    # stays silent and says why), so "started" is the right condition: waiting
+    # for healthy would delay every boot by the model download.
+    depends_on:
+      tts:
+        condition: service_started
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8420/api/health').status==200 else 1)"]
@@ -93,6 +111,50 @@ services:
       start_period: 60s
       retries: 3
 
+  # Speech synthesis. Engine-agnostic HTTP API (see docs/tts-service.md):
+  #   GET  /v1/health          service + model state
+  #   GET  /v1/capabilities    voices, languages, parameter schema (the DJ card)
+  #   POST /v1/speech          {text, voice, language, params} -> audio/wav
+  #   POST /v1/voices/{id}/install
+  tts:
+    build: ./tts
+    image: virtual-dj-tts:latest
+    container_name: virtual-dj-tts
+    environment:
+      # supertonic3 (default) or piper. The app is unaffected by this choice.
+      TTS_ENGINE: "${TTS_ENGINE:-supertonic3}"
+      # Quality: diffusion steps. Fixed by deployment on purpose — 5 is the
+      # measured sweet spot; the engine's 2-step mode garbles words.
+      TTS_STEPS: "${TTS_STEPS:-5}"
+      # Languages advertised to the app.
+      TTS_LANGUAGES: "${TTS_LANGUAGES:-en,ru}"
+      TTS_MODEL_DIR: "/models"
+      # Load (and, if missing, download) the model at startup rather than on the
+      # first request. Downloads ~400 MB into the tts-models volume.
+      TTS_AUTOLOAD: "${TTS_AUTOLOAD:-1}"
+      TTS_AUTODOWNLOAD: "${TTS_AUTODOWNLOAD:-1}"
+      # ONNX Runtime intra-op threads. Blank/0 lets onnxruntime decide, which is
+      # what you want unless the host is shared with something else.
+      TTS_THREADS: "${TTS_THREADS:-0}"
+      TTS_LOG_LEVEL: "${TTS_LOG_LEVEL:-info}"
+    ports:
+      # Loopback only: the station reaches the service over the compose network,
+      # and the port is published so you can curl the API from the host.
+      - "127.0.0.1:${TTS_PORT:-9000}:9000"
+    volumes:
+      # Model weights: large, re-downloadable, and shared across rebuilds.
+      - tts-models:/models
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json,urllib.request,sys; d=json.load(urllib.request.urlopen('http://127.0.0.1:9000/v1/health',timeout=8)); sys.exit(0 if d.get('ok') else 1)"]
+      interval: 30s
+      timeout: 10s
+      # Generous: a cold start downloads the model before the service is ok.
+      start_period: 180s
+      retries: 3
+
 volumes:
   virtual-dj-data:
+    driver: local
+  tts-models:
     driver: local

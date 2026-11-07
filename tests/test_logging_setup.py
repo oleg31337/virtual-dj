@@ -12,7 +12,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from app import _add_file_handler, config, normalize_level
+from app import _add_file_handler, config, normalize_level, quiet_http_loggers
 
 
 def test_known_levels_pass_through_and_unknown_ones_downgrade():
@@ -25,6 +25,21 @@ def test_known_levels_pass_through_and_unknown_ones_downgrade():
     assert normalize_level("5") == "INFO"
     # uvicorn does accept trace, so the caller can whitelist it.
     assert normalize_level("trace", default="info", extra=("TRACE",)) == "TRACE"
+
+
+def test_http_request_chatter_is_quiet_outside_debug():
+    """The station polls the TTS service constantly; httpx INFO lines drowned it.
+
+    Measured in the container: ~9 of every 10 log lines were httpx request
+    lines for /v1/health and the iTunes lookup.
+    """
+    quiet_http_loggers("INFO")
+    for name in ("httpx", "httpcore"):
+        assert logging.getLogger(name).level == logging.WARNING
+    # Debugging is the whole point of VDJ_LOG_LEVEL=debug: keep the requests.
+    quiet_http_loggers("DEBUG")
+    for name in ("httpx", "httpcore"):
+        assert logging.getLogger(name).level == logging.NOTSET
 
 
 def test_the_root_file_handler_is_not_stacked_on_reload(tmp_path, monkeypatch):

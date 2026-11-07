@@ -1,14 +1,16 @@
-"""DJ text preparation and the voice knobs added for speech quality.
+"""DJ text preparation and the synthesis settings the card exposes.
 
-Covers what the DJ's text must look like before it reaches Piper, and that the
-new synthesis settings actually reach the command line:
+Covers what a spoken line must look like before it reaches the TTS service, and
+that the engine-declared settings actually reach the service:
 
-  * stress marks are rewritten into the form espeak-ng obeys (U+0301 after the
-    vowel) — the plain acute the prompt used to ask for is silently ignored, and
-    some plausible stand-ins are read ALOUD as their character names;
-  * non-Russian text has stress marks stripped (they mean nothing to English);
-  * `dj.noise_w` and `dj.sentence_silence` are passed to Piper and are part of
-    the audio cache key, so a cached line is never reused across settings.
+  * stress marks are rewritten into the form an espeak-based engine obeys
+    (U+0301 after the vowel) — the plain acute is silently ignored, and some
+    plausible stand-ins are read ALOUD as their character names — while an
+    engine that declares no stress support gets them stripped;
+  * non-Russian text has stress marks stripped and its years spelled out;
+  * the parameters the service declares (speed, sentence pause, ...) are passed
+    through verbatim and are part of the audio cache key, so a cached line is
+    never reused across settings.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ import pytest
 
 from app import config, dj
 
-CA = "\u0301"          # combining acute: the ONLY mark espeak obeys
+CA = "\u0301"          # combining acute: the mark espeak obeys
 
 
 # --- stress marks ------------------------------------------------------------
@@ -55,7 +57,7 @@ def test_english_text_has_stress_marks_stripped():
 
 def test_russian_script_cleanup_normalises_marks():
     out = dj._clean_script("Слу\u00b4шай, ага\u02b9та кри\u00b4сти.", 3,
-                           language="russian")
+                           language="ru")
     assert CA in out, "the obeyed mark must survive into the script"
     assert all(mark not in out for mark in ("\u00b4", "\u02b9", "\u02bc"))
 
@@ -66,53 +68,49 @@ def test_english_script_cleanup_spells_years_and_drops_marks():
     assert "\u00b4" not in out
 
 
-# --- the two new Piper knobs -------------------------------------------------
+# --- the settings the card exposes -------------------------------------------
 
-def _fake_piper(monkeypatch, calls: dict):
-    """Record what synthesis asks Piper for, without running Piper."""
-    def fake_run(cmd, **kw):
-        if "-f" in cmd:
-            with open(cmd[cmd.index("-f") + 1], "wb") as fh:
-                fh.write(b"RIFF\x00\x00\x00\x00WAVE")
-            calls["cmd"] = list(cmd)
-        else:
-            with open(cmd[-1], "wb") as fh:
-                fh.write(b"ID3 fake")
+def test_synthesis_parameters_reach_the_service(monkeypatch, tmp_path):
+    """Whatever the DJ card stored is what the engine is asked for.
 
-        class R:
-            returncode = 0
-            stderr = b""
-        return R()
+    The app has no opinion about which parameters exist: it forwards the stored
+    values and lets the service clamp or ignore them (reported back in the
+    response headers), so a new engine needs no app change.
+    """
+    import fake_tts
 
-    monkeypatch.setattr(dj, "voice_model_path",
-                        lambda v=None: config.VOICES_DIR / "en_GB-alan-medium.onnx")
-    monkeypatch.setattr(dj, "piper_binary", lambda: "piper")
-    monkeypatch.setattr(dj.subprocess, "run", fake_run)
-
-
-def test_new_knobs_reach_the_piper_command(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "DJ_CACHE_DIR", tmp_path)
-    calls: dict = {}
-    _fake_piper(monkeypatch, calls)
-    monkeypatch.setattr(config, "_CACHE", {
-        "dj": {"voice": "en_GB-alan-medium", "noise_w": 0.55, "sentence_silence": 0.4},
-        "stream": {"sample_rate": 22050, "channels": 2, "bitrate_kbps": 128},
-    })
+    fake = fake_tts.install(monkeypatch)
+    monkeypatch.setitem(config.DEFAULTS["dj"], "voice", "V1")
+    monkeypatch.setitem(config.DEFAULTS["dj"], "language", "en")
+    monkeypatch.setitem(config.DEFAULTS["dj"], "tts_params",
+                        {"speed": 0.9, "sentence_pause": 0.5})
+    config.load_config(force=True)
+
     assert dj.synthesize("A line to say.") is not None
-    cmd = calls["cmd"]
-    assert "--noise_w_scale" in cmd, cmd
-    assert cmd[cmd.index("--noise_w_scale") + 1] == "0.55"
-    assert "--sentence_silence" in cmd
-    assert cmd[cmd.index("--sentence_silence") + 1] == "0.4"
+    assert fake.calls[-1]["params"] == {"speed": 0.9, "sentence_pause": 0.5}
+    assert fake.calls[-1]["voice"] == "V1"
+    assert fake.calls[-1]["language"] == "en"
 
 
-def test_the_cache_key_includes_the_new_knobs(tmp_path, monkeypatch):
-    """Two renders of one line with different rhythm settings must not collide."""
+def test_the_cache_key_covers_everything_that_changes_the_audio(tmp_path, monkeypatch):
+    """A cached line is only valid for an identical request.
+
+    The engines are stochastic and the parameters are theirs, so the key spans
+    engine, voice, language, every parameter value and the exact text.
+    """
     monkeypatch.setattr(config, "DJ_CACHE_DIR", tmp_path)
-    a = dj._cache_path("line", "en_GB-alan-medium", 1.0, 0.667, 0.8, 0.25)
-    b = dj._cache_path("line", "en_GB-alan-medium", 1.0, 0.667, 0.5, 0.25)
-    c = dj._cache_path("line", "en_GB-alan-medium", 1.0, 0.667, 0.8, 0.5)
-    assert len({a.name, b.name, c.name}) == 3
+    same = dj._cache_path("line", "V1", "ru", {"speed": 1.0}, "engine-a")
+    assert dj._cache_path("line", "V1", "ru", {"speed": 1.0}, "engine-a") == same
+    variants = [
+        dj._cache_path("line", "V1", "ru", {"speed": 1.2}, "engine-a"),
+        dj._cache_path("line", "V1", "en", {"speed": 1.0}, "engine-a"),
+        dj._cache_path("line", "V2", "ru", {"speed": 1.0}, "engine-a"),
+        dj._cache_path("line", "V1", "ru", {"speed": 1.0}, "engine-b"),
+        dj._cache_path("other", "V1", "ru", {"speed": 1.0}, "engine-a"),
+    ]
+    assert same not in variants
+    assert len(set(variants)) == len(variants)
 
 
 def test_the_llm_answering_produces_a_prepared_script(monkeypatch):
@@ -277,7 +275,7 @@ def test_one_rule_set_per_language_not_two(monkeypatch):
     """
     _, system, user = _capture_llm_messages(
         monkeypatch, {"id": 1, "title": "МЫ РАЗБИВАЕМСЯ", "artist": "Zemfira"},
-        voice="ru_RU-irina-medium")
+        voice="M2", language="ru")
     assert "ПО-РУССКИ" in system
     for english_only in ("nineteen ninety-nine", "P!nk", "deadmau5"):
         assert english_only not in system, english_only
@@ -294,7 +292,7 @@ def test_russian_rules_still_demand_a_spoken_sentence(monkeypatch):
     """
     _, system, _ = _capture_llm_messages(
         monkeypatch, {"id": 1, "title": "T", "artist": "A"},
-        voice="ru_RU-irina-medium")
+        voice="M2", language="ru")
     assert "как список из каталога" in system
     assert "короткими фразами" in system
     assert "Не называй жанр" in system
@@ -325,52 +323,92 @@ def test_the_prompt_never_mentions_the_program(monkeypatch):
             f"{word!r} leaked into the DJ prompt")
 
 
-def test_a_missing_voice_is_named_and_stops_the_llm_call(monkeypatch, tmp_path, caplog):
-    """The silent-DJ trap: the configured voice has no model file.
+def test_a_voice_the_engine_dropped_falls_back_instead_of_going_silent(monkeypatch, caplog):
+    """A config carried over from a previous engine names a voice this one lacks.
 
-    Symptom on a host that pulled a newer default: the LLM still runs (GPU
-    spike), no DJ audio, and nothing in the UI. Now the reason is named in one
-    warning and the LLM call is skipped instead of being wasted.
+    Refusing to speak over that would leave the station silent while a perfectly
+    good voice is resolved for it — the card names the substitution instead.
     """
-    monkeypatch.setattr(config, "VOICES_DIR", tmp_path / "voices")   # empty
-    monkeypatch.setattr(dj, "piper_binary", lambda: "/usr/bin/piper")
+    import fake_tts
+
+    fake_tts.install(monkeypatch)          # V3 exists but is not installed
+    monkeypatch.setitem(config.DEFAULTS["dj"], "voice", "V3")
+    monkeypatch.setitem(config.DEFAULTS["dj"], "language", "en")
+    config.load_config(force=True)
+
+    assert dj.effective_voice() == "V1"    # the first installed voice
+    assert dj.tts_problem() is None
+
+    called: list[str] = []
+    monkeypatch.setattr(dj, "generate_script",
+                        lambda *a, **k: called.append("llm") or "a script")
+    monkeypatch.setattr(dj, "synthesize", lambda *a, **k: None)   # no ffmpeg here
+    with caplog.at_level("WARNING", logger="app.dj"):
+        dj.prepare_break({"id": 1, "artist": "A", "title": "T"})
+    assert called == ["llm"], "the fallback voice must be used, not refused"
+
+
+def test_a_service_with_no_installed_voice_keeps_the_dj_off(monkeypatch, caplog):
+    """This is the state that must stop the LLM call: nothing can speak at all."""
+    import fake_tts
+
+    fake_tts.install(monkeypatch, voices=[dict(v, installed=False)
+                                          for v in fake_tts.VOICES])
+    monkeypatch.setitem(config.DEFAULTS["dj"], "voice", "V3")
+    config.load_config(force=True)
     monkeypatch.setattr(dj, "_tts_warned", False)
 
-    problem = dj.tts_problem("en_GB-alan-medium")
-    assert problem and "en_GB-alan-medium" in problem, problem
-    assert "not installed" in problem
+    problem = dj.tts_problem()
+    assert problem and "installed" in problem, problem
 
     called: list[str] = []
     monkeypatch.setattr(dj, "generate_script",
                         lambda *a, **k: called.append("llm") or "a script")
     with caplog.at_level("WARNING", logger="app.dj"):
         assert dj.prepare_break({"id": 1, "artist": "A", "title": "T"}) is None
-    assert called == [], "no LLM call when the voice cannot speak"
+    assert called == [], "no LLM call when no voice can speak"
     assert any("DJ breaks are OFF" in r.getMessage() for r in caplog.records), (
         f"the reason must be logged once: {caplog.text}")
 
-    # ...and once the model appears, breaks work again (no sticky state).
-    (tmp_path / "voices").mkdir(exist_ok=True)
-    (tmp_path / "voices" / "en_GB-alan-medium.onnx").write_bytes(b"model")
-    monkeypatch.setattr(dj, "voice_model_path",
-                        lambda v=None: (tmp_path / "voices" / f"{v}.onnx"))
-    monkeypatch.setattr(dj, "synthesize", lambda *a, **k: tmp_path / "x.mp3")
-    monkeypatch.setattr(dj, "audio_duration", lambda p: 1.0)
-    monkeypatch.setattr(dj, "db", __import__("app.db", fromlist=["db"]))
-    assert dj.tts_problem("en_GB-alan-medium") is None
+
+def test_health_payload_names_the_voice_that_speaks(monkeypatch):
+    """The header line must not advertise a dead voice id as if it were live."""
+    import fake_tts
+
+    fake_tts.install(monkeypatch)                    # V1/V2 installed
+    monkeypatch.setitem(config.DEFAULTS["dj"], "voice", "V1")
+    monkeypatch.setitem(config.DEFAULTS["dj"], "language", "ru")
+    config.load_config(force=True)
+    health = dj.tts_health()
+    assert health["ok"] is True
+    assert health["voice"] == "V1"                   # effective
+    assert health["language"] == "ru"
+    assert health["configured_voice"] == "V1"
+    assert "V1" in health["voices_available"]
 
 
-def test_health_payload_carries_the_reason(monkeypatch, tmp_path):
-    monkeypatch.setattr(config, "VOICES_DIR", tmp_path / "voices")
-    monkeypatch.setattr(dj, "piper_binary", lambda: "/usr/bin/piper")
+def test_health_payload_carries_the_reason(monkeypatch):
+    """An unreachable service is reported as the reason, not as a missing file."""
+    from app import tts_client
+
+    monkeypatch.setattr(tts_client, "problem",
+                        lambda: "TTS service unreachable at http://tts:9000")
+    monkeypatch.setattr(tts_client, "health", lambda: {"ok": False})
+    monkeypatch.setattr(tts_client, "capabilities", lambda force=False: None)
+    monkeypatch.setattr(tts_client, "installed_voice_ids", lambda: [])
+    monkeypatch.setattr(tts_client, "base_url", lambda: "http://tts:9000")
+    monkeypatch.setattr(tts_client, "resolve_params", lambda *a, **k: {})
+
     health = dj.tts_health()
     assert health["ok"] is False
-    assert "en_GB-alan-medium" in health["problem"]
+    assert "unreachable" in health["problem"]
     assert health["voices_available"] == []
+    assert health["base_url"] == "http://tts:9000"
 
 
-def test_the_default_voice_is_the_measured_one():
-    """alan-medium moves its pitch ~19 semitones; amy-medium measured ~7."""
-    assert config.DEFAULTS["dj"]["voice"] == "en_GB-alan-medium"
-    assert config.DEFAULTS["dj"]["noise_w"] == 0.8
-    assert config.DEFAULTS["dj"]["sentence_silence"] == 0.25
+def test_the_default_voice_and_language_are_the_station_owners_pick():
+    """M2 is the measured best Russian style and it speaks English too."""
+    dj_defaults = config.DEFAULTS["dj"]
+    assert dj_defaults["voice"] == "M2"
+    assert dj_defaults["language"] == "ru"
+    assert set(dj_defaults["tts_params"]) == {"speed", "sentence_pause"}

@@ -46,24 +46,27 @@ def main() -> None:
     if not skip_voice_download:
         _ensure_voices()
 
-    # Say plainly whether the DJ can speak at all. A missing voice model means
-    # Piper has nothing to say with: the breaks are dropped and no more LLM calls
-    # are made for them, so the station looks healthy while you hear no DJ.
+    # Say plainly whether the DJ can speak at all. "Not ready" now means the TTS
+    # service (a separate container) is unreachable, still loading its model, or
+    # has no voice installed — in every case the breaks are dropped and no more
+    # LLM calls are made for them, so the station looks healthy while you hear
+    # no DJ.
     try:
         from . import dj as _dj
         problem = _dj.tts_problem()
         if problem:
             log.warning(
                 "DJ voice not ready: %s%s. Music still plays; the DJ stays "
-                "silent. Fix it by picking an installed voice in the web UI's DJ "
-                "card, running `python -m app.voices` to fetch %s, or unsetting "
-                "VDJ_NO_VOICE_DOWNLOAD so it downloads on boot.",
+                "silent. Check the tts container (VDJ_TTS_URL / tts.base_url), "
+                "or run `python -m app.voices` to install voice %s there.",
                 problem,
-                " (downloads are DISABLED by VDJ_NO_VOICE_DOWNLOAD)"
+                " (installs are DISABLED by VDJ_NO_VOICE_DOWNLOAD)"
                 if skip_voice_download else "",
-                config.get("dj.voice", "en_GB-alan-medium"))
+                config.get("dj.voice"))
         else:
-            log.info("DJ voice ready: %s", config.get("dj.voice"))
+            log.info("DJ voice ready: %s (%s), engine %s",
+                     _dj.effective_voice(), _dj.language_for(),
+                     (_dj.tts_health().get("engine") or {}).get("name", "?"))
     except Exception as exc:  # noqa: BLE001 - never block boot on a check
         log.debug("could not check the DJ voice: %s", exc)
 

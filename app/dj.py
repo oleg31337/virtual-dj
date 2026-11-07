@@ -1,20 +1,22 @@
 """The DJ brain: turns track metadata into a spoken intro.
 
 Pipeline per track:
-    metadata (+ enrichment facts) -> LLM script -> Piper TTS -> mp3 segment
+    metadata (+ enrichment facts) -> LLM script -> TTS service -> mp3 segment
 
 Both stages degrade gracefully: with no LLM we fall back to a templated line,
-and if TTS fails the stream simply skips the DJ break rather than stalling.
+and if the TTS service fails the stream simply skips the DJ break rather than
+stalling. Speech synthesis itself lives in the separate ``tts`` container; this
+module owns the words and the audio mastering, never an engine.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 from pathlib import Path
@@ -22,7 +24,7 @@ from typing import Any
 
 import httpx
 
-from . import config, db, enrich, voices
+from . import config, db, enrich, ru_numbers, tts_client
 
 log = logging.getLogger(__name__)
 
@@ -189,7 +191,7 @@ def _transliterate_cyrillic(text: str) -> str:
     Non-Cyrillic characters (Latin words, digits, punctuation, spaces) pass
     through unchanged, so an English intro containing a Russian name keeps its
     English and only the name is converted. The result contains only ASCII,
-    which Piper handles cleanly.
+    which every engine handles cleanly — an English voice cannot read Cyrillic.
 
     ``е`` is rendered ``ye`` at the start of a word or after a vowel / soft or
     hard sign (its Russian "y+e" onset); elsewhere it is a plain ``e``.
@@ -291,55 +293,69 @@ RUSSIAN_RULES = (
 )
 
 
-def piper_binary() -> str | None:
-    """Locate the piper executable (venv bin first, then PATH)."""
-    candidate = Path(sys.executable).parent / "piper"
-    if candidate.exists():
-        return str(candidate)
-    return shutil.which("piper")
+def effective_voice(voice: str | None = None) -> str:
+    """The voice that will actually speak: the request, else a usable default.
 
-
-def voice_model_path(voice: str | None = None) -> Path | None:
-    """Path to the voice's model, or ``None`` when the voice is not usable.
-
-    Delegates to :mod:`app.voices` so the "installed" test has one definition:
-    a model counts only together with its ``.onnx.json`` sidecar, which piper
-    needs to load it.
+    A voice only counts when the TTS service reports it *installed* — an id the
+    engine merely lists cannot speak, and returning it would make `tts_problem()`
+    report a problem for a station that has a perfectly good voice. Otherwise the
+    service's resolution wins (see ``tts_client.default_voice``): a config
+    carried over from a previous engine therefore lands on the station's own pick
+    instead of leaving the DJ silent.
     """
-    return voices.voice_model_path(voice)
+    wanted = (voice or config.get("dj.voice") or "").strip()
+    if wanted and wanted in tts_client.installed_voice_ids():
+        return wanted
+    fallback = tts_client.default_voice()
+    if wanted and wanted != fallback:
+        log.debug("voice %r is not installed on the TTS service; using %r",
+                  wanted, fallback)
+    return fallback
+
+
+def language_for(voice: str | None = None,
+                 language: str | None = None) -> str:
+    """The DJ's language as a code (``en``/``ru``).
+
+    The language is no longer a property of the voice id: an engine may speak ten
+    styles across many languages, so the choice is explicit (``dj.language``) and
+    validated against the selected voice's declared languages — an English-only
+    voice cannot be asked to speak Russian, so the answer falls back to what the
+    voice actually supports.
+
+    When the TTS service cannot be reached there are no declared languages to
+    validate against; a legacy Piper-shaped voice id (``ru_RU-*``) then supplies
+    the last hint, so text shaping stays sane during an outage.
+    """
+    voice_id = effective_voice(voice)
+    entry = tts_client.voice(voice_id)
+    hint = language if language is not None else str(config.get("dj.language") or "")
+    if entry is not None:
+        return tts_client.resolve_language(entry, hint)
+    if hint:
+        return hint.strip().lower()
+    legacy = (voice_id or voice or "").lower()
+    return "ru" if legacy.startswith(("ru_", "ru-")) else "en"
+
+
+def voice_catalogue() -> list[dict[str, Any]]:
+    """The voice catalogue, as the TTS service declares it.
+
+    Nothing about voices is hardcoded in the app any more: whatever the running
+    engine offers (ids, names, genders, languages, install state) is what the DJ
+    card shows.
+    """
+    return tts_client.voices()
 
 
 def available_voices() -> list[str]:
-    """Installed voice ids — models that also have their ``.onnx.json``.
-
-    The web UI's voice picker and ``tts_problem()`` both read this, so a model
-    whose sidecar never landed is reported as missing instead of being offered
-    and then failing to speak.
-    """
-    voices_dir = config.voices_dir()
-    if not voices_dir.is_dir():
-        return []
-    return sorted(
-        p.stem for p in voices_dir.glob("*.onnx")
-        if p.with_name(p.name + ".json").exists()
-    )
+    """Ids of voices that can speak right now."""
+    return tts_client.installed_voice_ids()
 
 
-def voice_language(voice_id: str | None) -> str:
-    """Language bucket of a voice id: ``"russian"`` or ``"english"``.
-
-    Per-song language detection was removed; the DJ's language is now a
-    property of the chosen voice. Curated ids resolve via ``VOICE_PROFILES``;
-    any other installed ``ru_RU-*``/``ru-*`` voice counts as Russian, all else
-    English.
-    """
-    vid = (voice_id or "").strip()
-    if not vid:
-        return "english"
-    for p in VOICE_PROFILES:
-        if p["id"] == vid:
-            return p.get("lang") or "english"
-    return "russian" if vid.lower().startswith(("ru_", "ru-")) else "english"
+def params_schema() -> list[dict[str, Any]]:
+    """Synthesis parameters the engine declares (rendered by the DJ card)."""
+    return tts_client.params()
 
 
 def _clean_script(text: str, max_sentences: int,
@@ -352,13 +368,16 @@ def _clean_script(text: str, max_sentences: int,
         return ""
     sentences = [s for s in _SENT_SPLIT.split(text) if s.strip()]
     text = " ".join(sentences[: max(1, max_sentences)]).strip()
-    # Years must be spelled out so an English TTS reads them as dates, not a
-    # string of numerals. Russian-track text is left as-is (digits) because the
-    # Russian voice reads year numerals natively.
-    if language == "russian":
+    if (language or "en") == "ru":
         # Whatever accent character the model wrote becomes the combining acute
-        # espeak obeys, attached to the right vowel (see _normalize_stress_marks).
+        # an espeak-based engine obeys, attached to the right vowel (see
+        # _normalize_stress_marks); an engine without stress support gets it
+        # stripped later, on the audio path.
         text = _normalize_stress_marks(text)
+        # Russian numerals must be words: the neural voice invents numbers when
+        # it has to read digits ("в 1989 году" came out as 979/1089/1972 in
+        # different takes), and the spelled year was correct every single time.
+        text = ru_numbers.spell_numbers_ru(text)
     else:
         text = _strip_stress_marks(text)
         text = _spell_dates(text)
@@ -372,20 +391,16 @@ def prepare_script(text: str, voice: str | None = None,
 
     Called for LLM output (via ``generate_script``) and for text handed straight
     to ``/api/dj/preview``, so the text a user sees is the text the voice is
-    given: years spelled out, and Russian stress marks rewritten into the
-    character espeak-ng actually obeys. Deliberately does NOT transliterate —
-    Cyrillic stays Cyrillic on screen.
+    given: years and numbers written as words, and Russian stress marks
+    rewritten into the character espeak-ng obeys. Deliberately does NOT
+    transliterate — Cyrillic stays Cyrillic on screen.
 
     ``language`` is the language already resolved by the caller. When it is not
-    given, the language is derived the same way :func:`generate_script` derives
-    it — from the voice id, or from the CONFIGURED ``dj.voice`` when the caller
-    passes none (the on-air path never repeats the voice id down the call
-    chain). Without that fallback a Russian script would be cleaned on the
-    ENGLISH branch: stress marks stripped, years spelled as English words.
+    given, it comes from ``dj.language`` validated against the selected voice —
+    the on-air path never repeats it down the call chain.
     """
-    return _clean_script(
-        text, max_sentences,
-        language=language or voice_language(voice or config.get("dj.voice")))
+    return _clean_script(text, max_sentences,
+                         language=language or language_for(voice))
 
 
 def fallback_script(track: dict[str, Any],
@@ -402,23 +417,23 @@ def fallback_script(track: dict[str, Any],
     title = (track.get("title") or "").strip() or "this next one"
     year = (track.get("year") or "").strip()
     base = ""
-    if language == "russian":
+    if (language or "en") == "ru":
         if artist and year:
             base = f"Далее в эфире: {title}, в исполнении {artist}, {year} года."
         elif artist:
             base = f"А сейчас — {title}, {artist}."
         else:
             base = f"Далее — {title}."
-        # Leave years/dates as digits (the Russian voice reads them natively).
-        return base
-    # English (default) fallback path.
-    if artist and year:
-        base = f"Coming up next: {title}, by {artist}, from {year}."
-    elif artist:
-        base = f"Here's {title}, by {artist}."
     else:
-        base = f"Up next, {title}."
-    return _spell_dates(base)
+        if artist and year:
+            base = f"Coming up next: {title}, by {artist}, from {year}."
+        elif artist:
+            base = f"Here's {title}, by {artist}."
+        else:
+            base = f"Up next, {title}."
+    # Same final shaping as an LLM line, so the template reads (and sounds like)
+    # the same thing: years as words, stress marks in the form the engine wants.
+    return _clean_script(base, 99, language=language or "en")
 
 
 # Metadata that is a placeholder rather than a value: a ripper (or a failed
@@ -584,12 +599,13 @@ def _ask_llm(system_prompt: str, user_prompt: str) -> str:
 
 
 def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = None,
-                    voice: str | None = None) -> str:
+                    voice: str | None = None,
+                    language: str | None = None) -> str:
     """Ask the local LLM for an on-air intro; fall back to a template.
 
-    The DJ's language follows the voice that will speak the line: pass
-    ``voice`` (or leave None for the configured ``dj.voice``) and the script is
-    generated in that voice's language (Russian voices -> Russian script).
+    The DJ's language follows the configured language + the chosen voice: pass
+    ``language`` (or leave None for ``dj.language`` resolved against the voice)
+    and the script is generated in that language.
 
     The *program* a track belongs to is never part of the prompt. It used to be:
     a track that opened a themed block told the model to welcome listeners into
@@ -606,8 +622,8 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
     except Exception as exc:
         log.debug("enrichment failed: %s", exc)
 
-    language = voice_language(voice or config.get("dj.voice"))
-    is_russian = language == "russian"
+    language = language or language_for(voice)
+    is_russian = language == "ru"
 
     if not config.get("llm.enabled", True):
         return fallback_script(track, language=language)
@@ -663,98 +679,90 @@ def generate_script(track: dict[str, Any], previous: dict[str, Any] | None = Non
     return fallback_script(track, language=language)
 
 
-def _cache_path(text: str, voice: str, speed: float, noise_scale: float,
-                noise_w: float = 0.8, sentence_silence: float = 0.0) -> Path:
+def _cache_path(text: str, voice: str, language: str,
+                params: dict[str, Any], engine: str) -> Path:
+    """Where a render is cached.
+
+    The key covers everything that changes the audio — engine, voice, language,
+    every parameter value and the exact text (already number-spelled) — because
+    the engines are stochastic: two runs of the same request differ, so a hit is
+    only valid for an identical request.
+    """
     digest = hashlib.sha256(
-        f"{voice}|{speed}|{noise_scale}|{noise_w}|{sentence_silence}|{text}"
+        f"{engine}|{voice}|{language}|"
+        f"{json.dumps(params, sort_keys=True, default=str)}|{text}"
         .encode("utf-8")
     ).hexdigest()[:32]
     return config.DJ_CACHE_DIR / f"{digest}.mp3"
 
 
-def synthesize(text: str, voice: str | None = None,
-               speed: float | None = None,
-               noise_scale: float | None = None,
-               noise_w: float | None = None,
-               sentence_silence: float | None = None) -> Path | None:
-    """Render ``text`` to an mp3 with Piper. Returns None on failure.
+def _shape_for_engine(text: str, language: str,
+                      stress_marks: bool) -> str:
+    """Text shaping that depends on what the engine understands.
 
-    The voice (``voice`` or the configured ``dj.voice``) determines the
-    language: a Russian voice speaks Cyrillic natively (no transliteration, no
-    year->words), everything else is treated as English text for the English
-    voices and gets the Cyrillic -> Latin transliteration so the voice can read
-    Russian names.
+    * Russian: stress marks are the espeak convention — an engine without that
+      notion would speak the mark as a glyph, so it is stripped for those; and
+      numbers are written out (see app.ru_numbers) because a neural voice
+      invents them when it reads digits.
+    * English: years become words ("nineteen eighty-four") and Cyrillic names
+      are transliterated, because an English voice cannot read Cyrillic.
+    """
+    if language == "ru":
+        text = _normalize_stress_marks(text) if stress_marks \
+            else _strip_stress_marks(text)
+        return ru_numbers.spell_numbers_ru(text)
+    text = _strip_stress_marks(text)
+    text = _spell_dates(text)
+    return _transliterate_cyrillic(text)
+
+
+def synthesize(text: str, voice: str | None = None,
+               language: str | None = None,
+               params: dict[str, Any] | None = None) -> Path | None:
+    """Render ``text`` to the mp3 the stream plays. Returns None on failure.
+
+    Speech comes from the standalone TTS service (``app.tts_client``); this
+    function owns the two things that are the station's own: what the text must
+    look like before it is spoken, and how the audio is mastered (loudnorm +
+    gain + mp3 at the stream's format) so a DJ break sits level with the music.
     """
     text = (text or "").strip()
     if not text:
         return None
-    voice = voice or config.get("dj.voice", "en_GB-alan-medium")
-    language = voice_language(voice)
-    # English voices mis-read bare numerals as digits, so years are spelled out
-    # as words. The Russian voice, however, reads year numerals natively, so we
-    # leave Russian-text dates exactly as written (digits).
-    if language != "russian":
-        text = _spell_dates(text)
-    # Russian (Cyrillic) names cannot be spoken by the English voices — render
-    # them as a Latin spelling the voice reads with roughly Russian pronunciation
-    # (on-screen dj_text stays Cyrillic; this only affects the audio). The
-    # Russian voice reads Cyrillic directly, so it is skipped for Russian.
-    if language == "russian":
-        text = _normalize_stress_marks(text)
-    else:
-        text = _strip_stress_marks(text)
-        text = _transliterate_cyrillic(text)
+    voice = effective_voice(voice)
+    caps = tts_client.capabilities() or {}
+    entry = tts_client.voice(voice)
+    if entry is None:
+        log.warning("the TTS service offers no voice %r", voice)
+        return None
+    if not entry.get("installed"):
+        log.warning("voice %r is not installed on the TTS service", voice)
+        return None
+    lang = language_for(voice, language)
+    stress_marks = bool((caps.get("text") or {}).get("stress_marks"))
+    engine_id = str((caps.get("engine") or {}).get("id") or "")
 
-    speed = float(speed if speed is not None else config.get("dj.speed", 1.0))
-    speed = max(0.5, min(speed, 2.0))
-    noise_scale = float(noise_scale if noise_scale is not None
-                        else config.get("dj.noise_scale", 0.667))
-    noise_scale = max(0.1, min(noise_scale, 2.0))
-    noise_w = float(noise_w if noise_w is not None
-                    else config.get("dj.noise_w", 0.8))
-    noise_w = max(0.0, min(noise_w, 2.0))
-    sentence_silence = float(
-        sentence_silence if sentence_silence is not None
-        else config.get("dj.sentence_silence", 0.25))
-    sentence_silence = max(0.0, min(sentence_silence, 2.0))
-    out_path = _cache_path(text, voice, speed, noise_scale, noise_w,
-                           sentence_silence)
+    text = _shape_for_engine(text, lang, stress_marks)
+    resolved = tts_client.resolve_params(params)
+    out_path = _cache_path(text, voice, lang, resolved, engine_id)
     if out_path.exists() and out_path.stat().st_size > 0:
         return out_path
 
-    binary = piper_binary()
-    model = voice_model_path(voice)
-    if not binary or not model:
-        log.warning("piper unavailable (binary=%s, model=%s)", binary, model)
+    try:
+        wav_bytes, meta = tts_client.speech(text, voice, lang, resolved)
+    except tts_client.TTSError as exc:
+        log.error("TTS service could not render the line: %s", exc)
         return None
+    if not wav_bytes:
+        log.error("TTS service returned empty audio")
+        return None
+    if (meta.get("params_ignored") or "[]") not in ("[]", ""):
+        log.debug("engine ignored parameters: %s", meta.get("params_ignored"))
 
     config.DJ_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory() as tmpdir:
         wav_path = Path(tmpdir) / "dj.wav"
-        # Piper's length_scale is inverse to speed.
-        length_scale = round(1.0 / speed, 4)
-        cmd = [binary, "-m", str(model), "-f", str(wav_path),
-               "--length_scale", str(length_scale),
-               "--noise_scale", str(round(noise_scale, 4)),
-               # Phoneme-width (rhythm) jitter and the silence after each
-               # sentence. The model's own punctuation pauses only reach
-               # 0.10-0.26 s; without this the DJ sounds rushed.
-               "--noise_w_scale", str(round(noise_w, 4)),
-               "--sentence_silence", str(round(sentence_silence, 3))]
-
-        try:
-            proc = subprocess.run(
-                cmd, input=text.encode("utf-8"),
-                capture_output=True, timeout=180, check=False,
-            )
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            log.error("piper invocation failed: %s", exc)
-            return None
-        if proc.returncode != 0 or not wav_path.exists():
-            log.error("piper failed rc=%s: %s", proc.returncode,
-                      proc.stderr.decode("utf-8", "replace")[:400])
-            return None
-
+        wav_path.write_bytes(wav_bytes)
         gain_db = float(config.get("dj.gain_db", 0.0))
         filters = ["loudnorm=I=-16:TP=-1.5:LRA=11"]
         if abs(gain_db) > 0.01:
@@ -775,6 +783,8 @@ def synthesize(text: str, voice: str | None = None,
                       ff.stderr.decode("utf-8", "replace")[:400])
             return None
         shutil.move(str(tmp_mp3), str(out_path))
+    log.info("DJ line rendered: %s (%s, %.2fs audio, %s ms)",
+             voice, lang, meta.get("duration") or 0.0, meta.get("render_ms"))
     return out_path
 
 
@@ -793,9 +803,9 @@ def audio_duration(path: Path) -> float:
 def prepare_break(track: dict[str, Any],
                   previous: dict[str, Any] | None = None) -> dict[str, Any] | None:
     """Generate script + audio for one DJ break. Returns None if unavailable."""
-    # Check the voice BEFORE the LLM call: without a model Piper cannot speak,
-    # so generating a script only burns the (GPU-backed) LLM and then drops the
-    # break silently. One clear warning, then stay quiet until it is fixed.
+    # Check the voice BEFORE the LLM call: without it the TTS service cannot
+    # speak, so generating a script only burns the (GPU-backed) LLM and then
+    # drops the break silently. One clear warning, then stay quiet until fixed.
     global _tts_warned
     problem = tts_problem()
     if problem:
@@ -803,10 +813,10 @@ def prepare_break(track: dict[str, Any],
             _tts_warned = True
             log.warning(
                 "DJ breaks are OFF: %s. The station keeps playing music. Fix it "
-                "in the web UI's DJ card (pick a voice marked installed), or run "
-                "`python -m app.voices` to fetch %s, or unset "
-                "VDJ_NO_VOICE_DOWNLOAD so it downloads on boot.",
-                problem, config.get("dj.voice", "en_GB-alan-medium"))
+                "in the web UI's DJ card (pick a voice marked installed, or "
+                "install one), or run `python -m app.voices --list` to see what "
+                "the TTS service offers (configured voice: %s).",
+                problem, config.get("dj.voice", ""))
         return None
     _tts_warned = False
     script = generate_script(track, previous)
@@ -910,201 +920,56 @@ def tts_problem(voice: str | None = None) -> str | None:
 
     Single source of truth for "is the voice usable", so the boot log, the
     health payload, the web UI and ``prepare_break`` all describe the same
-    state. The DAILY trap this exists for: the configured ``dj.voice`` changed
-    (or the volume has a different model) and nothing plays the breaks any more —
-    the LLM is still called, so the station looks alive while you hear no DJ.
+    state. The answer now comes from the TTS service (unreachable, model not
+    loaded, no voice installed, configured voice missing) rather than from a
+    model file on local disk — the app owns no speech engine any more.
     """
-    vid = voice or config.get("dj.voice", "en_GB-alan-medium")
-    if not piper_binary():
-        return "the piper binary is missing from this deployment"
-    if voice_model_path(vid) is None:
-        installed = ", ".join(available_voices()) or "none"
-        return f"the voice model for {vid!r} is not installed (have: {installed})"
-    return None
+    problem = tts_client.problem()
+    if problem:
+        return problem
+    # Judge the voice that will actually speak (see tts_client.problem): a dead
+    # id from a previous engine must not silence a station that has a usable one.
+    available = tts_client.installed_voice_ids()
+    wanted = voice or config.get("dj.voice")
+    effective = effective_voice(wanted)
+    if effective and effective in available:
+        return None
+    installed = ", ".join(available) or "none"
+    return (f"the configured voice {wanted!r} is not installed "
+            f"(have: {installed})")
 
 
 def tts_health() -> dict[str, Any]:
+    """What the DJ card and ``/api/health`` show about speech."""
     problem = tts_problem()
+    service = tts_client.health()
+    caps = tts_client.capabilities() or {}
     return {
         "ok": problem is None,
         "problem": problem,
-        "binary": piper_binary(),
-        "voice": config.get("dj.voice"),
-        "voices_available": available_voices(),
+        "service": service,
+        "engine": caps.get("engine"),
+        "binary": None,  # kept for older clients/GUI: there is no local binary
+        # The voice/language that will actually speak, plus the raw setting so
+        # the UI can explain a substitution instead of showing a dead id as if
+        # it were live.
+        "voice": effective_voice(),
+        "configured_voice": config.get("dj.voice"),
+        "language": language_for(),
+        "params": tts_client.resolve_params(),
+        "voices_available": tts_client.installed_voice_ids(),
+        "base_url": tts_client.base_url(),
     }
 
 
 __all__ = [
     "generate_script", "synthesize", "prepare_break", "fallback_script",
-    "available_voices", "voice_profiles", "voice_language", "llm_health",
-    "tts_health", "audio_duration", "_spell_dates",
+    "available_voices", "voice_catalogue", "language_for", "effective_voice",
+    "params_schema", "llm_health", "tts_health", "tts_problem",
+    "audio_duration", "_spell_dates",
 ]
 
-# Human-readable descriptions of the bundled voices, with notes from community
-# feedback about which read most naturally. The DJ picker in the web UI shows
-# these so you can pick a voice by character, not just by a model filename.
-# ``lang`` marks the voice's language: the DJ speaks the language of the
-# *chosen* voice (English voices -> English breaks, Russian voices -> Russian
-# breaks). The web UI shows all voices in one picker.
-VOICE_PROFILES: list[dict[str, str]] = [
-    {
-        "id": "en_GB-alan-medium",
-        "name": "UK Alan",
-        "gender": "male",
-        "lang": "english",
-        "note": "British male voice; clean and measured for a UK-leaning station.",
-    },
-    {
-        "id": "en_GB-jenny_dioco-medium",
-        "name": "UK Jenny Dioco",
-        "gender": "female",
-        "lang": "english",
-        "note": "British female voice; bright and friendly.",
-    },
-    {
-        "id": "en_GB-southern_english_female-low",
-        "name": "UK Southern English",
-        "gender": "female",
-        "lang": "english",
-        "note": "British female voice with a gentle southern-English tone; lighter model.",
-    },
-    {
-        "id": "en_US-amy-medium",
-        "name": "US Amy",
-        "gender": "female",
-        "lang": "english",
-        "note": "Default. Clear and neutral; good all-rounder but the most "
-                "'robotic' of the set on long intros.",
-    },
-    {
-        "id": "en_US-bryce-medium",
-        "name": "US Bryce",
-        "gender": "male",
-        "lang": "english",
-        "note": "Deeper male voice; pairs well with a late-night radio persona.",
-    },
-    {
-        "id": "en_US-hfc_female-medium",
-        "name": "US HFC Female",
-        "gender": "female",
-        "lang": "english",
-        "note": "High-fidelity female voice; crisp, broadcast-style delivery.",
-    },
-    {
-        "id": "en_US-hfc_male-medium",
-        "name": "US HFC Male",
-        "gender": "male",
-        "lang": "english",
-        "note": "High-fidelity male voice; crisp, broadcast-style delivery.",
-    },
-    {
-        "id": "en_US-lessac-high",
-        "name": "US Lessac",
-        "gender": "female",
-        "lang": "english",
-        "note": "Warmest, most natural intonation per community feedback; the "
-                "usual upgrade pick. Occasionally over-pauses between phrases.",
-    },
-    {
-        "id": "en_US-libritts_r-medium",
-        "name": "US LibriTTS-R",
-        "gender": "female",
-        "lang": "english",
-        "note": "Broadest tonal range and most expressive prosody of the "
-                "English set; great for lively, varied delivery.",
-    },
-    {
-        "id": "en_US-norman-medium",
-        "name": "US Norman",
-        "gender": "male",
-        "lang": "english",
-        "note": "Natural male voice with a steady, announcer-like cadence.",
-    },
-    {
-        "id": "en_US-ryan-high",
-        "name": "US Ryan",
-        "gender": "male",
-        "lang": "english",
-        "note": "High-quality Ryan; brighter, more detailed male timbre; the "
-                "go-to male option for a different timbre from the women.",
-    },
-    {
-        "id": "en_US-sam-medium",
-        "name": "US Sam",
-        "gender": "male",
-        "lang": "english",
-        "note": "Warm male voice; good neutral alternative to the female leads.",
-    },
-    {
-        "id": "ru_RU-irina-medium",
-        "name": "Irina",
-        "gender": "female",
-        "lang": "russian",
-        "note": "Russian voice. Selecting it makes the DJ speak Russian "
-                "(native Cyrillic, no transliteration).",
-    },
-    {
-        "id": "ru_RU-denis-medium",
-        "name": "Denis",
-        "gender": "male",
-        "lang": "russian",
-        "note": "Russian voice (male). Selecting it makes the DJ speak Russian.",
-    },
-    {
-        "id": "ru_RU-dmitri-medium",
-        "name": "Dmitri",
-        "gender": "male",
-        "lang": "russian",
-        "note": "Russian voice (male). Selecting it makes the DJ speak Russian.",
-    },
-    {
-        "id": "ru_RU-ruslan-medium",
-        "name": "Ruslan",
-        "gender": "male",
-        "lang": "russian",
-        "note": "Russian voice (male). Selecting it makes the DJ speak Russian.",
-    },
-]
-
-
-def voice_profiles(lang: str | None = None) -> list[dict[str, str]]:
-    """Voice catalogue (id, name, gender, lang, intonation note) for the UI.
-
-    ``lang`` optionally filters to one language; without it the full catalogue
-    (English + Russian voices together) is returned for the single picker.
-    """
-    installed = set(available_voices())
-    known = {p["id"] for p in VOICE_PROFILES}
-    profiles = []
-    for p in VOICE_PROFILES:
-        if lang and p.get("lang") != lang:
-            continue
-        entry = dict(p)
-        entry["installed"] = p["id"] in installed
-        profiles.append(entry)
-    # Include any installed voice not in the curated list (e.g. user-added or a
-    # leftover from an earlier catalogue). Humanize the label the same way the
-    # curated entries are named: a US/UK prefix and no quality suffix, so the
-    # picker never shows a raw model filename like en_US-lessac-medium.
-    for v in available_voices():
-        if v not in known and (lang is None or voice_language(v) == lang):
-            profiles.append({
-                "id": v, "name": _humanize_voice_name(v), "gender": "?",
-                "lang": voice_language(v), "note": "", "installed": True,
-            })
-    return profiles
-
-
-def _humanize_voice_name(voice_id: str) -> str:
-    """Turn a Piper voice id into a display label (US/UK prefix, no quality).
-
-    ``en_US-amy-medium`` -> ``US Amy``; ``en_GB-jenny_dioco-medium`` ->
-    ``UK Jenny Dioco``; an unknown shape is returned unchanged.
-    """
-    parts = voice_id.split("-")
-    if len(parts) != 3:
-        return voice_id
-    country, name, _quality = parts
-    region = "UK" if country == "en_GB" else "US" if country == "en_US" else country
-    pretty = name.replace("_", " ").title()
-    return f"{region} {pretty}"
+# There is deliberately no voice catalogue in this file any more. Voices,
+# languages and synthesis parameters are whatever the TTS service declares in
+# GET /v1/capabilities (see app/tts_client.py), so a new engine needs no change
+# here — the DJ card renders the service's own answer.

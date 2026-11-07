@@ -499,24 +499,7 @@ async function loadConfig() {
   const enabledInput = $('icecast-enabled');
   if (enabledInput) enabledInput.checked = !!ice.enabled;
 
-  const voices = await api('/api/dj/voices');
-  const profiles = voices.profiles || [];
-  $('dj-voice').innerHTML = profiles.length
-    ? profiles.map((p) =>
-        `<option value="${esc(p.id)}"${p.id === voices.current ? ' selected' : ''}>${esc(p.name)} (${esc(p.gender)})${p.lang === 'russian' ? ' · Russian' : ''}${p.installed ? '' : ' — not installed'}</option>`).join('')
-    : (voices.voices.length
-        ? voices.voices.map((v) => `<option${v === voices.current ? ' selected' : ''}>${esc(v)}</option>`).join('')
-        : '<option>no voices installed</option>');
-  // Show the intonation note for the selected voice.
-  const sel = profiles.find((p) => p.id === $('dj-voice').value) || profiles[0];
-  if (sel && sel.installed === false) {
-    // The configured voice has no model file: say so here, where the fix is.
-    $('dj-voice-note').textContent =
-      `⚠ ${sel.name} is not installed yet — the DJ cannot speak with it. `
-      + 'Pick a voice marked installed, or press “Test this voice” to download it.';
-  } else {
-    $('dj-voice-note').textContent = sel && sel.note ? sel.note : '';
-  }
+  await loadTtsCard();
 
   // Program grouping settings. The five RULES (limit, max-consecutive,
   // min-size, artist-gap, repeat-window) are owned by loadPrograms(), which
@@ -531,18 +514,6 @@ async function loadConfig() {
   $('silence-db').value = cfg.playback?.silence_db ?? -50;
   $('listener-poll').value = cfg.playback?.listener_poll_s ?? 5;
   $('program-strategy-sel').value = cfg.playback?.program?.strategy ?? 'genre';
-  // Voice + prosody controls.
-  $('dj-speed').value = Math.round((cfg.dj?.speed ?? 1.0) * 100);
-  $('speed-val').textContent = ((cfg.dj?.speed ?? 1.0)).toFixed(2);
-  $('dj-noise-w').value = Math.round((cfg.dj?.noise_w ?? 0.8) * 1000);
-  $('noisew-val').textContent = (Number($('dj-noise-w').value) / 1000).toFixed(2);
-  $('dj-sentence-silence').value = Math.round((cfg.dj?.sentence_silence ?? 0.25) * 100);
-  $('pause-val').textContent = (Number($('dj-sentence-silence').value) / 100).toFixed(2);
-  const ns = cfg.dj?.noise_scale ?? 0.667;
-  // Per-mille, so the 0.667 default round-trips exactly (per-cent turned it
-  // into 0.67 on every save).
-  $('dj-noise').value = Math.round(ns * 1000);
-  $('expr-val').textContent = ns.toFixed(2);
 
   // Volume normalization card (the running pass reports through
   // pollLoudness; only the settings are populated here so a live update
@@ -555,6 +526,174 @@ async function loadConfig() {
   $('loudness-min').value = lo.min_gain_db ?? -12;
   $('loudness-window').value = lo.window_seconds ?? 120;
   $('loudness-workers').value = lo.workers ?? 2;
+}
+
+// --- DJ card: speech settings are declared by the TTS service --------------
+// The app owns no voice catalogue and no synthesis knobs of its own. It asks
+// the service what it can do (GET /api/dj/tts) and renders exactly that: the
+// voice list, each voice's languages, and one control per declared parameter
+// (label, range, step, unit and help text all come from the service). Swapping
+// the engine server-side changes this card with no frontend change.
+state.tts = null;
+
+function ttsParamFallback(p) {
+  if (p.default !== undefined) return p.default;
+  if (p.type === 'bool') return false;
+  if (p.type === 'enum') {
+    const first = (p.choices || [])[0];
+    return first && typeof first === 'object' ? first.value : (first ?? '');
+  }
+  return p.min ?? 0;
+}
+
+function ttsDecimals(step) {
+  const text = String(step ?? '');
+  return text.includes('.') ? text.split('.')[1].length : 0;
+}
+
+function renderTtsParams(tts, values) {
+  const host = $('tts-params');
+  if (!host) return;
+  const params = tts.params || [];
+  if (!params.length) {
+    host.innerHTML = '<div class="dim">This engine exposes no synthesis controls.</div>';
+    return;
+  }
+  host.innerHTML = params.map((p) => {
+    const id = `tts-param-${p.key}`;
+    const label = esc(p.label || p.key);
+    const help = p.help ? `<span class="dim">(${esc(p.help)})</span>` : '';
+    const value = values && values[p.key] !== undefined
+      ? values[p.key] : ttsParamFallback(p);
+    if (p.type === 'enum') {
+      const opts = (p.choices || []).map((c) => {
+        const v = c && typeof c === 'object' ? c.value : c;
+        const l = c && typeof c === 'object' ? (c.label || c.value) : c;
+        return `<option value="${esc(v)}"${String(v) === String(value) ? ' selected' : ''}>${esc(l)}</option>`;
+      }).join('');
+      return `<label class="field"><span>${label} ${help}</span>`
+        + `<select id="${id}" data-tts-param="${esc(p.key)}" data-tts-type="enum">${opts}</select></label>`;
+    }
+    if (p.type === 'bool') {
+      return `<label class="field"><span><input type="checkbox" id="${id}"`
+        + ` data-tts-param="${esc(p.key)}" data-tts-type="bool"${value ? ' checked' : ''} /> `
+        + `${label} ${help}</span></label>`;
+    }
+    const step = p.step ?? (p.type === 'int' ? 1 : 0.01);
+    const digits = p.type === 'int' ? 0 : ttsDecimals(step);
+    const unit = p.unit ? ` ${esc(p.unit)}` : '';
+    const shown = Number(value).toFixed(digits);
+    return `<label class="field"><span>${label}: <b id="${id}-val">${shown}</b>${unit} ${help}</span>`
+      + `<input type="range" id="${id}" data-tts-param="${esc(p.key)}"`
+      + ` data-tts-type="${esc(p.type || 'float')}" data-tts-digits="${digits}"`
+      + ` min="${p.min ?? 0}" max="${p.max ?? 1}" step="${step}" value="${value}" /></label>`;
+  }).join('');
+  // Live numeric read-outs ("Speed: 1.05×") next to each slider.
+  host.querySelectorAll('input[type=range]').forEach((el) => {
+    const out = $(`${el.id}-val`);
+    const digits = Number(el.dataset.ttsDigits || 0);
+    const show = () => { if (out) out.textContent = Number(el.value).toFixed(digits); };
+    el.oninput = show;
+    show();
+  });
+}
+
+function ttsParamValues() {
+  const out = {};
+  document.querySelectorAll('#tts-params [data-tts-param]').forEach((el) => {
+    const key = el.dataset.ttsParam;
+    const type = el.dataset.ttsType;
+    if (type === 'bool') out[key] = el.checked;
+    else if (type === 'int') out[key] = parseInt(el.value, 10);
+    else if (type === 'enum') out[key] = el.value;
+    else out[key] = Number(el.value);
+  });
+  return out;
+}
+
+function renderLanguageSelect(tts, voiceId) {
+  const sel = $('dj-language');
+  if (!sel) return;
+  const entry = (tts.voices || []).find((v) => v.id === voiceId) || {};
+  const codes = entry.languages || [];
+  const names = {};
+  (tts.languages || []).forEach((l) => { names[l.code] = l.name || l.code; });
+  const wanted = (tts.current && tts.current.language) || codes[0] || '';
+  sel.innerHTML = codes.length
+    ? codes.map((c) => `<option value="${esc(c)}"${c === wanted ? ' selected' : ''}>${esc(names[c] || c)}</option>`).join('')
+    : '<option value="">no languages declared</option>';
+  sel.disabled = codes.length < 2;
+}
+
+function describeVoice(entry) {
+  if (!entry) return '';
+  const bits = [];
+  if (entry.name) bits.push(entry.name);
+  if (entry.gender) bits.push(entry.gender);
+  if (entry.description) bits.push(entry.description);
+  if (entry.note) bits.push(entry.note);
+  return bits.join(' — ');
+}
+
+async function loadTtsCard() {
+  let tts;
+  try {
+    tts = await api('/api/dj/tts');
+  } catch (e) {
+    $('tts-engine').textContent = '⚠ voice service unreachable';
+    $('tts-status').textContent = String(e.message || e);
+    $('dj-voice').innerHTML = '<option value="">—</option>';
+    $('dj-language').innerHTML = '<option value="">—</option>';
+    $('tts-params').innerHTML = '';
+    return;
+  }
+  state.tts = tts;
+  const eng = tts.engine || {};
+  $('tts-engine').textContent = tts.ok
+    ? `${eng.name || eng.id || 'engine'}${eng.version ? ' ' + eng.version : ''}`
+        + (eng.runtime ? ` · ${eng.runtime}` : '')
+    : '⚠ no engine — the TTS service is not ready';
+
+  // One line about the service itself: what it is doing or what is wrong.
+  const svc = tts.service || {};
+  const parts = [];
+  if (tts.base_url) parts.push(tts.base_url);
+  if (svc.model_ready === false) parts.push(`model not loaded: ${svc.detail || svc.note || '?'}`);
+  if (tts.quality && tts.quality.steps) parts.push(`${tts.quality.steps}-step quality (fixed)`);
+  if (svc.renders !== undefined) parts.push(`${svc.renders} renders`);
+  $('tts-status').textContent = parts.join(' · ');
+  $('tts-status').className = tts.problem ? 'warn' : 'dim';
+  if (tts.problem) $('tts-status').textContent = `⚠ ${tts.problem}`;
+
+  const voices = tts.voices || [];
+  const current = (tts.current && tts.current.voice) || '';
+  $('dj-voice').innerHTML = voices.length
+    ? voices.map((v) => {
+        const langs = (v.languages || []).join('/');
+        return `<option value="${esc(v.id)}"${v.id === current ? ' selected' : ''}>`
+          + `${esc(v.name || v.id)}${langs ? ` · ${esc(langs)}` : ''}`
+          + `${v.installed === false ? ' — not installed' : ''}</option>`;
+      }).join('')
+    : '<option value="">no voices offered</option>';
+
+  const entry = voices.find((v) => v.id === $('dj-voice').value) || voices[0];
+  const replaced = (tts.configured_voice && current
+    && tts.configured_voice !== current)
+    ? ` ⚠ the configured voice “${esc(tts.configured_voice)}” is not offered by this`
+      + ` engine — speaking with ${esc(current)}; press Save in this card to keep that.`
+    : '';
+  if (entry && entry.installed === false) {
+    $('dj-voice-note').textContent =
+      `⚠ ${entry.name || entry.id} is not installed yet — the DJ cannot speak `
+      + 'with it. Pick one marked installed, or press “Test this voice” to install it.'
+      + replaced;
+    $('dj-voice-note').className = 'warn';
+  } else {
+    $('dj-voice-note').textContent = describeVoice(entry) + replaced;
+    $('dj-voice-note').className = replaced ? 'warn' : 'dim';
+  }
+  renderLanguageSelect(tts, $('dj-voice').value);
+  renderTtsParams(tts, (tts.current && tts.current.params) || {});
 }
 
 async function loadLLMConfig() {
@@ -653,9 +792,11 @@ async function loadHealth() {
     const bits = [
       `${h.library.total} tracks`,
       h.llm.ok ? `LLM ok (${state.config?.llm?.model || ''})` : 'LLM offline',
-      // Name the voice and the fix: "voice missing" alone sent a user hunting
-      // for a silent DJ after the default voice changed.
-      h.tts.ok ? `voice ok (${h.tts.voice || ''})`
+      // Name the voice and the language that will actually speak, plus the fix:
+      // "voice missing" alone sent a user hunting for a silent DJ after the
+      // default voice changed.
+      h.tts.ok
+        ? `voice ok (${h.tts.voice || ''}${h.tts.language ? ' · ' + h.tts.language : ''})`
         : `DJ silent — ${h.tts.problem || 'voice missing'}`,
     ];
     $('health-line').innerHTML =
@@ -1181,83 +1322,70 @@ function wire() {
     loadTracks($('search').value.trim()); loadQueue(); loadDecades();
   };
 
-  $('dj-speed').oninput = (e) =>
-    ($('speed-val').textContent = (e.target.value / 100).toFixed(2));
-
-  // Selecting a voice (English or Russian) downloads it on demand if missing,
-  // verifies it actually landed on disk, refreshes the picker, then selects it
-  // in the UI. Activation (making it the DJ's active voice) is intentionally a
-  // UI-only change -- the user must click "Save DJ" to persist it, same as any
-  // other DJ setting.
-  const selectVoice = async (selectId, noteId) => {
-    const voice = $(selectId).value;
-    const note = $(noteId);
-    const data = await api('/api/dj/voices');
-    const installed = data.voices || [];
-    if (!installed.includes(voice)) {
-      note.textContent = '⏳ downloading…';
+  // Choosing a voice: ask the TTS service to install it if it is not there yet,
+  // verify that it now reports the voice as available, then refresh the card
+  // (languages and controls can differ per voice/engine). Activation is still a
+  // UI-only change — "Save DJ settings" persists it, like any other setting.
+  $('dj-voice').onchange = async () => {
+    const keep = ttsParamValues();
+    const voiceId = $('dj-voice').value;
+    const note = $('dj-voice-note');
+    const known = (state.tts && state.tts.voices) || [];
+    const entry = known.find((v) => v.id === voiceId);
+    renderLanguageSelect(state.tts || {}, voiceId);
+    if (entry && entry.installed === false) {
+      note.textContent = '⏳ asking the voice service to install it…';
       note.className = 'dim';
-      let r;
       try {
-        r = await api('/api/dj/voices/download', {
+        const r = await api('/api/dj/voices/install', {
           method: 'POST',
-          body: JSON.stringify({ voice }),
+          body: JSON.stringify({ voice: voiceId }),
         });
+        const ok = (r.installed || []).includes(voiceId)
+                   && (r.available || []).includes(voiceId);
+        if (!ok) {
+          note.textContent = `✗ install failed: ${(r.failed || []).join(', ') || 'unknown reason'}`;
+          note.className = 'warn';
+          return;
+        }
+        note.textContent = '✓ installed & verified';
       } catch (e) {
         note.textContent = `✗ ${e.message}`;
         note.className = 'warn';
         return;
       }
-      // "Verify it is ok": the download must report success AND the file must
-      // now appear in the available (on-disk) list.
-      const ok = (r.downloaded || []).includes(voice)
-                 && (r.available || []).includes(voice);
-      if (!ok) {
-        note.textContent = `✗ download failed: ${(r.failed || []).join(', ') || 'unknown'}`;
-        note.className = 'warn';
-        return;
-      }
-      note.textContent = '✓ downloaded & verified';
-    } else {
-      note.textContent = '✓ installed';
     }
-    note.className = 'dim';
-    // Refresh the picker choices, then select the chosen voice in the UI.
-    // (Not persisted -- "Save DJ" applies it.)
-    await loadConfig();
-    $(selectId).value = voice;
-    const profiles = data.profiles || [];
-    const sel = profiles.find((p) => p.id === voice);
-    if (sel && sel.note) $(noteId).textContent = sel.note;
+    await loadTtsCard();
+    $('dj-voice').value = voiceId;
+    renderLanguageSelect(state.tts || {}, voiceId);
+    // Keep whatever the user had already dialled in on the sliders.
+    renderTtsParams(state.tts || {},
+                    { ...(((state.tts || {}).current || {}).params), ...keep });
   };
-  $('dj-voice').onchange = () => selectVoice('dj-voice', 'dj-voice-note');
+
   $('test-voice').onclick = async () => {
     const voice = $('dj-voice').value;
-    const speed = Number($('dj-speed').value) / 100;
-    const noise = Number($('dj-noise').value) / 1000;
+    const language = $('dj-language').value;
     const btn = $('test-voice');
     btn.disabled = true;
     btn.textContent = '⏳ synthesizing…';
     try {
-      // Sample text matches the selected voice's language (Russian voices
-      // demonstrate with a Russian line, English voices with an English one).
-      const profiles = (await api('/api/dj/voices')).profiles || [];
-      const sel = profiles.find((p) => p.id === voice);
-      const russian = !!(sel && sel.lang === 'russian');
-      const text = russian
+      // The sample text matches the language being tested, so what you hear is
+      // the language the DJ will actually speak.
+      const text = language === 'ru'
         ? 'В эфире Виртуальный DJ. Сейчас прозвучит трек, который вы давно ждали.'
-        : 'Hey listeners, this is your Virtual DJ — let\'s keep the vibes flowing through the night.';
+        : "Hey listeners, this is your Virtual DJ — let's keep the vibes flowing through the night.";
       const r = await api('/api/dj/preview', {
         method: 'POST',
-        body: JSON.stringify({ text, voice, speed, noise_scale: noise,
-                               noise_w: Number($('dj-noise-w').value) / 1000,
-                               sentence_silence: Number($('dj-sentence-silence').value) / 100 }),
+        body: JSON.stringify({ text, voice, language, params: ttsParamValues() }),
       });
       if (r && r.audio_url) {
         const a = $('preview-audio');
         a.hidden = false;
         a.src = r.audio_url;
         a.play().catch(() => {});
+      } else {
+        alert('The voice service returned no audio — check the status line in this card.');
       }
     } catch (e) {
       alert('Voice test failed: ' + e.message);
@@ -1333,12 +1461,13 @@ function wire() {
           talk_max: tmax,
           sent_min: smin,
           sent_max: smax,
-          speed: Number($('dj-speed').value) / 100,
-          noise_scale: Number($('dj-noise').value) / 1000,
-          // Piper's rhythm jitter and the pause after each sentence.
-          noise_w: Number($('dj-noise-w').value) / 1000,
-          sentence_silence: Number($('dj-sentence-silence').value) / 100,
+          // Everything about speech comes from the card that was rendered from
+          // the engine's own declaration: the voice, the language and one value
+          // per declared parameter. The app stores them verbatim, so a new
+          // engine's parameters persist without a code change.
           voice: $('dj-voice').value,
+          language: $('dj-language').value,
+          tts_params: ttsParamValues(),
           style: $('dj-style').value.trim(),
         },
         enrich: { enabled: $('enrich-enabled').checked },
@@ -1359,12 +1488,7 @@ function wire() {
   $('dj-talk-max').oninput = refreshTalkLabel;
   $('dj-sent-min').oninput = refreshSentLabel;
   $('dj-sent-max').oninput = refreshSentLabel;
-  $('dj-noise-w').oninput = (e) =>
-    ($('noisew-val').textContent = (e.target.value / 1000).toFixed(2));
-  $('dj-sentence-silence').oninput = (e) =>
-    ($('pause-val').textContent = (e.target.value / 100).toFixed(2));
-  $('dj-noise').oninput = (e) =>
-    ($('expr-val').textContent = (e.target.value / 1000).toFixed(2));
+  // (Synthesis controls carry their own listeners: see renderTtsParams.)
   $('save-preset').onclick = async () => {
     const name = $('preset-name').value.trim();
     if (!name) return;

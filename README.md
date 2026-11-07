@@ -12,11 +12,11 @@ optional metadata lookups.
 Point VLC, Winamp, Sonos, or any browser at the stream URL and it just plays.
 
 ```
-┌──────────┐   scan    ┌──────────┐  facts   ┌─────────┐  script  ┌────────┐
-│ /mnt/mp3 │ ────────► │  SQLite  │ ───────► │ Ollama  │ ───────► │ Piper  │
-└──────────┘  mutagen  │ library  │ MusicBr. │  (LLM)  │          │ (TTS)  │
-                       └────┬─────┘          └─────────┘          └───┬────┘
-                            │ next track                   DJ voice   │
+┌──────────┐   scan    ┌──────────┐  facts   ┌─────────┐  script  ┌────────────┐
+│ /mnt/mp3 │ ────────► │  SQLite  │ ───────► │ Ollama  │ ───────► │ TTS service│
+└──────────┘  mutagen  │ library  │ MusicBr. │  (LLM)  │          │ Supertonic │
+                       └────┬─────┘          └─────────┘          └─────┬──────┘
+                            │ next track                   DJ voice   │ HTTP
                             ▼                                         ▼
                        ┌──────────────────────────────────────────────────┐
                        │  Broadcaster — ffmpeg → frame-aligned MP3 stream │
@@ -26,6 +26,12 @@ Point VLC, Winamp, Sonos, or any browser at the stream URL and it just plays.
                      ▼                         ▼                         ▼
                    VLC                      Sonos                    Browser
 ```
+
+The voice lives in its own container behind a small HTTP API
+(`GET /v1/capabilities`, `POST /v1/speech`), so the station never embeds a
+speech engine: it asks the service which voices, languages and knobs exist and
+renders the DJ card from that answer. Swapping engines is a service-side change —
+see [`docs/tts-service.md`](docs/tts-service.md).
 
 ## Features
 
@@ -37,7 +43,8 @@ Point VLC, Winamp, Sonos, or any browser at the stream URL and it just plays.
   sending silence, so the Icecast mount never disappears and a new player can
   always dial in.
 - **Talking DJ** — an LLM writes a short intro from the track's actual metadata;
-  Piper speaks it. Frequency, length, persona, voice, and speed are all tunable.
+  the TTS service speaks it. Frequency, length, persona, voice, language and the
+  engine's own knobs are all tunable.
 - **Grounded facts** — tags first, then MusicBrainz/Wikipedia. The prompt is
   fact-constrained to keep the DJ from making things up.
 - **Self-repairing metadata** — when a file has no usable tags, the scanner
@@ -96,8 +103,9 @@ Point VLC, Winamp, Sonos, or any browser at the stream URL and it just plays.
 - [Ollama](https://ollama.com) reachable on your network, for DJ scripts
   (optional — the station plays music fine without it; the DJ just stays
   silent until an Ollama endpoint is configured)
-- internet access on first run (optional), to auto-download the configured Piper
-  voice — the default is `en_GB-alan-medium`, **~60 MB**
+- a TTS service container (part of `docker-compose.yml`; Supertonic 3 by
+  default) — internet access on its first run to fetch the model (~400 MB into
+  its own volume)
 
 ## Install
 
@@ -111,16 +119,18 @@ cd virtual-dj
 `run.sh` is the canonical launcher. It:
 
 1. creates a Python venv (`.venv`) if missing and installs `requirements.txt`;
-2. downloads the default Piper voice the app needs (`dj.voice`) into
-   `data/voices/` — so the DJ can speak on a clean clone;
+2. asks the TTS service to make the configured voice usable (best-effort — no
+   service reachable yet means the app still starts, and the DJ card can install
+   a voice later);
 3. launches the server on `0.0.0.0:8420` (override with `--host`/`--port`).
 
 To run the server directly instead: `python -m app.main --host 0.0.0.0 --port 8420`.
 
-> No network at install time? The app still starts — voice download is
-> best-effort and retries at runtime. You can fetch voices any time from the
-> web UI (DJ Settings → Voice picker → **Test**), or with
-> `python -m app.voices [--all]` (or `python -m app.voices en_GB-alan-medium`).
+> The speech service is its own process. `docker compose up -d tts` brings it up
+> on `http://127.0.0.1:9000`; without it the station keeps playing music and the
+> DJ stays quiet (the health line and the DJ card both say why). Voices can be
+> installed any time from the DJ card, or with `python -m app.voices --list` /
+> `python -m app.voices M2`.
 
 Then open **http://localhost:8420**, set your music folder in the Library
 panel (or pre-seed it, see below), and hit **Rescan**.
@@ -139,40 +149,45 @@ rarely need to edit it by hand.
 
 ### The DJ voice
 
-The Piper voice models are large binary files (git-ignored) stored in
-`data/voices/`. On a **fresh install they are downloaded automatically** — the
-configured default (`dj.voice`, `en_GB-alan-medium`) is fetched on first run,
-and the web UI can download any other curated voice on demand.
+Speech is **not** part of the station: a separate container (`tts` in
+`docker-compose.yml`) runs the engine behind a small HTTP API and holds the
+models in its own volume. The app asks it what it can do and renders the DJ card
+from the answer, so nothing about voices is hardcoded here any more.
 
-Any Piper voice works — drop the `.onnx` + `.onnx.json` pair in `data/voices/`
-and pick it in the DJ Settings panel. **Both files count**: piper loads
-`<model>.onnx.json` whenever it loads a model, so a voice whose sidecar is
-missing is reported as *not installed* in the picker rather than failing
-silently at DJ time (a download that cannot fetch the sidecar fails instead of
-leaving a half-voice behind). To grab them manually:
+- **Engine: Supertonic 3** (`TTS_ENGINE=supertonic3`), ONNX on CPU. Ten styles —
+  `M1`–`M5` and `F1`–`F5` — all of which speak English *and* Russian.
+- **Quality is fixed at 5 diffusion steps** (`TTS_STEPS=5`), deliberately not a
+  UI knob: at 2 steps the model garbles words (measured 54–77 % Russian WER
+  against 9–36 % at 5).
+- **The DJ card** shows every voice the service offers with an *installed*
+  marker, plus a language switch (**English / Russian**) for the chosen voice,
+  plus one control per parameter the engine declares — today *speaking speed*
+  and *pause after each sentence*, both fixed server-side ranges. Whatever you
+  set is stored under `dj.tts_params` and sent with every line.
+- **Installing** a voice is one click in the card (`POST /v1/voices/{id}/install`)
+  or `python -m app.voices M2`; `--list` prints what the service advertises.
+- **A different engine** (voice cloning, a cloud API, anything) is a
+  service-side change: implement the adapter, and the card re-renders itself
+  from the new `/v1/capabilities`. `piper` is still shipped as a second engine
+  (`TTS_ENGINE=piper`) as a working example of that.
 
-```bash
-mkdir -p data/voices && cd data/voices
-curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/alan/medium/en_GB-alan-medium.onnx
-curl -LO https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_GB/alan/medium/en_GB-alan-medium.onnx.json
-```
-
-The catalogue is **16 curated voices** — 12 English (Amy, Lessac, LibriTTS-R,
-Ryan, Bryce, Sam, Norman, Alan, Jenny, Southern English, HFC male/female) and 4
-Russian (Irina, Denis, Dmitri, Ruslan) — listed in `app/dj.py`
-(`VOICE_PROFILES`) and downloadable from the same HuggingFace repo via the web
-UI. Each is ~63 MB; `python -m app.voices --all` fetches the lot (**~1 GB**).
+The wire contract, engine adapter interface and deployment details are in
+[`docs/tts-service.md`](docs/tts-service.md); `scripts/e2e_tts.sh` re-verifies the
+whole path (capabilities → app card → preview audio) against a live stack.
 
 ### How the DJ's text is prepared
 
-Piper reads what it is given, so the *text* decides whether the delivery sounds
-like a host or like a catalogue entry. Three things are now enforced:
+The engine reads what it is given, so the *text* decides whether the delivery
+sounds like a host or like a catalogue entry. Three things are now enforced:
 
 - **Spelled-out dates and numbers.** The prompt asks the LLM for
   "nineteen ninety-nine", never "1999", and the app spells any bare year that
   still slips through (`1984` -> `nineteen eighty-four`) before synthesis.
-  Russian is deliberately different: the Russian voice reads numerals correctly
-  on its own, so years stay as digits there.
+  Russian is treated the same way for a different reason: the neural voice
+  invents numbers when it has to read digits (measured: "в 1989 году" came back
+  as 979 / 1089 / 1977 in different takes), so years and counts are written out
+  with the right grammatical case — "в тысяча девятьсот восемьдесят девятом
+  году", "сто двадцать ударов в минуту" (`app/ru_numbers.py`).
 - **Names in their spoken form.** Stylised spellings are written the way they are
   said — P!nk is "Pink", Ke$ha is "Kesha", Panic! at the Disco is "Panic at the
   Disco", deadmau5 is "dead mouse" — and symbols that are not pronounced are
@@ -180,8 +195,8 @@ like a host or like a catalogue entry. Three things are now enforced:
   name.
 - **Punctuation for breath.** Short clauses; a comma is a small pause, an em dash
   a longer one. Measured: the engine's own punctuation pauses only reach
-  0.10–0.26 s, which is why `dj.sentence_silence` (below) adds a real sentence
-  gap on top.
+  0.10–0.26 s, which is why the `sentence_pause` parameter (below) adds a real
+  sentence gap on top.
 
 The same preparation runs on anything you type into **Test this voice**, so the
 preview shows (and speaks) the line as it will go on air rather than the raw
@@ -189,10 +204,11 @@ input. The code guarantees the date spelling and the stress marks; the *name*
 rewriting is the LLM's job, so it depends on the model you point Hermes at
 following the instruction — check it once with your own Ollama.
 
-#### Russian stress marks: only one character works
+#### Russian stress marks: only one character worked
 
 The Russian voice guesses stress, and guesses wrong on homographs
-(*за́мок* the castle vs *замо́к* the lock). espeak-ng obeys exactly one mark:
+(*за́мок* the castle vs *замо́к* the lock). An espeak-based engine (the `piper`
+adapter) obeys exactly one mark:
 
 | Written | Result |
 |---|---|
@@ -202,16 +218,21 @@ The Russian voice guesses stress, and guesses wrong on homographs
 | mark written *before* the vowel | ignored ❌ |
 
 So the LLM is asked for a plain `´` after the vowel (easy to produce) and the app
-rewrites whatever it gets into the character espeak obeys, moving it to the far
-side of the vowel and dropping marks with no vowel to attach to. Ё is always
-written as `ё`, never `е`.
+rewrites whatever it gets into that character, moving it to the far side of the
+vowel and dropping marks with no vowel to attach to. Ё is always written as `ё`,
+never `е`.
 
-**The chosen voice sets the DJ's language.** English voices (`en_US-*`,
-`en_GB-*`) make the DJ speak English; picking a Russian voice (Irina, Denis,
-Dmitri, Ruslan) makes the DJ speak Russian — intros are written in Russian and
-spoken natively, with no transliteration. There is no separate "Russian voice"
-setting and no per-song language detection: the whole station speaks the
-language of the voice you select in DJ Settings.
+Whether that mark is *kept* is the engine's call, not the app's: the service
+declares `text.stress_marks` in `/v1/capabilities`, and an engine without the
+concept (Supertonic 3) gets the marks stripped instead of pronouncing the glyph.
+
+**The chosen voice sets the DJ's language.** Every Supertonic style speaks both
+languages, so the card carries an explicit **English / Russian** switch
+(`dj.language`); the app clamps it to what the selected voice actually declares.
+Picking Russian makes intros written in Russian and spoken natively, with no
+transliteration; picking English transliterates Cyrillic names so an English
+voice can say them. There is no per-song language detection: the whole station
+speaks the language you select in the DJ card.
 
 ## Playlist rules
 
@@ -371,11 +392,13 @@ and because each refill stamps new DJ talks, the DJ LLM gets called continuously
 
 ## Running with Docker
 
-The app ships a `Dockerfile` and `docker-compose.yml`. Everything the app
-writes — `config.json`, the SQLite library DB, the downloaded **Piper voice
-models**, and the DJ cache — lives in a **named volume** mounted at `/data`, so
-it survives container restarts and upgrades. Your music library is mounted
-**read-only** from the host (the DJ never writes to it).
+The app ships a `Dockerfile` and a `docker-compose.yml` with **two** services:
+`virtual-dj` (the station) and `tts` (the speech engine behind an HTTP API).
+Everything the app writes — `config.json`, the SQLite library DB and the DJ
+cache — lives in a **named volume** mounted at `/data`, so it survives container
+restarts and upgrades; the speech models live in a **separate `tts-models`
+volume** owned by the `tts` service. Your music library is mounted **read-only**
+from the host (the DJ never writes to it).
 
 ```bash
 cp .env.example .env        # edit at least MUSIC_DIR to point at your music
@@ -384,9 +407,10 @@ docker compose up -d --build
 
 Then open **http://localhost:8420**.
 
-On first start the container **auto-downloads the default voice model**
-(English, `en_GB-alan-medium`, ~60 MB) into the volume; the DJ can speak out of
-the box.
+On first start the `tts` service **downloads and loads the model** into its own
+volume (Supertonic 3, ~400 MB), then installs the configured voice; the station
+waits for neither — it starts, plays music, and shows *"TTS service … not ready"*
+in the health line until the voice is up.
 It also **auto-scans `/music` on first boot** (the container's `music_dir`
 defaults to `/music`, which is where your host library is mounted), so the
 station indexes your music with no setup. If `/music` is empty or unmounted,
@@ -419,18 +443,17 @@ If Ollama runs on the Docker host, point the container at it with
 docker compose pull   # or: docker compose up -d --build
 ```
 
-Your `data` volume is untouched — config, library DB, and voice models carry
-over. The first boot after an upgrade will reuse the already-downloaded voices.
+Your `data` volume is untouched — config, library DB and the DJ cache carry
+over — and so is `tts-models`, so the engine is not re-downloaded.
 
-> **If the DJ goes silent after an upgrade**, check the voice first: the default
-> voice can change between versions (it is now `en_GB-alan-medium`), and a volume
-> that still holds the old model has nothing for Piper to speak with. The station
-> keeps playing music and the LLM may still be called, so it can look healthy
-> while you hear no DJ. `docker logs virtual-dj | grep -i "DJ voice"` says so
-> explicitly, and the web UI names the missing voice in the health line and the
-> DJ card. Fix it by picking a voice marked *installed* in the DJ card, or by
-> letting the app fetch the configured one (`docker exec virtual-dj python -m
-> app.voices`, or unset `VDJ_NO_VOICE_DOWNLOAD` and restart).
+> **If the DJ goes silent after an upgrade**, check the voice first: the health
+> line and the DJ card both name the reason (`docker logs virtual-dj | grep -i
+> "DJ breaks are OFF"`, or `curl -s localhost:9000/v1/health`). The usual causes
+> are a `tts` container that is still downloading its model, or a configured
+> voice the engine no longer offers (the default changed, or you switched
+> `TTS_ENGINE`). The station keeps playing music either way. Fix it by picking a
+> voice marked *installed* in the DJ card, or install the configured one with
+> `docker exec virtual-dj python -m app.voices --list` / `python -m app.voices M2`.
 
 ## Configuration
 
@@ -493,23 +516,22 @@ The sections the web UI does not already document elsewhere in this file:
 | Key | Default | Meaning |
 |---|---|---|
 | `music_dir` | `~/Music` (`/music` in the container) | Where the library lives |
-| `voices_dir` | _blank_ = `$VDJ_DATA_DIR/voices` | Where Piper voice models are kept (point it at a bigger disk) |
+| `voices_dir` | _blank_ = `$VDJ_DATA_DIR/voices` | Legacy (Piper models on the app side); unused with the TTS service, where models live in the service's own volume |
 | `playback.shuffle` | `true` | Flat shuffle when programs are off |
 | `playback.genres` / `playback.decades` / `playback.artists` | `[]` | The *Genres/decades* card's selection: empty = everything |
 | `playback.search` | `""` | Free-text filter applied to every queue fill |
 | `playback.program.*` | see [Playlist rules](#playlist-rules) | Theming, program length, artist rules |
 | `playback.program.disabled.{genre,artist,decade}` | `[]` | Themes switched off in the *Programs* card (a stored exclusion list, so a new genre starts ON) |
 | `dj.enabled` | `true` | Speak between tracks at all |
-| `dj.voice` | `en_GB-alan-medium` | Piper voice — also picks the DJ's language. Measured on one sentence: ~19 semitones of pitch movement, against ~7 for the previous default `en_US-amy-medium` (the flattest of 15 installed voices); `-high` models of the same voice measured no wider for twice the CPU |
-| `dj.noise_w` | `0.8` | Rhythm variation (phoneme-width jitter). Piper's own default |
-| `dj.sentence_silence` | `0.25` | Seconds of silence after each sentence — 0.25 gives the ~0.45 s gap of a real host, where the engine's own punctuation pauses only reach 0.1–0.26 s |
+| `dj.voice` | `M2` | The voice id the TTS service advertises — the station's pick is Supertonic's `M2`, the most natural Russian of the ten styles, and it speaks English too. The card lists whatever the service offers, with installed state |
+| `dj.language` | `ru` | What the DJ speaks: `en` or `ru`, clamped to the languages the chosen voice declares. Script language and synthesis language at once |
+| `dj.tts_params.{speed,sentence_pause}` | `1.0` / `0.3` | The engine's own knobs, exactly as the service declares them in `/v1/capabilities` — the card renders one control per declared parameter and stores your values here. Out-of-range values are clamped server-side and the response says so |
 | `dj.style` | _warm radio host_ | The LLM persona |
 | `dj.talk_min` / `dj.talk_max` | `2` / `4` | Tracks between DJ breaks (randomized) |
 | `dj.sent_min` / `dj.sent_max` | `1` / `3` | Sentences per DJ line |
-| `dj.speed` | `1.0` | Piper speaking rate |
 | `dj.gain_db` | `0.0` | Trim applied to the voice only |
-| `dj.noise_scale` | `0.667` | Piper expressiveness |
 | `dj.prefetch_depth` | `3` | DJ lines rendered ahead of playback |
+| `tts.base_url` | `http://127.0.0.1:9000` (`http://tts:9000` in compose) | Where the speech service lives. Nothing else about the engine is configured here |
 | `llm.enabled` / `llm.base_url` / `llm.model` | `true` / `127.0.0.1:11434` / `qwen3.5:9b` | The Ollama endpoint used for scripts |
 | `llm.temperature` / `llm.retries` / `llm.timeout_s` | `0.7` / `2` / `120` | Sampling and resilience |
 | `stream.bitrate_kbps` | `128` | MP3 bitrate of the broadcast |
@@ -640,8 +662,8 @@ Notes:
   measurement cannot be written to the database. *Re-analyze all* is not needed
   for either case.
 - The DJ voice is deliberately excluded: every spoken clip comes from the same
-  Piper model, so its level is already consistent, and `dj.gain_db` remains the
-  artistic trim. Music now meets it at a known target instead.
+  engine and voice, so its level is already consistent, and `dj.gain_db` remains
+  the artistic trim. Music now meets it at a known target.
 
 ## Running as a service
 
@@ -662,8 +684,10 @@ Edit `User=`, `WorkingDirectory=`, and the `ExecStart` path first.
 | `app/enrich.py` | MusicBrainz / Wikipedia lookups (language-aware, misses cached) |
 | `app/ai_meta.py` | LLM-assisted metadata repair (romanisation, missing genres) |
 | `app/websearch.py` | Fallback web lookups for metadata the APIs miss |
-| `app/dj.py` | Prompt building, Ollama call, Piper synthesis, voice catalogue |
-| `app/voices.py` | Piper voice download / verification / listing |
+| `app/dj.py` | Prompt building, Ollama call, text shaping for the voice, audio mastering (loudnorm → mp3) |
+| `app/tts_client.py` | The speech service's HTTP contract: capability cache, `/v1/speech`, `/v1/voices/{id}/install`, readable failure messages |
+| `app/voices.py` | Thin front door for voice installs (first boot, CLI, web UI) |
+| `app/ru_numbers.py` | Russian numerals in words, with the grammatical case the surrounding noun asks for |
 | `app/scheduler.py` | The queue: themed programs, filtering, DJ cadence, DJ prefetch |
 | `app/stream.py` | `Broadcaster` — ffmpeg encode, frame alignment, client fan-out, failure breaker |
 | `app/loudness.py` | EBU R128 measurement, the worker pool, per-track gain |

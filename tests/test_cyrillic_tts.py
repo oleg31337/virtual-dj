@@ -48,15 +48,17 @@ def test_no_cyrillic_in_audio_text():
     assert audio_text.isascii()
 
 
-def test_synthesize_emits_ascii_for_cyrillic():
-    # End-to-end guard: synthesize() must not choke on, and must transliterate,
-    # Cyrillic input. We only assert it returns a path (audio was produced) and
-    # that the internal transliteration produced ASCII.
+def test_synthesize_emits_ascii_for_cyrillic(monkeypatch):
+    # End-to-end guard: for an ENGLISH line, synthesize() must transliterate
+    # Cyrillic before it reaches the engine (the engine's English voices cannot
+    # read Cyrillic).
+    import fake_tts
+
+    fake = fake_tts.install(monkeypatch)
     cyr = "Агата Кристи исполняет Сказочная тайга."
-    path = dj.synthesize(cyr)
-    # path may be None in CI without piper/voice; if present, it proves the
-    # Cyrillic path through synthesize works without crashing.
-    if path is not None:
-        assert path.exists()
+    path = dj.synthesize(cyr, voice="V1", language="en")
+    assert path is not None and path.exists()
+    spoken = fake.calls[-1]["text"]
+    assert spoken.isascii(), spoken
     # The transliteration itself is the load-bearing guarantee.
     assert dj._transliterate_cyrillic(cyr).isascii()

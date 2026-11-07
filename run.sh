@@ -10,12 +10,12 @@ if [ ! -d .venv ]; then
   .venv/bin/pip install -r requirements.txt
 fi
 
-# First-run voice setup: fetch the default Piper model so the DJ can speak
-# out of the box. Best-effort -- if there is no network here, the server still
-# starts and can download voices later from the web UI.
+# Voice setup: ask the TTS service to make the configured voice usable so the
+# DJ can speak out of the box. Best-effort -- with no service reachable yet the
+# server still starts, and voices can be installed later from the web UI.
 if [ "${VDJ_NO_VOICE_DOWNLOAD:-}" != "1" ]; then
-  echo "ensuring the default voice model is present…"
-  .venv/bin/python -m app.voices || echo "  (voice download skipped -- will retry at runtime)"
+  echo "ensuring the configured voice is installed on the TTS service…"
+  .venv/bin/python -m app.voices || echo "  (voice install skipped -- will retry at runtime)"
 fi
 
 exec .venv/bin/python -m app.main "$@"

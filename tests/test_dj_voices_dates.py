@@ -32,20 +32,20 @@ def test_fallback_script_year_is_spoken():
     assert "1977" not in text
 
 
-def test_voice_profiles_marks_installed():
-    profiles = dj.voice_profiles()
-    ids = {p["id"] for p in profiles}
-    # The curated English voices are present (highest-quality variant kept;
-    # the lower-quality -medium Lessac/Ryan duplicates were removed).
-    assert "en_US-amy-medium" in ids
-    assert "en_US-lessac-high" in ids
-    assert "en_US-libritts_r-medium" in ids
-    assert "en_US-ryan-high" in ids
-    assert "en_US-bryce-medium" in ids
-    # Duplicate lower-quality voices must NOT be present.
-    assert "en_US-lessac-medium" not in ids
-    assert "en_US-ryan-medium" not in ids
-    # Each carries an intonation note and installed flag.
+def test_voice_catalogue_comes_from_the_service(monkeypatch):
+    """The app has no voice catalogue of its own any more.
+
+    Whatever the running engine declares is what the picker shows — ids, names,
+    languages and install state all come from /v1/capabilities.
+    """
+    import fake_tts
+
+    fake_tts.install(monkeypatch)
+    from app import dj
+
+    profiles = dj.voice_catalogue()
+    assert {p["id"] for p in profiles} == {"V1", "V2", "V3"}
     for p in profiles:
-        assert "note" in p
-        assert "installed" in p
+        assert {"id", "name", "languages", "installed"} <= set(p)
+    # Install state is the service's answer, not a file on this host.
+    assert [p["id"] for p in profiles if p["installed"]] == ["V1", "V2"]
