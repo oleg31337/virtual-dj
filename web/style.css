@@ -146,3 +146,47 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .field.inline { display: flex; align-items: center; gap: 8px; }
 .field.inline > input { width: auto; }
 audio { height: 34px; }
+
+/* ---------- sub-heading inside a card (Streaming: listeners & dead air) ---------- */
+h4.sub {
+  margin: 16px 0 2px; font-size: 12px; text-transform: uppercase;
+  letter-spacing: 1px; color: var(--accent2);
+}
+
+/* ---------- action feedback (toasts) ----------
+   Every save/apply/action pushes a line here so a click never looks like it did
+   nothing. Fixed to the viewport bottom-right, above the sticky header (z-index
+   10) and clear of the status line; older lines are dropped so a burst cannot
+   cover the page. */
+.toasts {
+  /* Bottom-right, not top-right: the header carries the live status line
+     ("TTS service unreachable…") and a toast there hid the very message the user
+     needs. Stacking upward keeps the newest line closest to the corner. */
+  position: fixed; bottom: 16px; right: 14px; z-index: 50;
+  display: flex; flex-direction: column; align-items: flex-end; gap: 8px;
+  /* `width: max-content` matters: as a flex column with no width the container
+     collapsed to 0px, so a long message overflowed the LEFT edge of the screen
+     instead of wrapping inside max-width. */
+  width: max-content;
+  max-width: min(420px, calc(100vw - 28px));
+  pointer-events: none;      /* clicks fall through unless a toast is clickable */
+}
+.toast {
+  pointer-events: auto;
+  padding: 9px 12px; border-radius: 8px; cursor: pointer;
+  font-size: 13px; line-height: 1.35;
+  background: var(--card2); color: var(--fg);
+  border: 1px solid var(--border); border-left: 3px solid var(--accent2);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, .45);
+  animation: toast-in .18s ease-out;
+  overflow-wrap: anywhere;
+}
+.toast.ok  { border-left-color: #6ee7a0; }
+.toast.err { border-left-color: #ff7b72; }
+.toast.info { border-left-color: var(--accent2); }
+.toast.out { opacity: 0; transform: translateY(-6px); transition: opacity .18s, transform .18s; }
+@keyframes toast-in { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+  .toast { animation: none; }
+  .toast.out { transition: none; }
+}

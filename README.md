@@ -91,9 +91,13 @@ see [`docs/tts-service.md`](docs/tts-service.md).
   browser/search, the *Genres/decades* selection, queue editing and reordering,
   DJ voice settings with a "test this voice" preview,
   the *Programs* card (themes, rules, program length), presets, the loudness
-  card with per-track gains, DJ/voice settings, Icecast control and a running
-  report of temporary data with a **Clean now** button. Includes a browser
-  player.
+  card with per-track gains, DJ/voice settings, the *Streaming* card (Icecast
+  on/off, port and public host, plus the listener-presence and dead-air rules:
+  stop when nobody is listening, how long to wait, how often to check, and when
+  a silent stretch is skipped) and a running report of temporary data with a
+  **Clean now** button. Every save/apply reports what it did in a short line in
+  the corner of the page — so a click never looks like it did nothing. Includes
+  a browser player.
 - **Your library, untouched** — the scanner only ever reads your music files.
 
 ## Requirements
@@ -309,9 +313,11 @@ The app's own Icecast relay also reads `/stream.mp3` (it is marked `?internal=1`
 it is served like any other client but never counts as an audience — otherwise
 presence could never reach zero and the station would never stop.
 
-Three knobs (Playback card in the web UI, `playback.*` in `config.json`, or the
-`VDJ_PAUSE_WITHOUT_LISTENERS` / `VDJ_LISTENER_GRACE_S` / `VDJ_LISTENER_POLL_S`
-environment variables):
+Three knobs (*Streaming* card in the web UI — "Listeners & dead air" — or
+`playback.*` in `config.json`, or the `VDJ_PAUSE_WITHOUT_LISTENERS` /
+`VDJ_LISTENER_GRACE_S` / `VDJ_LISTENER_POLL_S` environment variables). The card's
+**Apply stream settings** button is the one control that writes them, next to the
+dead-air rules below; the Programs card no longer carries them:
 
 | Setting | Default | Meaning |
 |---|---|---|
@@ -356,8 +362,9 @@ Port `8008` is the default Icecast port (change `ICECAST_PORT` in `.env`), and
 uses the app's own `/stream.mp3`; only external players need the Icecast mount.
 
 The **Streaming** card in the web UI carries a *Stream through Icecast* checkbox:
-it writes `icecast.enabled` and `Apply & restart Icecast` brings the relay up (or
-down) without touching `.env`. The port field sets both the listen port and the
+it writes `icecast.enabled` and **Apply stream settings** brings the relay up (or
+down) without touching `.env`; the same button saves the listener-presence and
+dead-air knobs that sit under it. The port field sets both the listen port and the
 published port — in the bundled container the listen port must stay `8008`, so
 change the host-side mapping with `ICECAST_PORT` in `.env` instead.
 

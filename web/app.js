@@ -7,7 +7,20 @@ const api = async (path, options = {}) => {
     headers: { 'Content-Type': 'application/json' },
     ...options,
   });
-  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+  if (!res.ok) {
+    // FastAPI failures carry {"detail": ...}. These sentences now reach the user
+    // in a toast, so surface the detail itself, not the JSON envelope.
+    const body = await res.text();
+    let detail = body;
+    try {
+      const parsed = JSON.parse(body);
+      detail = parsed?.detail ?? parsed?.error ?? body;
+      if (Array.isArray(detail)) {
+        detail = detail.map((d) => d?.msg || JSON.stringify(d)).join('; ');
+      }
+    } catch { /* not JSON: keep the raw text */ }
+    throw new Error(`${res.status}: ${detail}`);
+  }
   return res.status === 204 ? null : res.json();
 };
 
@@ -26,14 +39,46 @@ const state = {
 let scanPoll = null;
 let loudnessPoll = null;
 
-// Run a mutating action, surfacing a failure. Without this a failed save (or a
-// rejected POST) was a silent no-op: the UI kept showing the old values and the
-// user had no way to tell the change never landed.
-async function act(label, fn) {
+// Transient feedback for every action. A save/apply used to be a silent no-op
+// from the user's chair: the numbers looked the same either way and the only
+// signal was an `alert()` on failure (blocking, and dismissed without a trace).
+// `toast()` is the one place that draws that signal: a line per action, gone in
+// a few seconds, click to dismiss.
+const TOAST_MAX = 4;          // a burst of clicks must not cover the page
+const TOAST_MS = 3200;        // success/informational
+const TOAST_ERR_MS = 8000;    // failures stay long enough to read
+
+function toast(message, kind = 'ok', ms = null) {
+  const host = $('toasts');
+  if (!host) return null;     // no container: never break the action itself
+  const el = document.createElement('div');
+  el.className = `toast ${kind}`;
+  // textContent, never innerHTML: messages carry server text (error bodies).
+  el.textContent = message;
+  el.title = 'click to dismiss';
+  el.onclick = () => el.remove();
+  host.appendChild(el);
+  while (host.children.length > TOAST_MAX) host.firstElementChild.remove();
+  const life = ms === null ? (kind === 'err' ? TOAST_ERR_MS : TOAST_MS) : ms;
+  setTimeout(() => {
+    el.classList.add('out');
+    setTimeout(() => el.remove(), 220);
+  }, life);
+  return el;
+}
+
+// Run a mutating action, reporting BOTH outcomes through `toast`. Without this a
+// failed save (or a rejected POST) was a silent no-op: the UI kept showing the
+// old values and the user had no way to tell the change never landed. `done` is
+// the success wording ("Programs saved") so the line names the outcome, not the
+// button that was pressed.
+async function act(label, fn, done = null) {
   try {
-    return await fn();
+    const result = await fn();
+    toast(done || `${label} ✓`);
+    return result;
   } catch (e) {
-    alert(`${label} failed: ${e.message}`);
+    toast(`${label} failed: ${e.message}`, 'err');
     return null;
   }
 }
@@ -96,7 +141,7 @@ function toggleListen() {
     $('listen').textContent = '⏹ Stop';
   }).catch((err) => {
     stopListening();
-    alert(`Could not start playback: ${err.message}`);
+    toast(`Could not start playback: ${err.message}`, 'err');
   });
 }
 
@@ -231,7 +276,11 @@ async function loadIcecastStatus() {
       status.textContent = 'disabled';
       status.className = 'pill';
       listeners.textContent = '';
-      note.textContent = 'Icecast delivery is off — set icecast.enabled in config or run with VDJ_ICECAST_ENABLED=1.';
+      // The card can turn it on itself now, so point at the checkbox instead of
+      // sending the user to config files/.env.
+      note.textContent = 'Icecast delivery is off — tick "Stream through Icecast" '
+        + 'above and press Apply stream settings (external players only; the web '
+        + 'player uses the app\'s own stream).';
       if (document.activeElement !== url) url.value = '(icecast disabled)';
       return;
     }
@@ -508,6 +557,9 @@ async function loadConfig() {
   $('program-enabled').checked = !!(cfg.playback?.program?.enabled ?? true);
   $('program-size').value = cfg.playback?.program?.size ?? 6;
   $('program-size-val').textContent = $('program-size').value;
+  // Streaming card — listeners & dead air. These five knobs belong to that card
+  // (they used to sit at the bottom of Programs); its "Apply stream settings"
+  // button is the only writer, and it re-renders them from the saved config.
   $('pause-without-listeners').checked = cfg.playback?.pause_without_listeners ?? true;
   $('listener-grace').value = cfg.playback?.listener_grace_s ?? 30;
   $('silence-skip').value = cfg.playback?.silence_skip_s ?? 10;
@@ -745,14 +797,17 @@ async function loadLLMModels() {
         .join('');
       $('llm-status').textContent = `${r.models.length} models found`;
       $('llm-status').className = 'meta ok';
+      toast(`${r.models.length} models found on the LLM server`);
     } else {
       sel.innerHTML = '<option value="">— no models / unreachable —</option>';
       $('llm-status').textContent = `no models: ${r.error || 'unknown'}`;
       $('llm-status').className = 'meta warn';
+      toast(`No models found: ${r.error || 'the LLM server did not answer'}`, 'err');
     }
   } catch (e) {
     $('llm-status').textContent = `error: ${e.message}`;
     $('llm-status').className = 'meta warn';
+    toast(`Loading models failed: ${e.message}`, 'err');
   } finally {
     btn.disabled = false; btn.textContent = 'Load models';
   }
@@ -774,13 +829,16 @@ async function testLLM() {
     if (r.ok && r.text) {
       out.textContent = `✓ ${r.model}: "${r.text.trim()}"`;
       out.className = 'meta ok';
+      toast(`LLM answered — ${r.model} is reachable`);
     } else {
       out.textContent = `✗ ${r.error || 'no response'}`;
       out.className = 'meta warn';
+      toast(`LLM test failed: ${r.error || 'no response'}`, 'err');
     }
   } catch (e) {
     out.textContent = `✗ ${e.message}`;
     out.className = 'meta warn';
+    toast(`LLM test failed: ${e.message}`, 'err');
   } finally {
     btn.disabled = false; btn.textContent = 'Test connection';
   }
@@ -1140,14 +1198,18 @@ function wire() {
       navigator.clipboard?.writeText(u.value);
       $('icecast-copy').textContent = 'Copied!';
       setTimeout(() => { $('icecast-copy').textContent = 'Copy'; }, 1500);
+      toast('Stream URL copied to the clipboard');
+    } else {
+      toast('Icecast is disabled, so there is no external stream URL yet', 'info');
     }
   };
 
-  // Streaming card: apply Icecast port / public host, restarting Icecast when
-  // the configuration actually changed. The port drives both the internal
-  // listen port and the external (published) port in the single-container
-  // deployment; changing it requires the Docker port mapping to match too
-  // (see .env ICECAST_PORT). The public host just changes the displayed URL.
+  // Streaming card: apply the Icecast settings AND the listeners/dead-air knobs
+  // (which live here now), restarting Icecast only when the configuration that
+  // binds it actually changed. The port drives both the internal listen port and
+  // the external (published) port in the single-container deployment; changing it
+  // requires the Docker port mapping to match too (see .env ICECAST_PORT). The
+  // public host just changes the displayed URL.
   $('icecast-apply').onclick = async () => {
     const statusEl = $('icecast-apply-status');
     const port = parseInt($('icecast-port').value, 10);
@@ -1155,6 +1217,7 @@ function wire() {
     if (!port || port < 1 || port > 65535) {
       statusEl.textContent = 'invalid port';
       statusEl.className = 'meta warn';
+      toast('Icecast port must be between 1 and 65535 — nothing was saved', 'err');
       return;
     }
     statusEl.textContent = 'saving…';
@@ -1165,6 +1228,18 @@ function wire() {
         icecast: {
           enabled: $('icecast-enabled') ? $('icecast-enabled').checked : true,
           port, public_port: port, public_host: host,
+        },
+        playback: {
+          // Presence: stop the station while nobody is listening, and start it
+          // again when somebody connects.
+          pause_without_listeners: $('pause-without-listeners').checked,
+          listener_grace_s: Math.min(3600, Math.max(0, numOr('listener-grace', 30))),
+          listener_poll_s: Math.min(300, Math.max(1, numOr('listener-poll', 5))),
+          // Dead air: a track that goes silent (an album's hidden gap, a silent
+          // tail, a file that decodes to nothing) is skipped instead of left on
+          // the air. 0 keeps it playing.
+          silence_skip_s: Math.min(600, Math.max(0, numOr('silence-skip', 10))),
+          silence_db: Math.min(-1, Math.max(-100, numOr('silence-db', -50))),
         },
       };
       const saved = await api('/api/config', {
@@ -1180,22 +1255,28 @@ function wire() {
         statusEl.textContent = 'restarting Icecast…';
         await api('/api/icecast/restart', { method: 'POST' });
         statusEl.textContent = 'restarted ✓';
+        toast(`Stream settings saved — Icecast restarted on port ${afterPort}`);
       } else {
         statusEl.textContent = 'saved ✓';
+        toast('Stream settings saved');
       }
       statusEl.className = 'meta dim';
       loadIcecastStatus();
+      await refreshConfig();
     } catch (e) {
       statusEl.textContent = `error: ${e.message}`;
       statusEl.className = 'meta warn';
+      toast(`Saving stream settings failed: ${e.message}`, 'err');
     }
   };
 
-  $('skip').onclick = () => act('Skip', () => api('/api/transport/skip', { method: 'POST' }));
+  $('skip').onclick = () => act('Skip', () => api('/api/transport/skip', { method: 'POST' }),
+    'Skipped to the next track');
   $('pauseresume').onclick = async () => {
     const paused = $('pauseresume').textContent.includes('Resume');
     await act(paused ? 'Resume' : 'Pause',
-      () => api(`/api/transport/${paused ? 'resume' : 'pause'}`, { method: 'POST' }));
+      () => api(`/api/transport/${paused ? 'resume' : 'pause'}`, { method: 'POST' }),
+      paused ? 'Playback resumed' : 'Playback paused');
   };
   $('preview').onclick = async () => {
     $('preview').disabled = true;
@@ -1206,8 +1287,14 @@ function wire() {
       if (r.audio_url) {
         const el = $('preview-audio');
         el.hidden = false; el.src = r.audio_url; el.play();
+        toast('DJ line generated — playing the preview');
+      } else {
+        toast('The DJ line was written but the voice service returned no audio '
+              + '— check the TTS status line in DJ settings', 'err');
       }
-    } catch (e) { alert(e.message); }
+    } catch (e) {
+      toast(`Preview failed: ${e.message}`, 'err');
+    }
     $('preview').disabled = false;
     $('preview').textContent = '🎙 Preview DJ line';
   };
@@ -1215,7 +1302,7 @@ function wire() {
   $('save-dir').onclick = async () => {
     const ok = await act('Save directory', () => api('/api/config', {
       method: 'PUT', body: JSON.stringify({ music_dir: $('music-dir').value.trim() }),
-    }));
+    }), 'Music folder saved');
     if (ok !== null) refreshConfig();
   };
   $('llm-load-models').onclick = () => loadLLMModels();
@@ -1237,7 +1324,12 @@ function wire() {
         retries: numOr('llm-retries', 2),
       },
     };
-    await api('/api/config', { method: 'PUT', body: JSON.stringify(patch) });
+    // Through act(): a rejected save (422 on an unknown key, a dead server) used
+    // to throw out of the handler and leave the card looking saved.
+    const ok = await act('Save LLM settings',
+      () => api('/api/config', { method: 'PUT', body: JSON.stringify(patch) }),
+      'LLM settings saved');
+    if (ok === null) return;
     await loadLLMStatus();
     loadHealth();
   };
@@ -1246,7 +1338,7 @@ function wire() {
     const ok = await act('Library scan', () => api('/api/library/scan', {
       method: 'POST',
       body: JSON.stringify({ music_dir: $('music-dir').value.trim() }),
-    }));
+    }), 'Library scan started — progress shows in the Library card');
     if (ok !== null) startScanPoll();
   };
   $('scan-full').onclick = async () => {
@@ -1261,7 +1353,7 @@ function wire() {
     const ok = await act('Full scan', () => api('/api/library/scan', {
       method: 'POST',
       body: JSON.stringify({ music_dir: $('music-dir').value.trim(), full: true }),
-    }));
+    }), 'Full rescan started — this one re-identifies every file');
     if (ok !== null) startScanPoll();
   };
   $('cache-clean').onclick = async () => {
@@ -1270,9 +1362,16 @@ function wire() {
     try {
       const r = await api('/api/cache/clean', { method: 'POST' });
       renderCacheStats(r.stats);
+      const files = Number(r.report?.removed_files) || 0;
+      const freed = Number(r.report?.removed_bytes) || 0;
+      toast(files > 0
+        ? `Cache cleaned — ${files} file${files === 1 ? '' : 's'}, `
+          + `${(freed / 1048576).toFixed(1)} MB freed`
+        : 'Cache cleaned — nothing to remove');
     } catch (e) {
       $('cache-stats').textContent = `cleanup failed: ${e.message}`;
       $('cache-stats').className = 'meta warn';
+      toast(`Cache clean failed: ${e.message}`, 'err');
     } finally {
       btn.disabled = false; btn.textContent = 'Clean now';
     }
@@ -1282,43 +1381,54 @@ function wire() {
   $('search').onkeydown = (e) => { if (e.key === 'Enter') $('do-search').click(); };
 
   $('queue-selected').onclick = async () => {
-    if (!state.selected.size) return;
-    await api('/api/queue', {
+    if (!state.selected.size) { toast('Select some tracks first', 'info'); return; }
+    const n = state.selected.size;
+    const ok = await act('Add to queue', () => api('/api/queue', {
       method: 'POST',
       body: JSON.stringify({ track_ids: [...state.selected] }),
-    });
+    }), `${n} track${n === 1 ? '' : 's'} added to the queue`);
+    if (ok === null) return;
     state.selected.clear(); loadTracks($('search').value.trim()); loadQueue();
   };
   $('play-selected').onclick = async () => {
-    if (!state.selected.size) return;
-    await api('/api/queue', {
-      method: 'POST',
-      body: JSON.stringify({ track_ids: [...state.selected], replace: true }),
-    });
-    await api('/api/transport/skip', { method: 'POST' });
+    if (!state.selected.size) { toast('Select some tracks first', 'info'); return; }
+    const n = state.selected.size;
+    const ok = await act('Play selection', async () => {
+      await api('/api/queue', {
+        method: 'POST',
+        body: JSON.stringify({ track_ids: [...state.selected], replace: true }),
+      });
+      return api('/api/transport/skip', { method: 'POST' });
+    }, `Queue replaced with your ${n} selected track${n === 1 ? '' : 's'}`);
+    if (ok === null) return;
     state.selected.clear(); loadTracks($('search').value.trim()); loadQueue();
   };
   $('clear-queue').onclick = async () => {
-    const ok = await act('Clear the queue', () => api('/api/queue/clear', { method: 'POST' }));
+    const ok = await act('Clear the queue', () => api('/api/queue/clear', { method: 'POST' }),
+      'Queue cleared — the DJ will refill it');
     if (ok !== null) loadQueue();
   };
 
   $('apply-filters').onclick = async () => {
-    const ok = await act('Apply filters', () => api('/api/config', {
-      method: 'PUT',
-      body: JSON.stringify({
-        playback: {
-          genres: [...state.activeGenres],
-          // Same contract as the genres: an empty list means "every decade".
-          decades: [...state.activeDecades].sort((a, b) => a - b),
-          shuffle: $('shuffle').checked,
-          search: $('search').value.trim(),
-          artists: parseArtistList($('filter-artists') ? $('filter-artists').value : ''),
-        },
-      }),
-    }));
+    // One action, one line of feedback: the queue rebuild is part of applying
+    // the filters, not a second thing the user asked for.
+    const ok = await act('Apply filters', async () => {
+      await api('/api/config', {
+        method: 'PUT',
+        body: JSON.stringify({
+          playback: {
+            genres: [...state.activeGenres],
+            // Same contract as the genres: an empty list means "every decade".
+            decades: [...state.activeDecades].sort((a, b) => a - b),
+            shuffle: $('shuffle').checked,
+            search: $('search').value.trim(),
+            artists: parseArtistList($('filter-artists') ? $('filter-artists').value : ''),
+          },
+        }),
+      });
+      return api('/api/queue/clear', { method: 'POST' });
+    }, 'Filters applied — the queue was rebuilt');
     if (ok === null) return;
-    await act('Rebuild the queue', () => api('/api/queue/clear', { method: 'POST' }));
     loadTracks($('search').value.trim()); loadQueue(); loadDecades();
   };
 
@@ -1346,12 +1456,16 @@ function wire() {
         if (!ok) {
           note.textContent = `✗ install failed: ${(r.failed || []).join(', ') || 'unknown reason'}`;
           note.className = 'warn';
+          toast(`Voice ${voiceId} could not be installed: `
+                + `${(r.failed || []).join(', ') || 'unknown reason'}`, 'err');
           return;
         }
         note.textContent = '✓ installed & verified';
+        toast(`Voice ${voiceId} installed — press Save DJ settings to use it`);
       } catch (e) {
         note.textContent = `✗ ${e.message}`;
         note.className = 'warn';
+        toast(`Voice ${voiceId} install failed: ${e.message}`, 'err');
         return;
       }
     }
@@ -1384,11 +1498,14 @@ function wire() {
         a.hidden = false;
         a.src = r.audio_url;
         a.play().catch(() => {});
+        toast(`Voice ${voice} speaks ${language === 'ru' ? 'Russian' : 'English'} `
+              + '— sample playing');
       } else {
-        alert('The voice service returned no audio — check the status line in this card.');
+        toast('The voice service returned no audio — check the TTS status line '
+              + 'in this card', 'err');
       }
     } catch (e) {
-      alert('Voice test failed: ' + e.message);
+      toast(`Voice test failed: ${e.message}`, 'err');
     } finally {
       btn.disabled = false;
       btn.textContent = '▶ Test this voice';
@@ -1420,23 +1537,15 @@ function wire() {
           // programs and in the flat shuffle, and spans refills.
           artist_gap:
             Math.min(500, Math.max(0, Number($('artist-gap').value) || 0)),
-          // Presence: stop the station when nobody is listening (web player or
-          // Icecast) and start it again when somebody connects.
-          pause_without_listeners: $('pause-without-listeners').checked,
-          listener_grace_s:
-            Math.min(3600, Math.max(0, Number($('listener-grace').value) || 0)),
-          listener_poll_s:
-            Math.min(300, Math.max(1, Number($('listener-poll').value) || 5)),
-          // Dead air: a track that goes silent (an album's hidden gap, a silent
-          // tail, a file that decodes to nothing) is skipped rather than left on
-          // the air. 0 keeps it playing.
-          silence_skip_s:
-            Math.min(600, Math.max(0, Number($('silence-skip').value) || 0)),
-          silence_db:
-            Math.min(-1, Math.max(-100, Number($('silence-db').value) || -50)),
+          // NOTE: the listeners/dead-air knobs (pause_without_listeners,
+          // listener_grace_s, listener_poll_s, silence_skip_s, silence_db) are
+          // NOT here any more — they belong to the Streaming card and are saved
+          // by its "Apply stream settings" button. Writing them from this card
+          // too would let a "Save programs" click silently revert what the
+          // user just set in Streaming.
         },
       }),
-    }));
+    }), 'Program settings saved');
     if (ok !== null) await loadPrograms();
   };
   $('program-select-all').onclick = () => {
@@ -1444,6 +1553,7 @@ function wire() {
       chip.classList.remove('off');
     }
     renderProgramSummary();
+    toast('Every theme switched back on — press Save programs to apply', 'info');
   };
   $('program-size').oninput = (e) =>
     ($('program-size-val').textContent = e.target.value);
@@ -1452,27 +1562,37 @@ function wire() {
     if (tmax < tmin) [tmin, tmax] = [tmax, tmin];
     let smin = Number($('dj-sent-min').value), smax = Number($('dj-sent-max').value);
     if (smax < smin) [smin, smax] = [smax, smin];
-    const ok = await act('Save DJ settings', () => api('/api/config', {
-      method: 'PUT',
-      body: JSON.stringify({
-        dj: {
-          enabled: $('dj-enabled').checked,
-          talk_min: tmin,
-          talk_max: tmax,
-          sent_min: smin,
-          sent_max: smax,
-          // Everything about speech comes from the card that was rendered from
-          // the engine's own declaration: the voice, the language and one value
-          // per declared parameter. The app stores them verbatim, so a new
-          // engine's parameters persist without a code change.
-          voice: $('dj-voice').value,
+    // Everything about speech comes from the card that was rendered from the
+    // engine's own declaration: the voice, the language and one value per
+    // declared parameter — stored verbatim, so a new engine's parameters persist
+    // without a code change. They are only sent when the card HAS a voice: with
+    // the TTS service down the select renders empty, and saving that empty value
+    // would wipe dj.voice and silence the station even after the service returns.
+    const voiceSel = $('dj-voice');
+    const hasVoice = !!(voiceSel && voiceSel.value);
+    const patch = {
+      dj: {
+        enabled: $('dj-enabled').checked,
+        talk_min: tmin,
+        talk_max: tmax,
+        sent_min: smin,
+        sent_max: smax,
+        style: $('dj-style').value.trim(),
+        ...(hasVoice ? {
+          voice: voiceSel.value,
           language: $('dj-language').value,
           tts_params: ttsParamValues(),
-          style: $('dj-style').value.trim(),
-        },
-        enrich: { enabled: $('enrich-enabled').checked },
-      }),
-    }));
+        } : {}),
+      },
+      enrich: { enabled: $('enrich-enabled').checked },
+    };
+    const spokeFor = hasVoice
+      ? ` — voice ${voiceSel.value}, language ${$('dj-language').value}`
+      : ' (voice kept: the TTS service is not answering)';
+    const ok = await act('Save DJ settings', () => api('/api/config', {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    }), `DJ settings saved${spokeFor}`);
     if (ok !== null) refreshConfig();
   };
   const refreshTalkLabel = () => {
@@ -1491,8 +1611,9 @@ function wire() {
   // (Synthesis controls carry their own listeners: see renderTtsParams.)
   $('save-preset').onclick = async () => {
     const name = $('preset-name').value.trim();
-    if (!name) return;
-    const ok = await act('Save preset', () => api('/api/presets', { method: 'POST', body: JSON.stringify({ name }) }));
+    if (!name) { toast('Give the preset a name first', 'info'); return; }
+    const ok = await act('Save preset', () => api('/api/presets', { method: 'POST', body: JSON.stringify({ name }) }),
+      `Preset “${name}” saved`);
     if (ok === null) return;
     $('preset-name').value = ''; loadPresets();
   };
@@ -1512,20 +1633,9 @@ function wire() {
       const v = Number(s);
       return Number.isFinite(v) ? v : fallback;
     };
-    await api('/api/config', {
-      method: 'PUT',
-      body: JSON.stringify({
-        loudness: {
-          enabled: $('loudness-enabled').checked,
-          target_lufs: num('loudness-target', -16),
-          true_peak_ceiling: num('loudness-tp', -1.5),
-          max_boost_db: num('loudness-boost', 6),
-          min_gain_db: num('loudness-min', -12),
-          window_seconds: Math.round(num('loudness-window', 120)),
-          workers: Math.round(num('loudness-workers', 2)),
-        },
-      }),
-    });
+    // ONE PUT: this handler used to fire the identical request twice (once
+    // unguarded, once through act()), so every save wrote the config twice and a
+    // failure in the first could never be reported.
     const ok = await act('Save volume settings', () => api('/api/config', {
       method: 'PUT',
       body: JSON.stringify({
@@ -1539,17 +1649,19 @@ function wire() {
           workers: Math.round(num('loudness-workers', 2)),
         },
       }),
-    }));
+    }), 'Volume settings saved');
     if (ok === null) return;
     await refreshConfig();
     startLoudnessPoll();
   };
   $('loudness-analyze').onclick = async () => {
-    const ok = await act('Start measuring', () => api('/api/loudness/analyze', { method: 'POST', body: '{}' }));
+    const ok = await act('Start measuring', () => api('/api/loudness/analyze', { method: 'POST', body: '{}' }),
+      'Measuring missing tracks — progress shows below');
     if (ok !== null) startLoudnessPoll();
   };
   $('loudness-stop').onclick = async () => {
-    const ok = await act('Stop measuring', () => api('/api/loudness/stop', { method: 'POST', body: '{}' }));
+    const ok = await act('Stop measuring', () => api('/api/loudness/stop', { method: 'POST', body: '{}' }),
+      'Measuring paused — resumes where it stopped');
     if (ok !== null) startLoudnessPoll();
   };
   $('loudness-reset').onclick = async () => {
@@ -1562,7 +1674,8 @@ function wire() {
                  + 'to refresh stale results. New/unmeasured tracks are covered by '
                  + '"Measure missing" instead. Playback continues normally while '
                  + 'this runs.')) return;
-    const ok = await act('Reset measurements', () => api('/api/loudness/reset', { method: 'POST', body: '{}' }));
+    const ok = await act('Reset measurements', () => api('/api/loudness/reset', { method: 'POST', body: '{}' }),
+      `All ${n} measurements discarded — re-measuring the library`);
     if (ok !== null) startLoudnessPoll();
   };
 }
